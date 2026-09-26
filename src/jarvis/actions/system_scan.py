@@ -18,6 +18,7 @@ yuzden kullanicinin acik istegiyle onay adimi olmadan calisir.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -149,9 +150,12 @@ def _pip_install(spec: str) -> dict:
 
 
 def system_scan_and_repair(parameters: dict | None = None, player=None) -> str:
-    """Projeyi tarar: import hatalari + bagimlilik uyumu; eksikleri otomatik kurar.
+    """Projeyi tarar: import hatalari + bagimlilik uyumu.
 
-    Diger action fonksiyonlariyla tutarli olmasi icin JSON string dondurur.
+    Paket kurulumları varsayılan olarak yalnızca raporlanır. Gerçek kurulum,
+    kullanıcının açıkça ``JARVIS_ALLOW_DEP_INSTALL=1`` ayarlamasıyla yapılır;
+    böylece bir tarama/LLM çağrısı tek başına makineye paket yükleyemez.
+    Diğer action fonksiyonlarıyla tutarlı olması için JSON string döndürür.
     """
     modules = _iter_python_modules()
     import_errors: list[dict] = []
@@ -168,15 +172,27 @@ def system_scan_and_repair(parameters: dict | None = None, player=None) -> str:
 
     fixes_applied: list[dict] = []
     fixes_failed: list[dict] = []
-    for issue in dependency_issues:
-        outcome = _pip_install(issue["spec"])
-        (fixes_applied if outcome["ok"] else fixes_failed).append(outcome)
+    install_allowed = os.environ.get("JARVIS_ALLOW_DEP_INSTALL", "").strip() == "1"
+    if install_allowed:
+        for issue in dependency_issues:
+            outcome = _pip_install(issue["spec"])
+            (fixes_applied if outcome["ok"] else fixes_failed).append(outcome)
+    elif dependency_issues:
+        fixes_failed = [
+            {
+                "spec": issue["spec"],
+                "ok": False,
+                "error": "Kurulum engellendi: açık onay için JARVIS_ALLOW_DEP_INSTALL=1 ayarlayın.",
+            }
+            for issue in dependency_issues
+        ]
 
     summary = {
         "ok": not import_errors and not fixes_failed,
         "taranan_modul_sayisi": len(modules),
         "import_hatalari": import_errors,
         "bagimlilik_sorunlari": dependency_issues,
+        "kurulum_izni": install_allowed,
         "otomatik_kurulan": fixes_applied,
         "kurulum_basarisiz": fixes_failed,
     }

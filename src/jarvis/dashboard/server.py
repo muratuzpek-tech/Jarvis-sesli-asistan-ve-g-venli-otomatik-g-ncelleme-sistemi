@@ -89,9 +89,7 @@ def _decrypt_cbc(aes_key: bytes, enc_b64: str) -> str:
     return (unpadder.update(padded) + unpadder.finalize()).decode('utf-8')
 
 
-# ── CryptoJS (auto-download once, served locally) ─────────────────────────────
-_CRYPTOJS_CDN  = ("https://cdnjs.cloudflare.com/ajax/libs/"
-                  "crypto-js/4.2.0/crypto-js.min.js")
+# ── CryptoJS (served locally only) ────────────────────────────────────────────
 _CRYPTOJS_FILE = STATIC_DIR / "crypto-js.min.js"
 
 
@@ -318,17 +316,13 @@ def _ensure_network_access(port: int) -> None:
         pass  # no iptables means firewall is probably off — nothing to do
 
 
-def _ensure_crypto_js() -> None:
-    if _CRYPTOJS_FILE.exists():
-        return
-    try:
-        import urllib.request
-        print("[Dashboard] Downloading CryptoJS (one-time setup)…")
-        urllib.request.urlretrieve(_CRYPTOJS_CDN, str(_CRYPTOJS_FILE))
-        print("[Dashboard] CryptoJS cached — will serve locally from now on.")
-    except Exception as e:
-        print(f"[Dashboard] CryptoJS download failed: {e}")
-        print("[Dashboard] Encryption will fall back to CDN load on client.")
+def _ensure_crypto_js() -> bool:
+    """Report whether the packaged CryptoJS asset is available.
+
+    This intentionally never downloads code at runtime. The dashboard must be
+    reproducible and usable without trusting a mutable third-party CDN.
+    """
+    return _CRYPTOJS_FILE.is_file()
 
 
 # CryptoJS is already packaged.  Do not download from the network while
@@ -498,14 +492,18 @@ class DashboardServer:
                 return False
             return self._valid_token(auth[7:].strip())
 
-        # serve CryptoJS from local cache, fallback to CDN redirect
+# Serve CryptoJS only from the packaged/local cache.  Redirecting a dashboard
+# client to a third-party CDN would make the security-sensitive login page
+# depend on mutable external JavaScript and fail on offline/LAN-only systems.
         @app.get("/static/crypto.js")
         async def serve_crypto():
             if _CRYPTOJS_FILE.exists():
                 return FileResponse(str(_CRYPTOJS_FILE),
                                     media_type="application/javascript")
-            from fastapi.responses import RedirectResponse
-            return RedirectResponse(_CRYPTOJS_CDN)
+            return JSONResponse(
+                {"error": "CryptoJS asset is not installed on this JARVIS build."},
+                status_code=503,
+            )
 
         @app.get("/login", response_class=HTMLResponse)
         async def login_page():
