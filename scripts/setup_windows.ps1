@@ -41,7 +41,7 @@ if ($LASTEXITCODE -ne 0) { throw "Kurulum dogrulamasi basarisiz oldu." }
 
 # Premium desktop shortcut. pythonw avoids opening an extra console window;
 # the shortcut always points to this extracted folder's own virtualenv.
-$icon = Join-Path $Root "src\jarvis\assets\jarvis_icon_3d.ico"
+$icon = Join-Path $Root "assets\jarvis.ico"
 $pythonw = Join-Path $Root ".venv\Scripts\pythonw.exe"
 $desktop = [Environment]::GetFolderPath("Desktop")
 if ((Test-Path $icon) -and (Test-Path $pythonw) -and $desktop) {
