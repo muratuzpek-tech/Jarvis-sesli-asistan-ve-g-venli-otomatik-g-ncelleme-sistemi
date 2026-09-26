@@ -38,6 +38,7 @@ KULLANICIYLA BİRLİKTE KARARLAŞTIRILAN TASARIM SINIRLARI:
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -511,10 +512,15 @@ def _notify_integration_result(result_msg: str) -> None:
 
 def _run_discovery_scan(tasks: list[dict]) -> bool:
     """Scan Downloads and turn each accepted candidate into an approval task.
-
     Discovery is intentionally read/analyze-only.  Integration writes executable
     code and therefore must remain behind the normal explicit approval path.
     """
+    # Downloads may contain large, partially-downloaded folders or archives.
+    # discovery.py recursively sizes and quarantines candidates, so running it
+    # automatically can saturate disk I/O and RAM while a download is active.
+    # Keep this feature opt-in; enable it deliberately with JARVIS_AUTO_DISCOVERY=1.
+    if os.getenv("JARVIS_AUTO_DISCOVERY", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
     try:
         from jarvis.actions.discovery import scan_downloads_once
     except Exception as e:
