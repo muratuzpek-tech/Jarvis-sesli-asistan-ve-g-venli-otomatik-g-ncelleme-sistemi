@@ -43,3 +43,4 @@ src/jarvis_yedekler/
 src/jarvis/self_improvement/sandbox/logs/*
 !src/jarvis/self_improvement/sandbox/logs/.gitkeep
 venv/
+.aider*
