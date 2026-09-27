@@ -77,9 +77,16 @@ def _update_job(job_id: str, **fields: Any) -> None:
             conn = _connect()
             try:
                 with conn:
-                    set_clause = ", ".join(f"{k} = ?" for k in valid_fields)
+                    column_sql = {
+                        "description": '"description" = ?',
+                        "status": '"status" = ?',
+                        "result": '"result" = ?',
+                        "started_at": '"started_at" = ?',
+                        "finished_at": '"finished_at" = ?',
+                    }
+                    set_clause = ", ".join(column_sql[k] for k in valid_fields)
                     params = list(valid_fields.values()) + [job_id]
-                    conn.execute(f"UPDATE jobs SET {set_clause} WHERE id = ?", params)
+                    conn.execute("UPDATE jobs SET " + set_clause + " WHERE id = ?", params)  # nosec B608: columns come only from column_sql allowlist.
             finally:
                 conn.close()
         except sqlite3.Error as exc:

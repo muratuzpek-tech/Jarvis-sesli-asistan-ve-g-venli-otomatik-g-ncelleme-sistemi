@@ -455,11 +455,13 @@ def _check_output_contents(project_dir: Path, expected_outputs: list) -> list[st
                         tables = conn.execute(
                             "SELECT name FROM sqlite_master WHERE type='table'"
                         ).fetchall()
-                        row_count = sum(
-                            conn.execute(f'SELECT COUNT(*) FROM "{name[0]}"').fetchone()[0]
-                            for name in tables
-                            if name[0] != "sqlite_sequence"
-                        )
+                        row_count = 0
+                        for (table_name,) in tables:
+                            if table_name == "sqlite_sequence" or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table_name):
+                                continue
+                            row_count += conn.execute(
+                                f'SELECT COUNT(*) FROM "{table_name}"'  # nosec B608: table_name is restricted by the identifier regex above.
+                            ).fetchone()[0]
                         if row_count == 0:
                             problems.append(f"'{rel_path}' is valid but contains no data rows.")
             except (OSError, sqlite3.Error) as exc:

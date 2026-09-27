@@ -95,7 +95,7 @@ def _download_update(url: str, expected_origin: str, limit: int = UPDATE_MAX_BYT
     if parsed.scheme != "https" or origin != expected_origin.lower():
         raise ValueError("Güncelleme yalnızca yapılandırılmış HTTPS kaynağından alınabilir.")
     request = urllib.request.Request(url, headers={"User-Agent": "Jarvis-Signed-Updater/1.0"})
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with urllib.request.urlopen(request, timeout=15) as response:  # nosec B310: HTTPS URL and exact configured origin are validated above.
         size = response.headers.get("Content-Length")
         if size and int(size) > limit:
             raise ValueError("Güncelleme boyut sınırını aşıyor.")
