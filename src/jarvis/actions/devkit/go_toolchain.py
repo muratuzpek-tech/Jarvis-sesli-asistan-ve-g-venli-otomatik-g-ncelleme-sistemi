@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,7 +24,14 @@ from jarvis.actions.devkit.toolchain import (
 
 GO_ENV = {"GOTOOLCHAIN": "local", "GOFLAGS": "-mod=mod"}
 WORK_DIR = ".jarvis"            # ikili + yedekler; go araçları yok sayar
-BINARY_NAME = "app"
+
+
+def binary_name(platform: str | None = None) -> str:
+    """Windows'ta calistirilabilir dosya .exe ile bitmeli."""
+    return "app.exe" if (platform or sys.platform) == "win32" else "app"
+
+
+BINARY_NAME = binary_name()
 
 _MODULE_RE = re.compile(r"^[a-z0-9][a-z0-9._\-]*(/[a-z0-9][a-z0-9._\-]*)*$")
 

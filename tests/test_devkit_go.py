@@ -277,3 +277,9 @@ def test_dev_agent_routes_go_to_devkit(tmp_path, monkeypatch):
     result = da.dev_agent({"description": "rapor yaz", "language": "Go", "confirm_code": code})
     assert "çalışıyor" in result, result
     assert (tmp_path / "ram_report" / "report.log").is_file()
+
+
+def test_binary_name_has_exe_on_windows():
+    from jarvis.actions.devkit.go_toolchain import binary_name
+    assert binary_name("win32") == "app.exe"
+    assert binary_name("linux") == "app"
