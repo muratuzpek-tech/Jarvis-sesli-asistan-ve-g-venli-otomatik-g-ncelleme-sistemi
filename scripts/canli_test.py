@@ -12,10 +12,14 @@ Kullanım:
     .venv/bin/python scripts/canli_test.py --liste    # görevleri göster
     .venv/bin/python scripts/canli_test.py --surpriz 3   # + havuzdan 3 rastgele sürpriz görev
     .venv/bin/python scripts/canli_test.py --surpriz 0   # sürpriz görev yok
+    .venv/bin/python scripts/canli_test.py --karmasik    # + 4 karmaşık (çok adımlı) görev
+    .venv/bin/python scripts/canli_test.py --sec 201,203 --surpriz 0   # yalnız seçilen karmaşık görevler
 
 Sabit görevler ilerlemeyi ölçer (puan bunlardan hesaplanır). Sürpriz görevler
 (scripts/canli_test_surpriz.py) JARVIS'in HİÇ GÖRMEDİĞİ işlerde de başarılı olup
 olmadığını ayrı bir puanla gösterir — "teste göre ders çalışma" riskine karşı.
+Karmaşık görevler (scripts/canli_test_karmasik.py) birden çok parçayı (web +
+veritabanı + rapor, CSV temizliği + JSON + zip...) BİRLEŞTİRME becerisini ölçer.
 
 Not: Sesli arayüzü değil, kod yazma motorunu (dev_agent) ölçer. Her görev
 birkaç dakika sürebilir; toplam 15-45 dk beklenebilir.
@@ -209,11 +213,13 @@ def main() -> int:
     ap.add_argument("--sec", help="virgülle görev numaraları, ör. 1,3")
     ap.add_argument("--liste", action="store_true")
     ap.add_argument("--surpriz", type=int, default=2, help="havuzdan rastgele sürpriz görev sayısı (varsayılan 2)")
+    ap.add_argument("--karmasik", action="store_true", help="4 karmaşık (çok adımlı) görevi de çalıştır")
     a = ap.parse_args()
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from canli_test_karmasik import KARMASIK
     from canli_test_surpriz import SURPRIZ
     if a.liste:
-        for g in GOREVLER + SURPRIZ:
+        for g in GOREVLER + SURPRIZ + KARMASIK:
             print(f"{g['no']}. {g['ad']} ({g['dil']}): {g['tarif'][:110]}…")
         return 0
     secili = {int(x) for x in a.sec.split(",")} if a.sec else {g["no"] for g in GOREVLER}
@@ -223,6 +229,7 @@ def main() -> int:
         surprizler = random.sample(SURPRIZ, min(a.surpriz, len(SURPRIZ)))
     elif a.sec:
         surprizler = [g for g in SURPRIZ if g["no"] in secili]
+    karmasiklar = [g for g in KARMASIK if g["no"] in secili or (a.karmasik and not a.sec)]
 
     taban = Path(da.PROJECTS_DIR)
     taban.mkdir(parents=True, exist_ok=True)
@@ -241,11 +248,15 @@ def main() -> int:
     s_sonuclar = [calistir(g, kok) for g in surprizler]
     s_gecen = sum(s["durum"] == "GEÇTİ" for s in s_sonuclar)
     s_sayilan = sum(s["durum"] not in ("ATLANDI", "ALTYAPI HATASI") for s in s_sonuclar)
+    k_sonuclar = [calistir(g, kok) for g in karmasiklar]
+    k_gecen = sum(s["durum"] == "GEÇTİ" for s in k_sonuclar)
+    k_sayilan = sum(s["durum"] not in ("ATLANDI", "ALTYAPI HATASI") for s in k_sonuclar)
 
     gecen = sum(s["durum"] == "GEÇTİ" for s in sonuclar)
     sayilan = sum(s["durum"] not in ("ATLANDI", "ALTYAPI HATASI") for s in sonuclar)
     kayit = {"zaman": damga, "surum": _git_surum(), "gecen": gecen, "toplam": sayilan, "sonuclar": sonuclar,
-             "surpriz": {"gecen": s_gecen, "toplam": s_sayilan, "sonuclar": s_sonuclar}}
+             "surpriz": {"gecen": s_gecen, "toplam": s_sayilan, "sonuclar": s_sonuclar},
+             "karmasik": {"gecen": k_gecen, "toplam": k_sayilan, "sonuclar": k_sonuclar}}
     onceki = None
     if GECMIS.exists():
         satirlar = [s for s in GECMIS.read_text(encoding="utf-8").splitlines() if s.strip()]
@@ -276,12 +287,18 @@ def main() -> int:
             ek = f" — {s['neden'][:140]}" if s["durum"] != "GEÇTİ" else ""
             print(f"  {s['no']}. {s['ad']:<20} {s['durum']:<20} {s['sure_sn']:>4} sn{ek}")
         print(f"  Sürpriz başarı: {s_gecen}/{s_sayilan}")
+    if k_sonuclar:
+        print("\n  KARMAŞIK GÖREVLER (birden çok parçayı birleştirme):")
+        for s in k_sonuclar:
+            ek = f" — {s['neden'][:140]}" if s["durum"] != "GEÇTİ" else ""
+            print(f"  {s['no']}. {s['ad']:<20} {s['durum']:<20} {s['sure_sn']:>4} sn{ek}")
+        print(f"  Karmaşık başarı: {k_gecen}/{k_sayilan}")
     if onceki:
         print(f"  Önceki çalıştırma ({onceki['zaman']}, sürüm {onceki['surum']}): {onceki['gecen']}/{onceki['toplam']}")
-    if any(s["durum"] == "YALANCI BAŞARI" for s in sonuclar + s_sonuclar):
+    if any(s["durum"] == "YALANCI BAŞARI" for s in sonuclar + s_sonuclar + k_sonuclar):
         print("  ⚠️  YALANCI BAŞARI var: JARVIS 'çalışıyor' dedi ama çıktı yanlış — öncelikli hata!")
     print(f"\n  Projeler ve SONUC.json: {kok}\n  Geçmiş: {GECMIS}")
-    return 0 if gecen == sayilan and s_gecen == s_sayilan else 1
+    return 0 if gecen == sayilan and s_gecen == s_sayilan and k_gecen == k_sayilan else 1
 
 
 if __name__ == "__main__":

@@ -140,9 +140,9 @@ def test_templates_do_not_contain_test_answers():
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent / "scripts"
-    tasks = (root / "canli_test.py").read_text(encoding="utf-8") + (root / "canli_test_surpriz.py").read_text(
-        encoding="utf-8")
-    forbidden = set(re.findall(r"\b[\w-]+\.(?:json|csv|txt|log|html|md)\b", tasks))
+    tasks = "\n".join((root / f).read_text(encoding="utf-8")
+                      for f in ("canli_test.py", "canli_test_surpriz.py", "canli_test_karmasik.py"))
+    forbidden = set(re.findall(r"\b[\w-]+\.(?:json|csv|txt|log|html|md|db|png|zip)\b", tasks))
     forbidden |= {"div.quote", "span.text", "small.author", "birim_fiyat", "urun", "musteri_id", "quotes.toscrape",
                   "books.toscrape", "product_pod", "price_color"}
     forbidden -= {"main.py"}
