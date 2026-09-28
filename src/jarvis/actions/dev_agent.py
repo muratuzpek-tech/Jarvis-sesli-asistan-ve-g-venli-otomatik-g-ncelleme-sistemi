@@ -46,7 +46,10 @@ def _get_model(model_name: str):
     import requests as _requests
 
     OLLAMA_URL = "http://localhost:11434/api/generate"
-    OLLAMA_MODEL = "qwen2.5-coder:7b"
+    # DUZELTME (2026-09-28): 7b model iki canli testte ici bos/yer tutucu kod
+    # birakti (todo_app, CodeReviewProgram). Varsayilan 14b; kurulu degilse
+    # 7b'ye duser. JARVIS_DEVAGENT_MODEL ile degistirilebilir.
+    OLLAMA_MODEL = os.environ.get("JARVIS_DEVAGENT_MODEL", "").strip() or "qwen2.5-coder:14b"
 
     class _OllamaResponse:
         def __init__(self, text):
@@ -58,16 +61,25 @@ def _get_model(model_name: str):
             resp = _requests.post(
                 OLLAMA_URL,
                 json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-                timeout=120,
+                timeout=300,  # 14b model çok dosyalı istemlerde 120 sn'yi aşabiliyor
             )
             resp.raise_for_status()
             data = resp.json()
             return _OllamaResponse(data.get("response", ""))
 
     # Ollama gercekten calisiyor mu, hizli bir saglik kontrolu (1sn)
+    # JARVIS_DEVAGENT_PREFER=gemini: yerel model yerine doğrudan Gemini (daha güçlü,
+    # ama kota tüketir). Varsayılan: önce yerel Ollama.
+    prefer_gemini = os.environ.get("JARVIS_DEVAGENT_PREFER", "").strip().lower() == "gemini"
     try:
-        _requests.get("http://localhost:11434/api/version", timeout=5)
-        print("[DevAgent] Yerel Ollama kullaniliyor (Gemini'ye bagimli degil).")
+        if prefer_gemini:
+            raise RuntimeError("Gemini tercih edildi")
+        tags = _requests.get("http://localhost:11434/api/tags", timeout=5).json()
+        installed = {m.get("name", "") for m in tags.get("models", [])}
+        if OLLAMA_MODEL not in installed and "qwen2.5-coder:7b" in installed and not os.environ.get("JARVIS_DEVAGENT_MODEL"):
+            print(f"[DevAgent] ⚠️ {OLLAMA_MODEL} kurulu değil, qwen2.5-coder:7b kullanılıyor.")
+            OLLAMA_MODEL = "qwen2.5-coder:7b"
+        print(f"[DevAgent] Yerel Ollama kullaniliyor: {OLLAMA_MODEL} (Gemini'ye bagimli degil).")
         return _OllamaWrapper()
     except Exception:
         pass
@@ -121,6 +133,33 @@ def _strip_fences(text: str) -> str:
     text = re.sub(r"^```[a-zA-Z]*\r?\n?", "", text)
     text = re.sub(r"\r?\n?```\s*$", "", text)
     return text.strip()
+
+
+def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
+    """Kabul testi spesifikasyonu ister; her hatada None (build engellenmez)."""
+    try:
+        from jarvis.actions.devkit.acceptance import build_prompt, parse_spec, validate_spec
+        response = _get_model(MODEL_PLANNER).generate_content(build_prompt(description, plan))
+        spec, reason = validate_spec(parse_spec(response.text))
+    except Exception as e:  # noqa: BLE001
+        log(f"ℹ️ Kabul testi hazırlanamadı ({type(e).__name__}); yalnızca kalite kapısı kullanılacak.")
+        return None
+    if spec is None:
+        log(f"ℹ️ Kabul testi uygulanmayacak: {reason}")
+        return None
+    tokens = sum(len(e["contains"]) for e in spec["expect"])
+    log(f"🧪 Kabul testi hazır: {len(spec['fixtures'])} örnek dosya, {tokens} beklenen ifade.")
+    return spec
+
+
+def _python_quality_issues(file_codes: dict[str, str]) -> dict[str, list[dict]]:
+    """Modelden bagimsiz kalite bulgulari; hata olursa build'i asla engellemez."""
+    try:
+        from jarvis.actions.devkit.python_quality import analyze_sources
+        return analyze_sources(file_codes)
+    except Exception as e:  # noqa: BLE001
+        print(f"[DevAgent] ⚠️ Kalite kapısı çalıştırılamadı: {e}")
+        return {}
 
 
 def _devkit_generate(prompt: str) -> str:
@@ -771,6 +810,8 @@ Purpose of this file: {file_desc}
 General rules:
 - Output ONLY raw code. Absolutely no explanation, no markdown, no triple backticks.
 - Write COMPLETE, RUNNABLE code — no placeholders, no "# TODO", no "pass" stubs.
+- NEVER leave a function whose body is only a docstring plus pass / return None / return [] / return {{}} — every function must do its real job. An automated checker rejects such stubs and the project will NOT be accepted.
+- Exactly ONE `if __name__ == "__main__":` block per file, at the very END of the file, after all definitions.
 - Every import must either be from the standard library, listed dependencies, or the project files shown above.
 - Match import paths EXACTLY to the file paths in the project structure (e.g. if file is "utils/helpers.py", import as "from utils.helpers import ...").
 - Use proper error handling (try/except) where I/O or network calls are made.
@@ -2515,6 +2556,8 @@ Rules:
 - NEVER import a package named "jarvis" or anything resembling it — this is a standalone project with no relationship to any AI assistant framework, and no such package exists here.
 - NEVER call a blocking modal dialog function (messagebox.showinfo/showerror/askyesno/etc., simpledialog.ask...) from the automatic startup path — it opens a real window and blocks forever waiting for a human click that will never come during automated verification. Print/log instead.
 - EVERY network call (requests.get/post/etc., a Session's own get/post, urllib, httpx...) MUST have an explicit timeout= — a call with none can hang the whole program forever on one slow server with no Python error at all.
+- NEVER leave stub functions (only docstring + pass / return [] / return None) — implement the real logic. Exactly ONE `if __name__ == "__main__":` block, at the end of the file.
+- Inside `with open(...) as NAME:` never reuse NAME as a loop/assignment variable.
 
 Fixed code for {fix_path}:"""
 
@@ -2531,7 +2574,12 @@ Fixed code for {fix_path}:"""
             if full_path.exists():
                 from datetime import datetime as _dt
                 stamp  = _dt.now().strftime("%Y%m%d-%H%M%S")
-                backup = full_path.with_name(f"{full_path.stem}.{stamp}.bak{full_path.suffix}")
+                # DUZELTME (2026-09-28): yedekler eskiden kaynak dosyanin YANINA
+                # (main.<tarih>.bak.py) yaziliyordu; proje kokunu dolduruyordu.
+                # Artik gizli .jarvis/backups/ klasorunde tutuluyor.
+                backup_dir = project_dir / ".jarvis" / "backups"
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup = backup_dir / f"{fix_path.replace('/', '__')}.{stamp}.bak"
                 # F-10: yedek BYTE duzeyinde (birebir kopya) - encoding
                 # round-trip'i yedegin ORIJINALLE ayni olmasini bozabiliyordu.
                 backup.write_bytes(full_path.read_bytes())
@@ -2596,6 +2644,18 @@ def _build_project(
     proj_name    = project_name or plan.get("project_name", "jarvis_project")
     proj_name    = re.sub(r"[^\w\-]", "_", proj_name)
     project_dir  = PROJECTS_DIR / proj_name
+    # DUZELTME (2026-09-28): ayni adla yeni proje kurulurken eski denemenin
+    # dosyalari (eski main.py, utils/...) klasorde kalip yenileriyle karisiyordu.
+    # Eski klasor SILINMEZ, PROJECTS_DIR/.arsiv altina tasinir.
+    if project_dir.is_dir() and any(project_dir.iterdir()):
+        archive_root = PROJECTS_DIR / ".arsiv"
+        archive_root.mkdir(parents=True, exist_ok=True)
+        archived = archive_root / f"{proj_name}-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            shutil.move(str(project_dir), str(archived))
+            log(f"📦 Aynı adlı önceki proje arşivlendi: {archived}")
+        except OSError as exc:
+            log(f"⚠️ Önceki proje arşivlenemedi ({exc}); dosyalar karışabilir.")
     project_dir.mkdir(parents=True, exist_ok=True)
 
     files        = plan.get("files", [])
@@ -2610,6 +2670,15 @@ def _build_project(
         for o in expected_outputs if o
     )
     gui_task = bool(re.search(r"\b(?:tkinter|tk\.)\b", description, re.IGNORECASE))
+
+    # KABUL TESTI (2026-09-28): program, cevabi onceden bilinen kucuk bir
+    # ornek uzerinde de calistirilip "istenen isi DOGRU yapiyor mu" diye
+    # sinanir - bkz. jarvis/actions/devkit/acceptance.py. Spesifikasyon
+    # uretilemezse/gecersizse test ATLANIR, build engellenmez.
+    acceptance_spec = None if gui_task else _plan_acceptance(description, plan, log)
+    if acceptance_spec:
+        from jarvis.actions.devkit.acceptance import contract_text
+        shared_contracts_text = (shared_contracts_text + "\n- " + contract_text(acceptance_spec)).strip()
 
     # Aynı proje adıyla yapılan tekrar denemelerde eski database.db/report
     # dosyası yeni çalışmanın sonucu gibi görünmemeli. Yalnızca planner'ın
@@ -2724,6 +2793,11 @@ def _build_project(
     # DEGIL) ilk calistirma denemesi hic harcanmadan yakalanmasini saglar.
     circular_import_issues = _detect_circular_imports(file_codes) or {}
     for _fp, _issues in circular_import_issues.items():
+        lint_issues.setdefault(_fp, []).extend(_issues)
+
+    # Kalite kapısı (2026-09-28): içi boş fonksiyon, çift __main__, with-hedefi
+    # ezme - bkz. jarvis/actions/devkit/python_quality.py.
+    for _fp, _issues in _python_quality_issues(file_codes).items():
         lint_issues.setdefault(_fp, []).extend(_issues)
 
     if lint_issues:
@@ -2923,6 +2997,94 @@ def _build_project(
             )
 
         if not has_crash_error and not output_problems:
+            # KALITE KAPISI (2026-09-28): "cokmedi + cikti dosyasi var" artik
+            # YETMIYOR. Ici bos fonksiyon / cift __main__ / yalnizca basliktan
+            # olusan rapor varsa proje BASARILI SAYILMAZ; duzeltme turuna girer.
+            quality = _python_quality_issues(file_codes)
+            from jarvis.actions.devkit.python_quality import header_only_outputs
+            header_problems = header_only_outputs(project_dir, expected_outputs)
+            if header_problems:
+                quality.setdefault(entry_point, []).extend(
+                    {"code": "OUTPUT-HEADER-ONLY", "message": p, "line": 0, "col": 0} for p in header_problems
+                )
+            if quality:
+                summary = "; ".join(
+                    f"{fp}: " + ", ".join(i["code"] for i in iss) for fp, iss in quality.items()
+                )
+                log(f"❌ Kalite kapısı geçilemedi ({summary}) — başarılı sayılmadı, düzeltiliyor...")
+                last_output = f"QUALITY GATE FAILED: {summary}\n\nProgram output:\n{last_output}"
+                if attempt == MAX_FIX_ATTEMPTS:
+                    break
+                try:
+                    fixed = _fix_files(
+                        error_output=(
+                            "The program ran without crashing, but an automated quality gate found that it "
+                            "does NOT really do its job (see per-file findings). Fix every finding."
+                        ),
+                        project_description=description,
+                        all_files=files,
+                        file_codes=file_codes,
+                        language=language,
+                        project_dir=project_dir,
+                        entry_point=entry_point,
+                        shared_contracts=shared_contracts_text,
+                        expected_outputs=expected_outputs_text,
+                        known_error_type="lint_error",
+                        lint_issues=quality,
+                        repeat_of_previous=(previous_fix_error_output == summary),
+                    )
+                    file_codes.update(fixed)
+                    previous_fix_error_output = summary
+                except RateLimitError:
+                    msg = "Rate limit reached during quality fix. Project saved, check it manually in VSCode."
+                    if speak: speak(msg)
+                    return msg
+                time.sleep(1)
+                continue
+            if acceptance_spec and not is_timeout:
+                from jarvis.actions.devkit.acceptance import describe_fixtures, run_acceptance
+                acc_problems, acc_output = run_acceptance(
+                    project_dir, entry_point, acceptance_spec, timeout=max(30, timeout * 2)
+                )
+                if acc_problems:
+                    log(f"❌ Kabul testi geçilemedi: {acc_problems[0][:200]}")
+                    last_output = "ACCEPTANCE TEST FAILED:\n" + "\n".join(acc_problems) + f"\n\nProgram output:\n{acc_output}"
+                    if attempt == MAX_FIX_ATTEMPTS:
+                        break
+                    acc_issue = {
+                        "code": "ACCEPTANCE-FAILED",
+                        "message": (
+                            "The program was run on this KNOWN sample input and gave a WRONG result. "
+                            f"Command: python {entry_point} {' '.join(acceptance_spec['args'])} "
+                            f"(<FIXTURE> = sample folder below). Problems: {' | '.join(acc_problems)[:1500]}\n"
+                            f"Sample input files:\n{describe_fixtures(acceptance_spec, 2000)}"
+                        ),
+                        "line": 0, "col": 0,
+                    }
+                    try:
+                        fixed = _fix_files(
+                            error_output=last_output[:2500],
+                            project_description=description,
+                            all_files=files,
+                            file_codes=file_codes,
+                            language=language,
+                            project_dir=project_dir,
+                            entry_point=entry_point,
+                            shared_contracts=shared_contracts_text,
+                            expected_outputs=expected_outputs_text,
+                            known_error_type="lint_error",
+                            lint_issues={fp: [acc_issue] for fp in file_codes},
+                            repeat_of_previous=(previous_fix_error_output == last_output),
+                        )
+                        file_codes.update(fixed)
+                        previous_fix_error_output = last_output
+                    except RateLimitError:
+                        msg = "Rate limit reached during acceptance fix. Project saved, check it manually in VSCode."
+                        if speak: speak(msg)
+                        return msg
+                    time.sleep(1)
+                    continue
+                log("✅ Kabul testi geçti (örnek girdide beklenen sonuçlar üretildi).")
             if is_timeout:
                 if expected_outputs:
                     verified_note = f" Beklenen çıktılar gerçekten doğrulandı ({', '.join(str(o.get('path', o)) if isinstance(o, dict) else str(o) for o in expected_outputs)})."
@@ -2938,6 +3100,8 @@ def _build_project(
                     f" Verified outputs: {', '.join(str(o.get('path', o)) if isinstance(o, dict) else str(o) for o in expected_outputs)}."
                     if expected_outputs else ""
                 )
+                if acceptance_spec:
+                    verified_note += " Acceptance test on a known sample input passed."
                 msg = (
                     f"Project '{proj_name}' is working, sir. "
                     f"Built in {attempt} attempt{'s' if attempt > 1 else ''}.{verified_note} "
