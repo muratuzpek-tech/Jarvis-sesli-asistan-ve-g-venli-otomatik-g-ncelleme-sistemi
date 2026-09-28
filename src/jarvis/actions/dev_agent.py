@@ -191,10 +191,14 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+def _is_live_scrape(description: str) -> bool:
+    from jarvis.actions.devkit.task_intake import has_url, needs_browser_or_web
+    return has_url(description) and needs_browser_or_web(description)
+
+
 def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
     """Kabul testi spesifikasyonu ister; her hatada None (build engellenmez)."""
-    from jarvis.actions.devkit.task_intake import has_url, needs_browser_or_web
-    if has_url(description) and needs_browser_or_web(description):
+    if _is_live_scrape(description):
         # Canlı test 2026-09-28: model gerçek siteye benzemeyen bir örnek sayfa
         # uydurdu; gerçek sitede DOĞRU çalışan program bu sayfada reddedildi.
         # Gerçek URL'li kazıma görevlerinde doğrulama gerçek çalıştırmanın
@@ -428,7 +432,7 @@ Critical rules:
 5. Use relative paths only (e.g. "utils/helpers.py", not absolute paths).
 6. Standard library modules (os, sys, json, etc.) do NOT go in "dependencies".
 7. CRITICAL for correctness: if two or more files exchange a data structure (a dict, a class instance, a tuple shape) — even files that never import each other, because the data actually flows through a third file like main.py — describe its EXACT shape ONCE in "shared_data_contracts" (field names, types, whether it's a dict or a specific class). Every file that touches this data MUST use the identical shape. This is the most common source of real bugs: e.g. one file builds {{"amount": ..., "category": ...}} while another expects an object with .amount/.category attributes.
-8. If running the entry point is supposed to durably create or update a file (a database, a report, an exported document, a log, a generated image, etc.), list each such file's relative path in "expected_outputs" with a one-line description of what a CORRECT result looks like inside it. Leave this list EMPTY only for purely interactive/display-only programs that persist nothing (e.g. a calculator, a GUI that only shows numbers on screen). This is critical: a program can run to completion with NO Python error while silently producing nothing real (a network call that fails silently, a thread that never runs, wrong file path) — "expected_outputs" is what lets that be caught instead of wrongly reported as a success.
+8. If running the entry point is supposed to durably create or update a file (a database, a report, an exported document, a log, a generated image, etc.), list each such file's relative path in "expected_outputs" with a one-line description of what a CORRECT result looks like inside it. If the result is a FOLDER TREE (files copied/moved/sorted into sub-folders), list that output folder's relative path (e.g. "sorted") instead of guessing individual file names. Leave this list EMPTY only for purely interactive/display-only programs that persist nothing (e.g. a calculator, a GUI that only shows numbers on screen). This is critical: a program can run to completion with NO Python error while silently producing nothing real (a network call that fails silently, a thread that never runs, wrong file path) — "expected_outputs" is what lets that be caught instead of wrongly reported as a success.
 9. This is a completely standalone, independent project with NO relationship to any AI assistant framework. NEVER plan a file path or an import under a top-level name "jarvis" (e.g. "jarvis/core/engine.py", or importing "jarvis.anything") — that name does not exist for this project and is never a real requirement, no matter what the description mentions.
 10. If the task needs content that appears only after JavaScript runs (infinite scroll, "load more" buttons, dynamic pages, "wait until the page is fully loaded"), plain HTTP clients (requests/httpx/urllib) are WRONG: use Playwright and list "playwright" in dependencies. If the task works on a web page, take the URL from the command line (sys.argv[1]) and put the real URL from the description into run_command.
 
@@ -607,6 +611,16 @@ def _check_expected_outputs(project_dir: Path, expected_outputs: list, run_start
             continue
         full_path = _safe_project_path(project_dir, rel_path)
         if full_path is None:
+            continue
+        if full_path.is_dir():
+            # Klasör çıktısı (ör. dosyaları alt klasörlere ayıran görev): bu
+            # çalıştırmada içine en az bir dosya yazılmış olmalı.
+            files = [f for f in full_path.rglob("*") if f.is_file()]
+            if not files:
+                problems.append(f"Folder '{rel_path}' was created but contains no files.")
+            # ctime de sayılır: shutil.copy2 kopyada eski mtime'ı korur.
+            elif max(max(f.stat().st_mtime, f.stat().st_ctime) for f in files) < run_started_at - 2:
+                problems.append(f"Folder '{rel_path}' exists but no file inside it was written during this run.")
             continue
         if not full_path.is_file():
             problems.append(f"'{rel_path}' was never created.")
@@ -3396,6 +3410,11 @@ def _build_project(
                 )
                 if acceptance_spec:
                     verified_note += " Acceptance test on a known sample input passed."
+                elif _is_live_scrape(description):
+                    # Dış analiz raporu (2026-09-29): gerçek site görevlerinde içerik
+                    # otomatik doğrulanamıyor; kullanıcıya bunu açıkça söyle.
+                    verified_note += (" Not: çıktı içeriği gerçek siteye karşı otomatik doğrulanamadı "
+                                      "(yalnızca dosya/biçim kontrolleri yapıldı) — ilk birkaç satıra bir göz atın.")
                 msg = (
                     f"Project '{proj_name}' is working, sir. "
                     f"Built in {attempt} attempt{'s' if attempt > 1 else ''}.{verified_note} "

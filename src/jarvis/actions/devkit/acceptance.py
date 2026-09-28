@@ -73,6 +73,8 @@ Rules: fixture paths are relative (no "..", no absolute paths), at most {max_fix
 "args" are the command-line arguments for the test run; use {{FIXTURE}} for the fixture folder,
 or {{FIXTURE_URL}} for its local http:// URL (web scrapers).
 "output" is a relative output file path from the program's working directory, or "STDOUT".
+If the program's result is a FOLDER TREE (files copied/moved/sorted into sub-folders), "output" is that
+folder (e.g. "sorted") and "contains" lists the relative file paths expected inside it (e.g. "2024-01/a.jpg").
 If not applicable return {{"applicable": false, "reason": "..."}}.
 JSON:"""
 
@@ -246,7 +248,15 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
             text, label = output, "program çıktısı (stdout)"
         else:
             path = run_dir / ex["output"]
-            if not path.is_file():
+            if path.is_dir():
+                # Klasör çıktısı (dış analiz raporu 2026-09-29: klasör ağacı üreten
+                # doğru program 'oluşturulmadı' diye reddediliyordu): içindeki
+                # dosyaların göreli yolları metin olarak karşılaştırılır.
+                text, label = _tree_text(path), f"'{ex['output']}' klasörü"
+                if not text:
+                    problems.append(f"'{ex['output']}' klasörü oluştu ama içinde hiç dosya yok.")
+                    continue
+            elif not path.is_file():
                 stray = _written_elsewhere(project_dir, ex["output"], before)
                 if stray:
                     problems.append(
@@ -258,12 +268,31 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
                 else:
                     problems.append(f"'{ex['output']}' kabul testinde oluşturulmadı (çalışma klasörüne yazılmalı).")
                 continue
-            text, label = path.read_text(encoding="utf-8", errors="replace"), f"'{ex['output']}'"
+            else:
+                text, label = path.read_text(encoding="utf-8", errors="replace"), f"'{ex['output']}'"
         low = text.lower()
         missing = [t for t in ex["contains"] if not _token_found(t, low)]
         if missing:
             problems.append(f"{label} şu beklenen ifadeleri İÇERMİYOR: {missing}. İçerik (ilk 800 karakter): {text[:800]!r}")
     return problems, output[:2000]
+
+
+def _tree_text(folder: Path, limit: int = 500) -> str:
+    """Klasördeki dosyaların göreli yolları (posix, satır satır)."""
+    rels = sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file())
+    return "\n".join(rels[:limit])
+
+
+def _stamp(p: Path) -> int | None:
+    """Dosyanın, klasörse içindeki en yeni dosyanın değişim zamanı. Klasör
+    içinde ctime da sayılır: shutil.copy2 eski mtime'ı KORUR, ama yeni kopyanın
+    ctime'ı (Windows'ta oluşturma zamanı) şimdidir."""
+    if p.is_file():
+        return p.stat().st_mtime_ns
+    if p.is_dir():
+        times = [max(st.st_mtime_ns, st.st_ctime_ns) for f in p.rglob("*") if f.is_file() for st in [f.stat()]]
+        return max(times) if times else None
+    return None
 
 
 _BARE_TAG = re.compile(r"^<([a-z][a-z0-9]*)>$", re.IGNORECASE)
@@ -293,8 +322,8 @@ def _output_snapshot(project_dir: Path, spec: dict) -> dict[Path, int]:
             continue
         for p in project_dir.rglob(PurePosixPath(ex["output"]).name):
             try:
-                if root not in p.parents and p.is_file():
-                    snap[p] = p.stat().st_mtime_ns
+                if root not in p.parents and p != root and (st := _stamp(p)) is not None:
+                    snap[p] = st
             except OSError:
                 continue
     return snap
@@ -307,9 +336,10 @@ def _written_elsewhere(project_dir: Path, output: str, before: dict[Path, int]) 
     root = project_dir / ACCEPT_DIR
     for p in project_dir.rglob(PurePosixPath(output).name):
         try:
-            if root in p.parents or not p.is_file():
+            if root in p.parents or p == root:
                 continue
-            if before.get(p) != p.stat().st_mtime_ns:
+            st = _stamp(p)
+            if st is not None and before.get(p) != st:
                 return p.relative_to(project_dir).as_posix()
         except OSError:
             continue

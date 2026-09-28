@@ -195,3 +195,52 @@ def test_fixture_mtime_is_applied(tmp_path):
     assert run_acceptance(tmp_path, "main.py", spec)[0] == []
     assert validate_spec({**spec, "applicable": True,
                           "fixtures": [{"path": "a", "content": "", "mtime": "dün"}]})[0] is None
+
+
+# Dış analiz raporu (2026-09-29): klasör ağacı üreten doğru program
+# "oluşturulmadı" diye reddediliyordu.
+TREE_SPEC = {
+    "applicable": True,
+    "fixtures": [{"path": "foto/a.jpg", "content": "x", "mtime": "2024-01-15"},
+                 {"path": "foto/c.jpg", "content": "y", "mtime": "2024-03-02"}],
+    "args": ["{FIXTURE}/foto"],
+    "expect": [{"output": "sorted", "contains": ["2024-01/a.jpg", "2024-03/c.jpg"]}],
+}
+TREE_PROGRAM = '''
+import shutil, sys, datetime
+from pathlib import Path
+for p in Path(sys.argv[1]).iterdir():
+    d = Path("{root}") / datetime.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m")
+    d.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(p, d / p.name)
+'''
+
+
+def test_folder_tree_output_is_accepted(tmp_path):
+    spec, why = validate_spec(TREE_SPEC)
+    assert spec, why
+    (tmp_path / "main.py").write_text(TREE_PROGRAM.replace("{root}", "sorted"))
+    assert run_acceptance(tmp_path, "main.py", spec)[0] == []
+
+
+def test_folder_tree_missing_file_is_rejected(tmp_path):
+    spec, _ = validate_spec(TREE_SPEC)
+    (tmp_path / "main.py").write_text(TREE_PROGRAM.replace("{root}", "sorted").replace(
+        "for p in Path(sys.argv[1]).iterdir():", "for p in sorted(Path(sys.argv[1]).iterdir())[:1]:"))
+    problems, _ = run_acceptance(tmp_path, "main.py", spec)
+    assert len(problems) == 1 and "2024-03/c.jpg" in problems[0]
+
+
+def test_empty_output_folder_is_rejected(tmp_path):
+    spec, _ = validate_spec(TREE_SPEC)
+    (tmp_path / "main.py").write_text("import os; os.makedirs('sorted')")
+    problems, _ = run_acceptance(tmp_path, "main.py", spec)
+    assert len(problems) == 1 and "hiç dosya yok" in problems[0]
+
+
+def test_folder_tree_written_next_to_script_is_detected(tmp_path):
+    """copy2 eski tarihi korusa bile (ctime) yanlış yere yazılan klasör bulunur."""
+    spec, _ = validate_spec(TREE_SPEC)
+    (tmp_path / "main.py").write_text(TREE_PROGRAM.replace('Path("{root}")', 'Path(__file__).parent / "sorted"'))
+    problems, _ = run_acceptance(tmp_path, "main.py", spec)
+    assert len(problems) == 1 and "kendi klasörüne" in problems[0]
