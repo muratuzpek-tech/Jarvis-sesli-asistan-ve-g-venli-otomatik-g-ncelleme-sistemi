@@ -220,3 +220,19 @@ def test_acceptance_failure_is_reported_honestly(env, monkeypatch):
     monkeypatch.setattr(da, "_get_model", lambda name: model)
     result = da._build_project("kelime sayici", "python", "", 10, player=None, speak=None)
     assert "is working" not in result and "ACCEPTANCE TEST FAILED" in result
+
+
+WC_SCRIPT_DIR = WC_REAL.replace(
+    'Path("report.txt").write_text', '(Path(__file__).parent / "report.txt").write_text'
+)
+
+
+def test_output_next_to_script_is_fixed_without_model(env, monkeypatch):
+    """Canlı test 2026-09-28: model Path(__file__).parent'ı 5 denemede de bırakmadı."""
+    monkeypatch.setattr(da, "_plan_project", lambda d, lang: dict(WC_PLAN))
+    model = AcceptanceModel([WC_SCRIPT_DIR])
+    monkeypatch.setattr(da, "_get_model", lambda name: model)
+    result = da._build_project("kelime sayici", "python", "", 10, player=None, speak=None)
+    assert "is working" in result, result
+    assert not [p for p in model.prompts if p.startswith("You are an expert python debugger")]
+    assert "Path.cwd()" in (env / "word_counter" / "main.py").read_text(encoding="utf-8")

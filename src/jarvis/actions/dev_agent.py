@@ -89,7 +89,7 @@ def _ollama_options() -> dict:
             return float(os.environ.get(name, "") or default)
         except ValueError:
             return default
-    return {"num_ctx": int(_num("JARVIS_OLLAMA_CTX", 16384)), "temperature": _num("JARVIS_OLLAMA_TEMP", 0.2)}
+    return {"num_ctx": int(_num("JARVIS_OLLAMA_CTX", 8192)), "temperature": _num("JARVIS_OLLAMA_TEMP", 0.2)}
 
 
 def _get_model(model_name: str):
@@ -3152,6 +3152,21 @@ def _build_project(
                 acc_problems, acc_output = run_acceptance(
                     project_dir, entry_point, acceptance_spec, timeout=max(30, timeout * 2)
                 )
+                if acc_problems and any("kendi klasörüne" in pr for pr in acc_problems):
+                    from jarvis.actions.devkit.acceptance import rewrite_script_dir_paths
+                    rewritten = rewrite_script_dir_paths(file_codes)
+                    if rewritten:
+                        backup_dir = project_dir / ".jarvis" / "backups"
+                        backup_dir.mkdir(parents=True, exist_ok=True)
+                        stamp = time.strftime("%Y%m%d-%H%M%S")
+                        for rel, code in rewritten.items():
+                            target = project_dir / rel
+                            if target.exists():
+                                (backup_dir / f"{rel.replace('/', '__')}.{stamp}.bak").write_bytes(target.read_bytes())
+                            target.write_text(code, encoding="utf-8")
+                        file_codes.update(rewritten)
+                        log(f"🔧 Çıktı yolu programın klasörü yerine çalışma klasörüne çevrildi (model yerine deterministik): {sorted(rewritten)}")
+                        continue
                 if acc_problems:
                     log(f"❌ Kabul testi geçilemedi: {acc_problems[0][:200]}")
                     last_output = "ACCEPTANCE TEST FAILED:\n" + "\n".join(acc_problems) + f"\n\nProgram output:\n{acc_output}"
