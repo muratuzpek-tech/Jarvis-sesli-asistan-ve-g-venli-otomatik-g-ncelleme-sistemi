@@ -143,3 +143,30 @@ def test_rewritten_program_passes_acceptance(tmp_path):
     (tmp_path / "main.py").write_text(rewrite_script_dir_paths({"main.py": code})["main.py"])
     spec, _ = validate_spec(SPEC)
     assert run_acceptance(tmp_path, "main.py", spec)[0] == []
+
+
+def test_file_written_just_before_acceptance_is_not_blamed(tmp_path):
+    """Gerçek çalıştırma çıktıyı proje köküne biraz önce yazdıysa, kabul testinde
+    çıktı üretilmemesi 'yanlış klasör' diye raporlanmamalı."""
+    (tmp_path / "report.txt").write_text("from the real run")
+    (tmp_path / "main.py").write_text("print('nothing written')\n")
+    spec, _ = validate_spec(SPEC)
+    problems, _ = run_acceptance(tmp_path, "main.py", spec)
+    assert problems and "kendi klasörüne" not in problems[0] and "oluşturulmadı" in problems[0]
+
+
+def test_requests_style_scraper_can_read_fixture_url(tmp_path):
+    spec, why = validate_spec({
+        "applicable": True,
+        "fixtures": [{"path": "page.html", "content": "<p class='q'>Birinci</p><p class='q'>Ikinci</p>"}],
+        "args": ["{FIXTURE_URL}/page.html"],
+        "expect": [{"output": "quotes.csv", "contains": ["Birinci", "Ikinci"]}],
+    })
+    assert spec, why
+    (tmp_path / "main.py").write_text(
+        "import re, sys, urllib.request\n"
+        "html = urllib.request.urlopen(sys.argv[1], timeout=5).read().decode()\n"
+        "open('quotes.csv', 'w').write('\\n'.join(re.findall(r\"<p class='q'>(.*?)</p>\", html)))\n"
+    )
+    problems, output = run_acceptance(tmp_path, "main.py", spec)
+    assert problems == [], (problems, output)

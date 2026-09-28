@@ -191,13 +191,13 @@ def test_acceptance_fixture_url(tmp_path):
             "expect": [{"output": "out.json", "contains": ["Birinci", "Ikinci"]}]}
     clean, why = validate_spec(spec)
     assert clean, why
-    assert "file:///<sample_folder>/page.html" in contract_text(clean)
+    assert "http://127.0.0.1:<port>/page.html" in contract_text(clean)
     assert validate_spec({**spec, "args": ["{FIXTURE_URL}/../../etc/passwd"]})[0] is None
 
     (tmp_path / "main.py").write_text(
         "import json, re, sys, urllib.parse, urllib.request\n"
         "url = sys.argv[1]\n"
-        "assert url.startswith('file://'), url\n"
+        "assert url.startswith('http://127.0.0.1:'), url\n"
         "html = urllib.request.urlopen(url).read().decode()\n"
         "json.dump(re.findall(r'<h2>(.*?)</h2>', html), open('out.json', 'w'))\n",
         encoding="utf-8",
