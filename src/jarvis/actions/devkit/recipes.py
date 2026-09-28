@@ -158,29 +158,41 @@ if __name__ == "__main__":
         json.dump(data, fh, ensure_ascii=False, indent=2)
 '''
 
-_CSV_WORDS = re.compile(r"\bcsv\b", re.I)
-_FOLDER_WORDS = re.compile(r"klasör|klasor|folder|dizin|directory|alt klasör", re.I)
-_DB_WORDS = re.compile(r"sqlite|veritaban|database|\.db\b", re.I)
-_API_WORDS = re.compile(r"\bapi\b|json endpoint|\brest\b", re.I)
+from jarvis.actions.devkit import recipes_extra as _x  # noqa: E402
+
+_W = lambda pattern: re.compile(pattern, re.IGNORECASE).search  # noqa: E731
+
+
+def _web_static(d: str) -> bool:
+    return has_url(d) and needs_browser_or_web(d) and not needs_browser(d)
+
+
+# Öncelik sırasıyla (ad, eşleştirici, kod). Görev metnine uyan ilk `limit` tanesi seçilir.
+_TABLE = [
+    ("playwright_scroll", needs_browser, PLAYWRIGHT_SCROLL),
+    ("requests_bs4", _web_static, REQUESTS_BS4),
+    ("http_parallel", _W(r"bağlantı|baglanti|\blink|durum kod|status code|url listesi"), _x.HTTP_PARALLEL),
+    ("tkinter_headless", _W(r"tkinter|\bgui\b|arayüz|arayuz|pencere|buton"), _x.TKINTER_HEADLESS),
+    ("pillow_images", _W(r"resim|görsel|gorsel|fotoğraf|fotograf|\bimage|thumbnail|\.jpe?g\b|\.png\b"), _x.PILLOW_IMAGES),
+    ("pptx_report", _W(r"sunum|slayt|\bpptx\b|powerpoint"), _x.PPTX_REPORT),
+    ("psutil_sysinfo", _W(r"\bcpu\b|\bram\b|bellek|işlemci|islemci|disk kullan|sistem bilgi"), _x.PSUTIL_SYSINFO),
+    ("zip_backup", _W(r"yedek|backup|\bzip\b|arşiv|arsiv"), _x.ZIP_BACKUP),
+    ("regex_extract", _W(r"e-?posta|\bemail|telefon|\bregex|düzenli ifade|duzenli ifade"), _x.REGEX_EXTRACT),
+    ("file_organize", _W(r"uzantı|uzanti|tarihe göre|tarihe gore|organize|sınıflandır|siniflandir|klasörlere ayır"),
+     _x.FILE_ORGANIZE),
+    ("csv_aggregate", _W(r"\bcsv\b"), CSV_AGGREGATE),
+    ("folder_walk", _W(r"klasör|klasor|folder|dizin|directory"), FOLDER_WALK),
+    ("sqlite_store", _W(r"sqlite|veritaban|database|\.db\b"), SQLITE_STORE),
+    ("json_api", _W(r"\bapi\b|json endpoint|\brest\b"), JSON_API),
+]
 
 
 def select_recipes(description: str, language: str = "python", limit: int = 2) -> list[tuple[str, str]]:
     """(ad, kod) listesi: göreve uyan en fazla `limit` özel şablon + genel G/Ç."""
     if language.strip().lower() != "python":
         return []
-    picked: list[tuple[str, str]] = []
-    if needs_browser(description):
-        picked.append(("playwright_scroll", PLAYWRIGHT_SCROLL))
-    elif has_url(description) and needs_browser_or_web(description):
-        picked.append(("requests_bs4", REQUESTS_BS4))
-    if _CSV_WORDS.search(description):
-        picked.append(("csv_aggregate", CSV_AGGREGATE))
-    if _FOLDER_WORDS.search(description):
-        picked.append(("folder_walk", FOLDER_WALK))
-    if _DB_WORDS.search(description):
-        picked.append(("sqlite_store", SQLITE_STORE))
-    if _API_WORDS.search(description):
-        picked.append(("json_api", JSON_API))
+    d = description or ""
+    picked = [(name, code) for name, match, code in _TABLE if match(d)]
     return picked[:limit] + [("general_io", GENERAL_IO)]
 
 
