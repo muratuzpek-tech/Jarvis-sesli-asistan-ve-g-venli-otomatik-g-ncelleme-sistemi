@@ -3131,6 +3131,19 @@ def _build_project(
             )
             if not output_problems:
                 output_problems.extend(_check_output_contents(project_dir, expected_outputs))
+        if is_timeout and output_problems and not gui_task:
+            # Canlı test 2026-09-29: JS kazıyıcı sonsuz kaydırma döngüsünde
+            # takıldı; model yalnızca "çıktı yok" duyduğu için 4 denemede de
+            # asıl sorunu (bitmeyen döngü) görmedi ve her deneme 360 sn sürdü.
+            output_problems.insert(0, (
+                f"The program NEVER FINISHED — it was killed after {current_timeout}s. This is a batch task, "
+                f"not a server/GUI: it is stuck in an endless loop or waiting forever (e.g. scrolling an "
+                f"infinite-scroll page until 'no new content' which never happens, waiting for a selector that "
+                f"never appears, a retry loop without a limit). Add a HARD STOP: stop as soon as the requested "
+                f"number of items is collected, cap loops with a maximum iteration count, and give every wait a "
+                f"timeout. Write the output file as soon as the data is collected."
+            ))
+            current_timeout = timeout  # uzatılmış süre yalnızca soğuk başlangıç içindi
         if output_problems:
             log(f"Program çökmedi ama beklenen çıktı üretilmedi: {output_problems}")
             filename_mismatches = _detect_output_filename_mismatch(
