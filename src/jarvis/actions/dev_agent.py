@@ -241,6 +241,15 @@ def _selenium_instead_of_playwright(file_codes: dict[str, str], dependencies) ->
     return found
 
 
+def _recipes_for_fix(description: str, language: str) -> str:
+    """Düzeltme istemine de usta şablonlarını ekler (hata olursa boş döner)."""
+    try:
+        from jarvis.actions.devkit.recipes import recipes_block
+        return recipes_block(description, language)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _python_quality_issues(file_codes: dict[str, str]) -> dict[str, list[dict]]:
     """Modelden bagimsiz kalite bulgulari; hata olursa build'i asla engellemez."""
     try:
@@ -896,6 +905,9 @@ JS/TS-specific rules:
         "import each other (data often flows through a third file like main.py):\n"
         + shared_contracts
     ) if shared_contracts else ""
+
+    from jarvis.actions.devkit.recipes import recipes_block
+    lang_rules += "\n\n" + recipes_block(project_description, language)
 
     expected_outputs_block = (
         "Files this project MUST create or update on disk when it runs, with the "
@@ -2674,6 +2686,7 @@ Other files for context (read-only — fix only the target file):
 
 {expected_outputs_block}
 
+{_recipes_for_fix(project_description, language)}
 File to fix: {fix_path}{line_hint}
 Error type: {error_type}
 
