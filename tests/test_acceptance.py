@@ -170,3 +170,11 @@ def test_requests_style_scraper_can_read_fixture_url(tmp_path):
     )
     problems, output = run_acceptance(tmp_path, "main.py", spec)
     assert problems == [], (problems, output)
+
+
+def test_bare_html_tag_token_accepts_attributes():
+    from jarvis.actions.devkit.acceptance import _token_found
+    assert _token_found("<table>", "<table border='1'><tr><td>elma</td></tr></table>")
+    assert _token_found("<TABLE>", "<table\n class=x>")
+    assert not _token_found("<table>", "<tablet>")
+    assert not _token_found("<table>", "tablo yok")

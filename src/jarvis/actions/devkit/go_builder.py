@@ -32,6 +32,7 @@ from jarvis.actions.devkit.go_toolchain import WORK_DIR, GoToolchain, sanitize_m
 from jarvis.actions.devkit.toolchain import Diagnostic, group_by_file
 
 MAX_ATTEMPTS = 6
+LINT_BLOCKING_ROUNDS = 3   # bu kadar turdan sonra lint (yalnız lint) artık engel değil
 MAX_FILES = 12
 MAX_RUN_ARGS = 16
 
@@ -447,6 +448,8 @@ def build_go_project(
 
     previous_signature: str | None = None
     last_detail = ""
+    lint_failures = 0
+    lint_warnings = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         log(f"Doğrulama turu {attempt}/{MAX_ATTEMPTS}")
         tc.gofmt()
@@ -460,9 +463,19 @@ def build_go_project(
             if not res.ok:
                 stage, detail = "go vet bulgu verdi", res.output
         if not stage:
-            lres, diags = tc.lint()
+            lres, lint_diags = tc.lint()
             if lres is not None and not lres.ok:
-                stage, detail = "golangci-lint bulgu verdi", lres.output
+                lint_failures += 1
+                if lint_failures < LINT_BLOCKING_ROUNDS:
+                    stage, detail, diags = "golangci-lint bulgu verdi", lres.output, lint_diags
+                else:
+                    # Canlı test 2026-09-29: build + vet temizken yalnızca stil
+                    # uyarıları yüzünden 6 tur harcandı, program hiç çalıştırılmadı.
+                    # Derlenen ve vet'ten geçen program artık ÇALIŞTIRILIP gerçek
+                    # çıktısıyla doğrulanıyor; kalan lint bulguları rapora uyarı olarak eklenir.
+                    lint_warnings = lres.output
+                    log(f"⚠️ golangci-lint {lint_failures}. kez bulgu verdi; build + vet temiz olduğu için "
+                        f"program yine de çalıştırılıyor (lint bulguları uyarı olarak raporlanacak).")
         if not stage:
             started = time.time()
             run = tc.run_binary(plan["run_args"], timeout)
@@ -485,12 +498,15 @@ def build_go_project(
                     diags = []
                 else:
                     lint_note = " (golangci-lint kurulu olmadığı için lint atlandı)" if lint_skipped else ", golangci-lint"
+                    if lint_warnings:
+                        lint_note = " (golangci-lint stil uyarıları kaldı, aşağıda)"
                     outs = ", ".join(o["path"] for o in plan["expected_outputs"])
                     return finish(
                         f"'{name}' Go projesi çalışıyor efendim: go build, go vet{lint_note} temiz; "
                         f"program başarıyla çalıştı{f' ve {outs} doğrulandı' if outs else ''}. "
                         f"{attempt}. turda tamamlandı. Konum: {project_dir}",
-                        f"Çıktı:\n{run.output[:1500]}")
+                        f"Çıktı:\n{run.output[:1500]}"
+                        + (f"\n\ngolangci-lint uyarıları:\n{lint_warnings[:1500]}" if lint_warnings else ""))
 
         last_detail = f"{stage}\n{detail[:1500]}"
         log(f"❌ {stage}")

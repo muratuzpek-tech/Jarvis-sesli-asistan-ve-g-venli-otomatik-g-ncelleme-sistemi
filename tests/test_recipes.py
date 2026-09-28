@@ -11,12 +11,21 @@ import pytest
 
 from jarvis.actions.devkit import recipes as r
 
+from jarvis.actions.devkit import recipes_extra as x  # noqa: E402
+
 ALL = ["GENERAL_IO", "PLAYWRIGHT_SCROLL", "REQUESTS_BS4", "CSV_AGGREGATE", "FOLDER_WALK", "SQLITE_STORE", "JSON_API"]
+EXTRA = ["TKINTER_HEADLESS", "PILLOW_IMAGES", "PSUTIL_SYSINFO", "ZIP_BACKUP", "REGEX_EXTRACT", "HTTP_PARALLEL",
+         "FILE_ORGANIZE", "PPTX_REPORT"]
 
 
 @pytest.mark.parametrize("name", ALL)
 def test_every_recipe_compiles(name):
     ast.parse(getattr(r, name))
+
+
+@pytest.mark.parametrize("name", EXTRA)
+def test_every_extra_recipe_compiles(name):
+    ast.parse(getattr(x, name))
 
 
 @pytest.mark.parametrize("desc,expected", [
@@ -26,6 +35,14 @@ def test_every_recipe_compiles(name):
     ("bir klasördeki txt dosyalarını tara", "folder_walk"),
     ("sonuçları sqlite veritabanına kaydet", "sqlite_store"),
     ("bir REST API'den JSON çek", "json_api"),
+    ("tkinter arayüzlü not uygulaması", "tkinter_headless"),
+    ("bir klasördeki resimleri küçült", "pillow_images"),
+    ("cpu ve ram kullanımını raporla", "psutil_sysinfo"),
+    ("belgeler klasörünü zip olarak yedekle", "zip_backup"),
+    ("metindeki e-posta ve telefonları ayıkla", "regex_extract"),
+    ("dosyaları uzantılarına göre klasörlere ayır", "file_organize"),
+    ("verilerden powerpoint sunum yap", "pptx_report"),
+    ("url listesindeki bağlantıların durum kodunu kontrol et", "http_parallel"),
 ])
 def test_selection(desc, expected):
     names = [n for n, _ in r.select_recipes(desc)]
@@ -38,7 +55,10 @@ def test_no_recipes_for_go():
 
 def _run(code: str, tmp_path, *args):
     (tmp_path / "prog.py").write_text(code, encoding="utf-8")
-    return subprocess.run([sys.executable, "prog.py", *args], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    import os
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    return subprocess.run([sys.executable, "prog.py", *args], cwd=tmp_path, capture_output=True, text=True,
+                          encoding="utf-8", timeout=30, env=env)
 
 
 def test_csv_and_folder_and_general_recipes_really_work(tmp_path):
@@ -77,3 +97,36 @@ def test_recipes_reach_writer_prompt(monkeypatch, tmp_path):
                    project_description="https://quotes.toscrape.com/scroll kaydırarak 20 alıntı topla",
                    all_files=[{"path": "main.py"}], language="python", project_dir=tmp_path, already_written={})
     assert "PROVEN PATTERNS" in seen[0] and "sync_playwright" in seen[0] and "max_scrolls" in seen[0]
+
+
+def test_extra_stdlib_recipes_really_work(tmp_path):
+    assert _run(x.TKINTER_HEADLESS, tmp_path, "--headless-test").stdout.strip() == "SUCCESS"
+    assert json.loads((tmp_path / "sonuc.json").read_text()) == {"adet": 2, "ilk": "a"}
+
+    (tmp_path / "m.txt").write_text("ali@ornek.com, 0532 123 45 67, tekrar ali@ornek.com", encoding="utf-8")
+    assert _run(x.REGEX_EXTRACT, tmp_path, "m.txt").returncode == 0
+    assert (tmp_path / "bulunanlar.csv").read_text(encoding="utf-8").splitlines()[1:] == [
+        "email,ali@ornek.com", "telefon,5321234567"]
+
+    src = tmp_path / "k"
+    (src / "alt").mkdir(parents=True)
+    for n in ("a.txt", "alt/b.txt", "c.md"):
+        (src / n).write_text("x")
+    assert _run(x.FILE_ORGANIZE, tmp_path, "k").returncode == 0
+    assert sorted(p.relative_to(tmp_path / "duzenli").as_posix() for p in (tmp_path / "duzenli").rglob("*.*")) == [
+        "md/c.md", "txt/a.txt", "txt/b.txt"]
+    assert (src / "a.txt").exists(), "kaynak dosyalar yerinde kalmalı (kopyalama)"
+
+    out = _run(x.ZIP_BACKUP, tmp_path, "k")
+    assert out.returncode == 0 and "3 dosya" in out.stdout
+
+
+@pytest.mark.parametrize("desc,folder", [
+    ("satislar.csv toplamlarını çalışma klasöründeki ozet.json dosyasına yaz", False),
+    ("sonucu çalışma klasörüne kaydet", False),
+    ("metinler klasöründeki txt dosyalarını say, çalışma klasöründeki report.txt'ye yaz", True),
+    ("bir klasördeki dosyaları tara", True),
+])
+def test_working_folder_phrase_does_not_trigger_folder_scan(desc, folder):
+    """PR #20 kod incelemesi: 'çalışma klasöründeki' hemen her görevde geçiyordu."""
+    assert ("folder_walk" in [n for n, _ in r.select_recipes(desc)]) is folder
