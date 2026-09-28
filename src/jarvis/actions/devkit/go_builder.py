@@ -26,7 +26,7 @@ import shutil
 import time
 from collections.abc import Callable
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from jarvis.actions.devkit.go_toolchain import WORK_DIR, GoToolchain, sanitize_module_name
 from jarvis.actions.devkit.toolchain import Diagnostic, group_by_file
@@ -58,9 +58,21 @@ def _strip_fences(text: str) -> str:
     return (m.group(1) if m else text).strip() + "\n"
 
 
+def _escapes_project(rel: str) -> bool:
+    """Yol mutlak mı ya da '..' ile dışarı çıkıyor mu? Platformdan bağımsız:
+    Windows'ta Path("/tmp/x").is_absolute() False döner, POSIX'te "C:/x"
+    göreli sayılır; ikisini de yakalar."""
+    posix = rel.replace("\\", "/")
+    return (
+        posix.startswith("/")
+        or bool(PureWindowsPath(rel).drive)
+        or ".." in PurePosixPath(posix).parts
+    )
+
+
 def _safe_path(project_dir: Path, rel: str) -> Path | None:
     """Göreli yolu proje kökü DIŞINA çıkamayacak şekilde çözer."""
-    if not rel or Path(rel).is_absolute() or "\\" in rel:
+    if not rel or _escapes_project(rel) or "\\" in rel:
         return None
     try:
         candidate = (project_dir / rel).resolve()
@@ -142,12 +154,11 @@ def validate_plan(plan: object) -> dict:
         if not isinstance(f, dict):
             raise PlanError("Her dosya bir nesne olmalı.")
         path = str(f.get("path", "")).strip().replace("\\", "/")
-        parts = Path(path).parts
+        parts = PurePosixPath(path).parts
         if (
             not path.endswith(".go")
             or path.endswith("_test.go")
-            or Path(path).is_absolute()
-            or ".." in parts
+            or _escapes_project(path)
             or any(p.startswith((".", "_")) for p in parts)
             or any(p.lower() in ("jarvis", "jarvis.go") for p in parts)
         ):
@@ -173,7 +184,7 @@ def validate_plan(plan: object) -> dict:
         if not isinstance(p, str) or not p.strip():
             raise PlanError("Beklenen çıktı yolu boş olamaz.")
         p = p.strip().replace("\\", "/")
-        if Path(p).is_absolute() or ".." in Path(p).parts or p.split("/")[0] == WORK_DIR:
+        if _escapes_project(p) or p.split("/")[0] == WORK_DIR:
             raise PlanError(f"Beklenen çıktı proje dışına çıkıyor: {p}")
         outputs.append({"path": p, "description": str(o.get("description", "")) if isinstance(o, dict) else ""})
 
@@ -322,17 +333,24 @@ Fixed complete code for {rel}:"""
 # ─────────────────────────────────────────────────────────────────────────
 # 5-6. ÇALIŞTIR / KANITLA
 # ─────────────────────────────────────────────────────────────────────────
-_STACK_RE = re.compile(r"([\w\-./\\]+\.go):(\d+)")
+_STACK_RE = re.compile(r"((?:[A-Za-z]:)?[\w\-./\\]+\.go):(\d+)")
 
 
 def runtime_diagnostics(output: str, project_dir: Path, known: set[str]) -> list[Diagnostic]:
     """panic yığın izindeki (mutlak yollu) proje dosyası satırlarını çıkarır."""
-    root = project_dir.resolve().as_posix().rstrip("/") + "/"
+    # Windows'ta sürücü harfi/büyük-küçük harf farkı olabilir; hem verilen hem
+    # çözülmüş kökü dene.
+    roots = {
+        (r.as_posix().rstrip("/") + "/").lower()
+        for r in (project_dir, project_dir.resolve())
+    }
     result: list[Diagnostic] = []
     for m in _STACK_RE.finditer(output):
         path = m.group(1).replace("\\", "/")
-        if path.startswith(root):
-            path = path[len(root):]
+        for root in roots:
+            if path.lower().startswith(root):
+                path = path[len(root):]
+                break
         if path in known and all(d.path != path or d.line != int(m.group(2)) for d in result):
             result.append(Diagnostic(path, int(m.group(2)), 0, "runtime failure (see program output)", "run"))
     return result

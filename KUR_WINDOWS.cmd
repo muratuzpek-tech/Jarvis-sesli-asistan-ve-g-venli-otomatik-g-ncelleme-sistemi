@@ -38,7 +38,8 @@ if errorlevel 1 (
 goto install
 
 :check_venv
-for /f "delims=" %%V in ('"%VENV_PY%" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2^>nul') do set "VENV_VERSION=%%V"
+set "VENV_VERSION="
+for /f "delims=" %%V in ('call "%VENV_PY%" -c "import sys;print(str(sys.version_info[0])+chr(46)+str(sys.version_info[1]))" 2^>nul') do set "VENV_VERSION=%%V"
 if "%VENV_VERSION%"=="3.11" goto install
 if "%VENV_VERSION%"=="3.12" goto install
 

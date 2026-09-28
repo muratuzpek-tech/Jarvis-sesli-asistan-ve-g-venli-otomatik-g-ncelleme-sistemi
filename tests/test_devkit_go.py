@@ -277,3 +277,23 @@ def test_dev_agent_routes_go_to_devkit(tmp_path, monkeypatch):
     result = da.dev_agent({"description": "rapor yaz", "language": "Go", "confirm_code": code})
     assert "çalışıyor" in result, result
     assert (tmp_path / "ram_report" / "report.log").is_file()
+
+
+def test_binary_name_has_exe_on_windows():
+    from jarvis.actions.devkit.go_toolchain import binary_name
+    assert binary_name("win32") == "app.exe"
+    assert binary_name("linux") == "app"
+
+
+@pytest.mark.parametrize("rel", ["/tmp/x", "C:/x.log", "c:\\x.log", "\\\\srv\\share\\x", "a/../../x"])
+def test_escapes_project_is_platform_independent(rel):
+    from jarvis.actions.devkit.go_builder import _escapes_project
+
+    assert _escapes_project(rel)
+
+
+def test_stack_regex_keeps_windows_drive_letter():
+    from jarvis.actions.devkit.go_builder import _STACK_RE
+
+    m = _STACK_RE.search("\tC:/Users/murat/proj/main.go:7 +0x1d")
+    assert m and m.group(1) == "C:/Users/murat/proj/main.go" and m.group(2) == "7"

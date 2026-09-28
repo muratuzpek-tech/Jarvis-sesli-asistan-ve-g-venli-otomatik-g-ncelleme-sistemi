@@ -44,6 +44,12 @@ def _silence_static_analysis(monkeypatch) -> None:
     monkeypatch.setattr(da, "_proactively_lint_generated_files", lambda *a, **k: None)
     monkeypatch.setattr(da, "_proactively_detect_gui_manual_only_triggers", lambda *a, **k: None)
     monkeypatch.setattr(da, "_detect_circular_imports", lambda *a, **k: None)
+    # 2026-09-28: kalite kapisi ve kabul testi de bu testlerin konusu degil
+    # (kendi testleri: test_python_quality.py, test_acceptance.py,
+    # test_dev_agent_quality_gate.py). Ornek kodlar bilerek kisa/eksik oldugu
+    # icin kapi hakli olarak bulgu uretir; burada yalnizca headless mantigi sinaniyor.
+    monkeypatch.setattr(da, "_python_quality_issues", lambda *a, **k: {})
+    monkeypatch.setattr(da, "_plan_acceptance", lambda *a, **k: None)
 
 
 def _stub_successful_run(monkeypatch, run_calls: list) -> None:
