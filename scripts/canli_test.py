@@ -152,6 +152,19 @@ def _git_surum() -> str:
         return "?"
 
 
+def _ozet(sonuc: str) -> str:
+    """JARVIS'in uzun sonuç metninden asıl hatayı gösteren kısa bir satır."""
+    satirlar = [s.strip() for s in sonuc.splitlines() if s.strip()]
+    for i, s in enumerate(satirlar):
+        if s.lower().startswith("last error"):
+            kalan = [x for x in satirlar[i + 1:] if not x.endswith(":")]
+            return " | ".join(kalan[:2])[:300]
+    for s in satirlar:
+        if re.search(r"FAILED|hata|error|başarısız|düzeltilemedi|timed out", s, re.IGNORECASE):
+            return s[:300]
+    return (satirlar[0] if satirlar else sonuc)[:300]
+
+
 def calistir(gorev: dict, kok: Path) -> dict:
     klasor = kok / f"_girdi_{gorev['ad']}"
     klasor.mkdir(parents=True, exist_ok=True)
@@ -187,7 +200,7 @@ def calistir(gorev: dict, kok: Path) -> dict:
         durum = "ALTYAPI HATASI"  # kota/bağlantı/disk — JARVIS'in başarısı ölçülemedi, puana sayılmaz
     else:
         durum = "KALDI"
-    return {"no": gorev["no"], "ad": gorev["ad"], "durum": durum, "neden": neden or sonuc[-300:],
+    return {"no": gorev["no"], "ad": gorev["ad"], "durum": durum, "neden": neden or _ozet(sonuc),
             "sure_sn": sure, "kabul_testi": "Acceptance test" in sonuc}
 
 
@@ -211,8 +224,15 @@ def main() -> int:
     elif a.sec:
         surprizler = [g for g in SURPRIZ if g["no"] in secili]
 
+    taban = Path(da.PROJECTS_DIR)
+    taban.mkdir(parents=True, exist_ok=True)
+    bos_gb = shutil.disk_usage(taban).free / 2**30
+    if bos_gb < 2:
+        print(f"⛔ Diskte yalnızca {bos_gb:.1f} GB boş alan var; canlı test en az 2 GB ister. "
+              f"Önce yer aç (df -h ~ ile kontrol et).")
+        return 2
     damga = datetime.now().strftime("%Y%m%d-%H%M%S")
-    kok = Path.home() / "Desktop" / "JarvisProjects" / "_canli_test" / damga
+    kok = taban / "_canli_test" / damga
     kok.mkdir(parents=True, exist_ok=True)
     da.PROJECTS_DIR = kok  # gerçek projelere dokunma
     os.environ.setdefault("JARVIS_DEVAGENT_OPEN_EDITOR", "0")  # her görevde VSCode açılmasın

@@ -22,7 +22,9 @@ def get_base_dir():
 
 BASE_DIR         = get_base_dir()
 API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
-PROJECTS_DIR     = Path.home() / "Desktop" / "JarvisProjects"
+# JARVIS_PROJECTS_DIR ile başka bir diske (ör. büyük HDD) taşınabilir; sistem
+# diski dolmasın diye (canlı test 2026-09-28: 49 GB'lık kök bölüm doldu).
+PROJECTS_DIR     = Path(os.environ.get("JARVIS_PROJECTS_DIR", "").strip() or Path.home() / "Desktop" / "JarvisProjects").expanduser()
 MAX_FIX_ATTEMPTS = 5
 MODEL_PLANNER    = "gemini-flash-latest"
 MODEL_WRITER     = "gemini-flash-latest"
@@ -1253,14 +1255,21 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
                     stdout=out_f, stderr=err_f,
                     cwd=str(project_dir),
                 )
-                try:
-                    proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
+                disk_problem = _wait_with_disk_guard(proc, timeout, project_dir, (out_path, err_path))
+                if disk_problem == "timeout":
                     _kill_process_tree(proc)
                     partial_excerpt = _read_partial_timeout_output(out_path, err_path)
                     result_text = (
                         f"Timed out after {timeout}s — long-running app (server/GUI) is likely working."
                         f"{partial_excerpt}"
+                    )
+                elif disk_problem:
+                    _kill_process_tree(proc)
+                    print(f"[DevAgent] 🛑 Program durduruldu: {disk_problem}")
+                    result_text = (
+                        f"KILLED — the program was stopped because {disk_problem}. It is writing far too much "
+                        f"data (runaway loop appending to a file/log, or printing endlessly). Add a hard stop "
+                        f"and write only the requested output once."
                     )
 
             if result_text is not None:
@@ -1283,6 +1292,66 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
         return f"Command not found: {e}"
     except Exception as e:
         return f"Run error: {e}"
+
+
+def _dir_size(path: Path, limit: int) -> int:
+    """Klasör boyutu; `limit`i aşınca saymayı bırakır (büyük klasörde yavaşlamasın)."""
+    total = 0
+    try:
+        for p in path.rglob("*"):
+            try:
+                if p.is_file():
+                    total += p.stat().st_size
+                    if total > limit:
+                        return total
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return total
+
+
+def _wait_with_disk_guard(proc: subprocess.Popen, timeout: float, project_dir: Path,
+                          logs: tuple[Path, ...]) -> str:
+    """proc.wait(timeout) yerine: bitene kadar bekler ama diski doldurmaya
+    başlayan programı DURDURUR. Dönüş: "" (normal bitti), "timeout" ya da
+    durdurma sebebi.
+
+    NEDEN (2026-09-28): canlı test sırasında disk tamamen doldu ve sistem
+    kararsızlaştı. O seferki suçlu başka bir uygulamaydı, ama JARVIS'in
+    yazdığı bir programın sonsuz döngüde dosyaya yazması da aynı sonucu
+    doğurur. Sınırlar: JARVIS_RUN_MAX_MB (proje + çıktı, varsayılan 500),
+    JARVIS_MIN_FREE_MB (diskte kalması gereken boş alan, varsayılan 500)."""
+    def _mb(name: str, default: int) -> int:
+        try:
+            return int(os.environ.get(name, "") or default)
+        except ValueError:
+            return default
+
+    max_bytes = _mb("JARVIS_RUN_MAX_MB", 500) * 2**20
+    min_free = _mb("JARVIS_MIN_FREE_MB", 500) * 2**20
+    deadline = time.monotonic() + timeout
+    next_check = 0.0
+    while True:
+        try:
+            proc.wait(timeout=0.5)
+            return ""
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.monotonic()
+        if now >= deadline:
+            return "timeout"
+        if now < next_check:
+            continue
+        next_check = now + 2.0
+        try:
+            if shutil.disk_usage(project_dir).free < min_free:
+                return f"free disk space dropped below {min_free // 2**20} MB"
+        except OSError:
+            pass
+        used = sum(p.stat().st_size for p in logs if p.exists()) + _dir_size(project_dir, max_bytes)
+        if used > max_bytes:
+            return f"its project folder + console output grew beyond {max_bytes // 2**20} MB"
 
 
 def _kill_process_tree(proc: subprocess.Popen) -> None:
@@ -2648,6 +2717,9 @@ def _fix_files(
             # AYNI SEYI TEKRARLAMAMASI gerektigini modele acikca soylemek,
             # onu farkli/daha dikkatli bir cozume itmek icin.
             repeat_note = (
+                "\n\n⚠️ If patching keeps failing, REWRITE this file from scratch following the PROVEN "
+                "PATTERNS shown above (keep the same public function names/signatures so other files "
+                "still work) instead of editing the broken version again."
                 "\n\n⚠️ REPEATED FAILURE WARNING: your PREVIOUS fix attempt for this "
                 "exact file did NOT resolve the problem — running the project again "
                 "produced the EXACT SAME error output as before, byte-for-byte. This "

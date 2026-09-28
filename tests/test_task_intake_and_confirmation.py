@@ -260,3 +260,42 @@ def test_real_url_scraping_skips_fabricated_acceptance(monkeypatch):
     monkeypatch.setattr(da, "_get_model", lambda name: called.append(name))
     assert da._plan_acceptance(GOOD_REQUEST, {"entry_point": "main.py"}, log=lambda m: None) is None
     assert called == [], "gerçek URL'li kazımada model kabul testi uydurmamalı"
+
+
+def test_runaway_writer_is_killed_by_disk_guard(tmp_path, monkeypatch):
+    monkeypatch.setenv("JARVIS_RUN_MAX_MB", "5")
+    (tmp_path / "main.py").write_text(
+        "with open('dev.log', 'ab') as f:\n"
+        "    while True:\n"
+        "        f.write(b'x' * 1_000_000)\n        f.flush()\n", encoding="utf-8")
+    t0 = time.monotonic()
+    out = da._run_project("python main.py", tmp_path, timeout=60)
+    assert out.startswith("KILLED") and "beyond 5 MB" in out, out
+    assert time.monotonic() - t0 < 20
+
+
+def test_low_free_space_stops_program(tmp_path, monkeypatch):
+    from collections import namedtuple
+    usage = namedtuple("u", "total used free")
+    monkeypatch.setattr(da.shutil, "disk_usage", lambda p: usage(10, 10, 1))
+    (tmp_path / "main.py").write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    out = da._run_project("python main.py", tmp_path, timeout=60)
+    assert out.startswith("KILLED") and "free disk space" in out, out
+
+
+def test_normal_program_is_unaffected_by_disk_guard(tmp_path):
+    (tmp_path / "main.py").write_text("print('merhaba')\n", encoding="utf-8")
+    t0 = time.monotonic()
+    out = da._run_project("python main.py", tmp_path, timeout=30)
+    assert "merhaba" in out and time.monotonic() - t0 < 5
+
+
+def test_projects_dir_can_move_to_another_disk(tmp_path, monkeypatch):
+    import importlib
+    monkeypatch.setenv("JARVIS_PROJECTS_DIR", str(tmp_path / "hdd" / "JarvisProjects"))
+    mod = importlib.reload(da)
+    try:
+        assert mod.PROJECTS_DIR == tmp_path / "hdd" / "JarvisProjects"
+    finally:
+        monkeypatch.delenv("JARVIS_PROJECTS_DIR")
+        importlib.reload(da)

@@ -54,3 +54,20 @@ def test_unexpected_output_shape_does_not_abort_the_run(tmp_path, monkeypatch):
     sonuc = ct.calistir({"no": 999, "ad": "patlayan", "dil": "python", "hazirla": None,
                          "dogrula": boom, "tarif": "x"}, tmp_path)
     assert sonuc["durum"] == "YALANCI BAŞARI" and "TypeError" in sonuc["neden"]
+
+
+def test_ozet_picks_the_real_error_line():
+    import canli_test as ct
+    s = ("Project couldn't be verified, sir. Project is saved at /x/y — open it in VSCode.\n\n"
+         "Last error:\nACCEPTANCE TEST FAILED:\n'quotes.csv' kabul testinde oluşturulmadı.\n")
+    assert ct._ozet(s).startswith("'quotes.csv' kabul testinde oluşturulmadı")
+    assert "Planning failed" in ct._ozet("Planning failed: bad json")
+
+
+def test_live_test_refuses_to_start_on_low_disk(monkeypatch, capsys):
+    from collections import namedtuple
+
+    import canli_test as ct
+    monkeypatch.setattr(ct.shutil, "disk_usage", lambda p: namedtuple("u", "total used free")(10, 9, 2**29))
+    monkeypatch.setattr(sys, "argv", ["canli_test.py", "--surpriz", "0"])
+    assert ct.main() == 2 and "boş alan" in capsys.readouterr().out
