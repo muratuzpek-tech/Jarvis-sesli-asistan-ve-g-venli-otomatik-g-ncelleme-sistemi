@@ -493,8 +493,104 @@ class BrainOrchestrator:
             }
             if file_mod.get("action") == "write":
                 params["append"] = bool(file_mod.get("append", False))
-            return action, params
-        return self._resolve_executor_call(step, base_path)
+        else:
+            action, params = self._resolve_executor_call(step, base_path)
+
+        # DUZELTME (code review bulgusu, 2026-09-28, PR #3): asagidaki icerik
+        # geri-kazanim + "sessizce bos yazma" korumasi ONCEDEN SADECE
+        # _execute_step()'in kendi govdesinde, bu fonksiyonun DONUSUNDEN
+        # SONRA uygulaniyordu - yani _execute_step gercekten dogru (goal'den
+        # geri kazanilmis) icerikle yaziyordu, ama _verify_file_action()
+        # (bu fonksiyonu AYRI/BAGIMSIZ tekrar cagirdigi icin) o geri
+        # kazanimi HIC GORMUYORDU: kendi params'inda content hala "" kalip
+        # GERCEKTEN basarili bir yazmayi ("Gercek icerik burada" gibi) bos
+        # ("") ile karsilastirip YANLIS BICIMDE basarisiz sayiyordu (canli
+        # kod incelemesinde bulundu, gercek fixture ile dogrulandi). Bu
+        # dosyanin basindaki notun tam olarak uyardigi kalibin bir baskasi:
+        # "TEK bir karar noktasi ... boylece iki yer bir daha ASLA
+        # birbirinden sapamaz" - icerik geri kazanimi da simdi BURAYA,
+        # tek karar noktasina tasindi, boylece _execute_step VE
+        # _verify_file_action HER ZAMAN AYNI (nihai) content'i gorur.
+        if (
+            action == "file_controller"
+            and params.get("action") in ("create_file", "write")
+            and not params.get("content")
+        ):
+            try:
+                goal_name, goal_content = _extract_quoted(task["payload"].get("goal", ""))
+                if (
+                    goal_content
+                    and params.get("name")
+                    and (not goal_name or goal_name == params.get("name"))
+                ):
+                    params["content"] = goal_content
+            except Exception:
+                pass
+
+            # DUZELTME (gercek canli hata, 2026-09-28, "jarvis_test_kaydi.txt
+            # 0 byte" bulgusu): yukaridaki geri kazanim denemesi de
+            # basarisiz olursa (goal metninde de tirnak/backtick icinde
+            # icerik yoksa - GERCEK kullanici komutlarinda neredeyse hic
+            # olmuyor, insanlar icerigi tirnaga almaz), content hala ""
+            # kaliyordu ve bu SESSIZCE file_controller'a gonderiliyordu:
+            # create_file/write kendi ic dogrulamasinda gonderilen icerik
+            # zaten "" oldugu icin "" == "" GECERLI sayilip GERCEKTEN
+            # basarili donuyordu - 0 byte'lik bir dosya "File created"
+            # diye raporlaniyordu. _verify_file_action (bagimsiz denetim)
+            # da content bos oldugu icin icerigi hic KARSILASTIRMIYORDU
+            # (content_matches=None, "kontrol edilmedi" anlaminda), yani
+            # bu guvenlik agi da bu spesifik hatayi YAKALAYAMIYORDU
+            # (canli kanit: '/home/murat/.../jarvis_test_kaydi.txt' ->
+            # exists=True, bytes=0, content="").
+            #
+            # Kok neden NLP tarafinda: _extract_quoted() SADECE tirnak/
+            # backtick icindeki metni icerik sayar; bu duzeltilemeyecek
+            # kadar kirilgan bir sezgi (dogal dilde icerik neredeyse hic
+            # tirnaklanmaz). Cozum: SESSIZCE YANLIS (bos) bir deger
+            # uretip basarili gibi davranmak yerine ACIKCA BASARISIZ OL -
+            # kullanici acikca "bos dosya" istemedigi surece, icerigi
+            # cikarilamayan bir create_file/write adimi ARTIK sessizce
+            # 0 byte'lik "basarili" bir dosya uretmiyor; adim FAILED
+            # olarak isaretlenip planner/kullaniciya gercek nedeni
+            # bildiriliyor (bkz. _tick()/approve() - RuntimeError burada
+            # failed_steps'e duser, gorev sessizce "basarili" sayilmaz).
+            # DUZELTME (mevcut e2e_file_task_self_test.py ile bulundu):
+            # yukaridaki ilk versiyon HER bos-content create_file/write
+            # adimini hata sayiyordu - ama bu, GECERLI bir plan deseninde
+            # (once bos dosya OLUSTUR, SONRA AYRI bir adimda GERCEK
+            # icerigi yaz - bkz. o test dosyasinin 2/3. adimlari) yanlis
+            # pozitif uretiyordu: "adı X olan bir dosya oluştur" gibi bir
+            # adimin acikca icerikle hicbir ilgisi yok, bos content
+            # burada TAMAMEN normal/beklenen. Ayirt edici gercek sinyal,
+            # content'in bos olmasi DEGIL - bu ADIMIN AÇIKLAMASININ
+            # (yalnizca BU adimin - genel "goal" degil, cunku goal daha
+            # sonraki bir adimdan bahsediyor olabilir) zaten bir icerik
+            # yazma niyeti tasimasi AMA yine de content'in bos kalmasidir.
+            if not params.get("content"):
+                desc_lower = step.get("description", "").lower()
+                has_content_intent = (
+                    params.get("action") == "write"
+                    or (
+                        any(k in desc_lower for k in ("yaz", "içine", "içerik", "write", "content"))
+                        and not any(k in desc_lower for k in ("yazılım", "yazar", "yazıcı"))
+                    )
+                )
+                explicitly_empty = any(
+                    k in desc_lower
+                    for k in ("boş dosya", "boş bir dosya", "içeriksiz", "empty file", "boşalt", "temizle")
+                )
+                if has_content_intent and not explicitly_empty:
+                    raise RuntimeError(
+                        f"İçerik belirlenemedi: '{params.get('name')}' için yazılacak "
+                        f"GERÇEK içerik, adım açıklamasından veya hedeften çıkarılamadı "
+                        f"(içerik tırnak/backtick içinde değil). Sessizce 0 byte'lık bir "
+                        f"dosya oluşturup başarılı saymak yerine bu adım BAŞARISIZ "
+                        f"sayıldı - planner'ın 'parameters.content' alanını açıkça "
+                        f"doldurması gerekiyor. Kasıtlı olarak boş bir dosya isteniyorsa "
+                        f"adımda açıkça 'boş dosya' belirtin."
+                    )
+
+        return action, params
 
     def _resolve_executor_call(self, step: dict, base_path: str = ".") -> tuple[str, dict]:
         """YENİ mimari (kullanıcı talimatı, Capability Registry + Agent/Tool
@@ -710,88 +806,11 @@ class BrainOrchestrator:
             # docstring'i).
             action, params = self._resolve_action_with_file_modification(task, step, base_path)
 
-            # Planner adimi dosya adini tasiyip icerigi tasimamis olabilir.
-            # Guvenli geri kazan?m: ayni gorevin goal metninden tekrar cikar.
-            # Sadece file_controller create_file/write icin ve content BOS ise
-            # uygulanir; mevcut explicit content her zaman korunur.
-            if (
-                action == "file_controller"
-                and params.get("action") in ("create_file", "write")
-                and not params.get("content")
-            ):
-                try:
-                    goal_name, goal_content = _extract_quoted(task["payload"].get("goal", ""))
-                    if (
-                        goal_content
-                        and params.get("name")
-                        and (not goal_name or goal_name == params.get("name"))
-                    ):
-                        params["content"] = goal_content
-                except Exception:
-                    pass
-
-                # DUZELTME (gercek canli hata, 2026-09-28, "jarvis_test_kaydi.txt
-                # 0 byte" bulgusu): yukaridaki geri kazanim denemesi de
-                # basarisiz olursa (goal metninde de tirnak/backtick icinde
-                # icerik yoksa - GERCEK kullanici komutlarinda neredeyse hic
-                # olmuyor, insanlar icerigi tirnaga almaz), content hala ""
-                # kaliyordu ve bu SESSIZCE file_controller'a gonderiliyordu:
-                # create_file/write kendi ic dogrulamasinda gonderilen icerik
-                # zaten "" oldugu icin "" == "" GECERLI sayilip GERCEKTEN
-                # basarili donuyordu - 0 byte'lik bir dosya "File created"
-                # diye raporlaniyordu. _verify_file_action (bagimsiz denetim)
-                # da content bos oldugu icin icerigi hic KARSILASTIRMIYORDU
-                # (content_matches=None, "kontrol edilmedi" anlaminda), yani
-                # bu guvenlik agi da bu spesifik hatayi YAKALAYAMIYORDU
-                # (canli kanit: '/home/murat/.../jarvis_test_kaydi.txt' ->
-                # exists=True, bytes=0, content="").
-                #
-                # Kok neden NLP tarafinda: _extract_quoted() SADECE tirnak/
-                # backtick icindeki metni icerik sayar; bu duzeltilemeyecek
-                # kadar kirilgan bir sezgi (dogal dilde icerik neredeyse hic
-                # tirnaklanmaz). Cozum: SESSIZCE YANLIS (bos) bir deger
-                # uretip basarili gibi davranmak yerine ACIKCA BASARISIZ OL -
-                # kullanici acikca "bos dosya" istemedigi surece, icerigi
-                # cikarilamayan bir create_file/write adimi ARTIK sessizce
-                # 0 byte'lik "basarili" bir dosya uretmiyor; adim FAILED
-                # olarak isaretlenip planner/kullaniciya gercek nedeni
-                # bildiriliyor (bkz. _tick()/approve() - RuntimeError burada
-                # failed_steps'e duser, gorev sessizce "basarili" sayilmaz).
-                # DUZELTME (mevcut e2e_file_task_self_test.py ile bulundu):
-                # yukaridaki ilk versiyon HER bos-content create_file/write
-                # adimini hata sayiyordu - ama bu, GECERLI bir plan deseninde
-                # (once bos dosya OLUSTUR, SONRA AYRI bir adimda GERCEK
-                # icerigi yaz - bkz. o test dosyasinin 2/3. adimlari) yanlis
-                # pozitif uretiyordu: "adı X olan bir dosya oluştur" gibi bir
-                # adimin acikca icerikle hicbir ilgisi yok, bos content
-                # burada TAMAMEN normal/beklenen. Ayirt edici gercek sinyal,
-                # content'in bos olmasi DEGIL - bu ADIMIN AÇIKLAMASININ
-                # (yalnizca BU adimin - genel "goal" degil, cunku goal daha
-                # sonraki bir adimdan bahsediyor olabilir) zaten bir icerik
-                # yazma niyeti tasimasi AMA yine de content'in bos kalmasidir.
-                if not params.get("content"):
-                    desc_lower = desc.lower()
-                    has_content_intent = (
-                        params.get("action") == "write"
-                        or (
-                            any(k in desc_lower for k in ("yaz", "içine", "içerik", "write", "content"))
-                            and not any(k in desc_lower for k in ("yazılım", "yazar", "yazıcı"))
-                        )
-                    )
-                    explicitly_empty = any(
-                        k in desc_lower
-                        for k in ("boş dosya", "boş bir dosya", "içeriksiz", "empty file", "boşalt", "temizle")
-                    )
-                    if has_content_intent and not explicitly_empty:
-                        raise RuntimeError(
-                            f"İçerik belirlenemedi: '{params.get('name')}' için yazılacak "
-                            f"GERÇEK içerik, adım açıklamasından veya hedeften çıkarılamadı "
-                            f"(içerik tırnak/backtick içinde değil). Sessizce 0 byte'lık bir "
-                            f"dosya oluşturup başarılı saymak yerine bu adım BAŞARISIZ "
-                            f"sayıldı - planner'ın 'parameters.content' alanını açıkça "
-                            f"doldurması gerekiyor. Kasıtlı olarak boş bir dosya isteniyorsa "
-                            f"adımda açıkça 'boş dosya' belirtin."
-                        )
+            # DUZELTME (code review bulgusu, 2026-09-28, PR #3): icerik
+            # geri-kazanim + "sessizce bos yazma" korumasi ARTIK yukaridaki
+            # _resolve_action_with_file_modification() icinde uygulaniyor -
+            # boylece _verify_file_action() de AYNI (nihai) content'i gorur.
+            # Burada TEKRARLANMIYOR (bkz. o metodun docstring/yorumlari).
 
             return self.bus.send("orchestrator", "executor_ai", desc, payload={"action": action, "params": params})
 
