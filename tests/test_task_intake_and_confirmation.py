@@ -204,3 +204,10 @@ def test_acceptance_fixture_url(tmp_path):
     )
     problems, output = run_acceptance(tmp_path, "main.py", clean)
     assert problems == [], (problems, output)
+
+
+def test_open_editor_can_be_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("JARVIS_DEVAGENT_OPEN_EDITOR", "0")
+    launched = []
+    monkeypatch.setattr(da.subprocess, "Popen", lambda *a, **k: launched.append(a))
+    assert da._open_vscode(tmp_path) is False and launched == []
