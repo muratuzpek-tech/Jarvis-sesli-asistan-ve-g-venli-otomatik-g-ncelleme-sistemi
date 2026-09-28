@@ -177,6 +177,7 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
     args = [a.replace(URL_PLACEHOLDER, fixture_url, 1).replace(PLACEHOLDER, str(fixture.resolve()), 1)
             for a in spec["args"]]
     entry = (project_dir / entry_point).resolve()
+    started = __import__("time").time() - 1
     try:
         proc = subprocess.run([python or sys.executable, str(entry), *args], cwd=str(run_dir),
                               capture_output=True, text=True, timeout=timeout, check=False)
@@ -193,7 +194,16 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
         else:
             path = run_dir / ex["output"]
             if not path.is_file():
-                problems.append(f"'{ex['output']}' kabul testinde oluşturulmadı (çalışma klasörüne yazılmalı).")
+                stray = _written_elsewhere(project_dir, ex["output"], started)
+                if stray:
+                    problems.append(
+                        f"'{ex['output']}' çalışma klasörüne DEĞİL, programın kendi klasörüne yazıldı ({stray}). "
+                        f"Çıktı yolunu Path(__file__).parent / os.path.dirname(__file__) / sabit bir klasörle "
+                        f"KURMA; yalnızca göreli yol kullan: open('{ex['output']}', 'w') — program nereden "
+                        f"çalıştırılırsa (os.getcwd()) oraya yazmalı."
+                    )
+                else:
+                    problems.append(f"'{ex['output']}' kabul testinde oluşturulmadı (çalışma klasörüne yazılmalı).")
                 continue
             text, label = path.read_text(encoding="utf-8", errors="replace"), f"'{ex['output']}'"
         low = text.lower()
@@ -201,6 +211,23 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
         if missing:
             problems.append(f"{label} şu beklenen ifadeleri İÇERMİYOR: {missing}. İçerik (ilk 800 karakter): {text[:800]!r}")
     return problems, output[:2000]
+
+
+def _written_elsewhere(project_dir: Path, output: str, since: float) -> str | None:
+    """Beklenen çıktı çalışma klasörü yerine proje içinde başka bir yere mi
+    yazıldı? (canlı test 2026-09-28: quotes.csv __file__ klasörüne yazıldı,
+    model 5 denemede de sebebi anlamadı.)"""
+    name = PurePosixPath(output).name
+    root = project_dir / ACCEPT_DIR
+    for p in project_dir.rglob(name):
+        try:
+            if root in p.parents or not p.is_file():
+                continue
+            if p.stat().st_mtime >= since:
+                return p.relative_to(project_dir).as_posix()
+        except OSError:
+            continue
+    return None
 
 
 def describe_fixtures(spec: dict, limit: int = 3000) -> str:

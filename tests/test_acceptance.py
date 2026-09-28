@@ -93,3 +93,13 @@ def test_crash_and_missing_output_reported(tmp_path):
     spec, _ = validate_spec(SPEC)
     problems, _ = run_acceptance(tmp_path, "main.py", spec)
     assert any("hata koduyla" in p for p in problems) and any("oluşturulmadı" in p for p in problems)
+
+
+def test_output_written_next_to_script_gets_precise_hint(tmp_path):
+    (tmp_path / "main.py").write_text(
+        "from pathlib import Path\n"
+        "(Path(__file__).parent / 'report.txt').write_text('empty_func old.bak.py')\n"
+    )
+    spec, _ = validate_spec(SPEC)
+    problems, _ = run_acceptance(tmp_path, "main.py", spec)
+    assert len(problems) == 1 and "kendi klasörüne" in problems[0] and "report.txt" in problems[0]

@@ -68,9 +68,22 @@ def missing_inputs(description: str) -> list[str]:
     return problems
 
 
+# "JavaScript gerekmez", "without JS", "tarayıcı kullanma" gibi OLUMSUZ
+# ifadeler ipucu sayılmaz (canlı test 2026-09-28: statik sayfa görevinde
+# "JavaScript gerekmez" yazdığı hâlde plan Playwright'a zorlandı).
+_NEGATED_BROWSER = re.compile(
+    r"(?:javascript|\bjs\b|tarayıcı|playwright|selenium|scroll|kaydırma)['’]?\w*\s+"
+    r"(?:gerek(?:mez|miyor|mesin|meden)|yok|olmadan|kullanma\w*|istemez|istemiyor|şart değil|lazım değil)"
+    r"|(?:no|without|doesn['’]?t need|does not need|not requir\w*|no need for)\s+(?:any\s+)?(?:javascript|\bjs\b|browser|playwright|selenium)"
+    r"|javascript['’]?siz|\bjs['’]?siz",
+    re.IGNORECASE,
+)
+
+
 def needs_browser(description: str) -> bool:
     """Görev JavaScript çalıştıran gerçek bir tarayıcı gerektiriyor mu?"""
-    return bool(_BROWSER_HINTS.search(description or ""))
+    text = _NEGATED_BROWSER.sub(" ", description or "")
+    return bool(_BROWSER_HINTS.search(text))
 
 
 def needs_browser_or_web(description: str) -> bool:
