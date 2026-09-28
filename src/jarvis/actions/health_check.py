@@ -12,6 +12,7 @@ boylece Jarvis asla "muhtemelen calisir" gibi belirsiz bir sey soylemiyor.
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 
@@ -22,6 +23,11 @@ def _get_base_dir() -> Path:
 
 
 BASE_DIR = _get_base_dir()
+
+# API anahtari canli testinin onbellek suresi (saniye) - bkz. _check_api_key.
+_API_CHECK_TTL_S = 600
+_api_check_cache: tuple[float, str, str, str] | None = None  # (zaman, anahtar parmak izi, status, detail)
+_api_check_lock = threading.Lock()
 
 # Her kontrol fonksiyonu (status, detail) dondurur; status "ok"/"degraded"/"down".
 _ICONS = {"ok": "✅", "degraded": "⚠️", "down": "❌"}
@@ -167,21 +173,48 @@ def _check_api_key() -> tuple[str, str]:
     except Exception as e:
         return "down", f"API anahtarı okunamıyor: {type(e).__name__}: {e}"
 
-    # Dosyada bir anahtar VAR - ama bu onun hala GECERLI oldugu anlamina
-    # gelmez (ozellikle sureli/ephemeral bir token ise). Kucuk, ucuz bir
-    # canli cagriyla gercekten calisiyor mu diye test ediyoruz.
-    try:
-        from google import genai
-        client = genai.Client(api_key=key)
-        client.models.generate_content(model="gemini-flash-latest", contents="ping")
-        return "ok", "Gemini API anahtarı yapılandırılmış ve GERÇEKTEN çalışıyor (canlı test edildi)"
-    except Exception as e:
-        msg = str(e)
-        if any(code in msg for code in ("401", "403", "PERMISSION_DENIED", "UNAUTHENTICATED", "API_KEY_INVALID")):
-            return "down", f"API anahtarı geçersiz veya süresi dolmuş (canlı test başarısız): {msg[:200]}"
-        if any(code in msg for code in ("429", "RESOURCE_EXHAUSTED", "quota")):
-            return "degraded", f"API anahtarı geçerli AMA kota/rate-limit aşılmış: {msg[:200]}"
-        return "degraded", f"Anahtar dosyada var AMA canlı test edilemedi (ağ sorunu olabilir): {type(e).__name__}: {msg[:200]}"
+    # DUZELTME (2026-09-28, canli kullanimda bulundu): kullanici "ses var
+    # mi?" gibi her soruda Gemini health_check'i yeniden cagiriyordu ve bu
+    # canli test HER SEFERINDE gercek bir generate_content istegi atip
+    # kotadan yiyordu - birkac soruda 429 RESOURCE_EXHAUSTED'a ulasildi.
+    # Basarili ("ok") ve kota ("429") sonuclari _API_CHECK_TTL_S boyunca
+    # onbellekte tutulur; anahtar degisirse (parmak izi) onbellek gecersiz
+    # olur. Gecersiz anahtar/ag hatasi ONBELLEKLENMEZ - duzeltildiginde
+    # bir sonraki kontrol hemen gercek sonucu gorur.
+    import hashlib
+    import time
+
+    global _api_check_cache
+    fingerprint = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    with _api_check_lock:
+        cached = _api_check_cache
+        if cached is not None:
+            ts, fp, status, detail = cached
+            age = time.monotonic() - ts
+            if fp == fingerprint and age < _API_CHECK_TTL_S:
+                return status, f"{detail} (önbellekten, {int(age // 60)} dk önce test edildi)"
+
+        # Dosyada bir anahtar VAR - ama bu onun hala GECERLI oldugu anlamina
+        # gelmez (ozellikle sureli/ephemeral bir token ise). Kucuk, ucuz bir
+        # canli cagriyla gercekten calisiyor mu diye test ediyoruz.
+        try:
+            from google import genai
+            client = genai.Client(api_key=key)
+            client.models.generate_content(model="gemini-flash-latest", contents="ping")
+            result = ("ok", "Gemini API anahtarı yapılandırılmış ve GERÇEKTEN çalışıyor (canlı test edildi)")
+            _api_check_cache = (time.monotonic(), fingerprint, *result)
+            return result
+        except Exception as e:
+            msg = str(e)
+            if any(code in msg for code in ("401", "403", "PERMISSION_DENIED", "UNAUTHENTICATED", "API_KEY_INVALID")):
+                _api_check_cache = None
+                return "down", f"API anahtarı geçersiz veya süresi dolmuş (canlı test başarısız): {msg[:200]}"
+            if any(code in msg for code in ("429", "RESOURCE_EXHAUSTED", "quota")):
+                result = ("degraded", f"API anahtarı geçerli AMA kota/rate-limit aşılmış: {msg[:200]}")
+                _api_check_cache = (time.monotonic(), fingerprint, *result)
+                return result
+            _api_check_cache = None
+            return "degraded", f"Anahtar dosyada var AMA canlı test edilemedi (ağ sorunu olabilir): {type(e).__name__}: {msg[:200]}"
 
 
 def _check_file_delete() -> tuple[str, str]:

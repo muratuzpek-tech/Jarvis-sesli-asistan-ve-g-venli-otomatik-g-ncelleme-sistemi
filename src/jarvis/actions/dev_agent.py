@@ -123,6 +123,12 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+def _devkit_generate(prompt: str) -> str:
+    """devkit kuruculari icin LLM koprusu: _get_model'in sagladigi yerel
+    Ollama -> Gemini (devre kesicili) zincirini aynen kullanir."""
+    return _get_model(MODEL_WRITER).generate_content(prompt).text
+
+
 def _is_rate_limit(error: Exception) -> bool:
     msg = str(error).lower()
     return "429" in msg or "quota" in msg or "resource_exhausted" in msg
@@ -2555,6 +2561,24 @@ def _build_project(
         if player:
             player.write_log(f"[DevAgent] {msg}")
 
+    # devkit (2026-09-28): Python disi diller (simdilik Go) kendi dil araç
+    # zinciriyle (go build/vet/golangci-lint) kurulur ve asagidaki Python'a
+    # ozgu akisa HIC girmez - bkz. jarvis/actions/devkit/__init__.py.
+    from jarvis.actions.devkit import get_builder
+    builder = get_builder(language)
+    if builder is not None:
+        return builder(
+            description=description,
+            project_name=project_name,
+            timeout=timeout,
+            generate=_devkit_generate,
+            projects_dir=PROJECTS_DIR,
+            log=log,
+            speak=speak,
+            open_editor=_open_vscode,
+            is_rate_limit=_is_rate_limit,
+        )
+
     log("Planning project structure...")
     try:
         plan = _plan_project(description, language)
@@ -3025,9 +3049,10 @@ def dev_agent(
             "description": description, "language": language,
             "project_name": project_name, "timeout": timeout,
         }
+        installer = "go mod tidy" if language.strip().lower() in ("go", "golang") else "pip"
         return (
             f"ONAY GEREKLİ: \"{description}\" açıklamasıyla yeni bir {language} projesi "
-            f"oluşturulacak. Bu adım gerekli paketleri pip ile kurar ve üretilen kodu "
+            f"oluşturulacak. Bu adım gerekli paketleri {installer} ile kurar ve üretilen kodu "
             f"gerçekten çalıştırır. Kullanıcıya bunu tarif et; kullanıcı SESLİ/YAZILI olarak "
             f"açıkça onaylarsa (bir sonraki mesajında), dev_agent'ı aynı description/language/"
             f"project_name ile ve confirm_code='{code}' parametresiyle TEKRAR çağır. "

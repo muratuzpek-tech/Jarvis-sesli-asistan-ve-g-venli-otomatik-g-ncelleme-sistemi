@@ -45,21 +45,38 @@ import sys
 import time
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# DUZELTME (2026-09-28, canli testte bulundu): PROJECT_ROOT eskiden
+# parents[1] idi - bu script tests/manual/ altinda oldugu icin bu aslinda
+# GERCEK proje kokune degil, sadece tests/ klasorune isaret ediyordu
+# (experiment_manager.py'de bulunanla AYNI sinif hata: dosya tasinmis
+# ama kendi path matematigi guncellenmemis). parents[2] artik dogru
+# sekilde gercek proje kokune isaret ediyor.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+TEST_DIR_NAME = "e2e_test_alani"
 EXPECTED_CONTENT = "JARVIS BUILD TEST OK"
-TARGET_FILE = PROJECT_ROOT / "jarvis_build_test.txt"
+TARGET_FILE = PROJECT_ROOT / TEST_DIR_NAME / "jarvis_build_test.txt"
 
+# DUZELTME (2026-09-28, canli testte bulundu): GOAL eskiden "Proje kok
+# dizininde" diyordu - gercek planner_ai (Gemini) bunu "kritik dosya
+# degisikligi" olarak yorumlayip coder_ai'ye risk=high ile yonlendirdi
+# (onay bekletti, executor_ai/file_controller HIC calismadi - yani
+# _verify_file_action() bu testte hic tetiklenmemis oluyordu, asil test
+# amacinin disina cikiliyordu). Hedef artik acikca ayri, atilabilir bir
+# test klasorune (e2e_test_alani/) tasindi ki planner bunu basit/dusuk
+# riskli bir dosya islemi olarak siniflandirsin.
+#
 # Planner'ın (gerçek LLM) adım açıklamasında tırnak/backtick içinde net bir
 # dosya adı + içerik üretmesi ihtimalini artırmak için goal metni kasıtlı
 # olarak _extract_quoted() deseniyle (bkz. core/brain_orchestrator.py) uyumlu,
 # çok açık ve TEK bir işlemle sınırlı yazıldı.
 GOAL = (
-    "Proje kök dizininde SADECE şu tek işlemi yap: `jarvis_build_test.txt` "
-    "adlı YENİ bir dosya oluştur. Dosyanın içeriği TAM OLARAK şu olsun (tek "
-    "karakter bile değiştirme, tırnak işaretlerini içeriğe dahil etme): "
-    "'JARVIS BUILD TEST OK'. Başka HİÇBİR dosyaya dokunma, başka HİÇBİR "
-    "işlem yapma, yedek alma isteği ekleme - bu SADECE tek adımlık bir dosya "
-    "oluşturma testidir."
+    f"`{TEST_DIR_NAME}` adlı bir test klasöründe (yoksa önce oluştur) SADECE "
+    "şu tek işlemi yap: `jarvis_build_test.txt` adlı YENİ bir dosya oluştur. "
+    "Dosyanın içeriği TAM OLARAK şu olsun (tek karakter bile değiştirme, "
+    "tırnak işaretlerini içeriğe dahil etme): 'JARVIS BUILD TEST OK'. Başka "
+    "HİÇBİR dosyaya dokunma, başka HİÇBİR işlem yapma, yedek alma isteği "
+    "ekleme - bu SADECE atılabilir bir test klasöründeki tek adımlık bir "
+    "dosya oluşturma testidir, kaynak koda dokunmaz."
 )
 
 TIMEOUT_SECONDS = 150

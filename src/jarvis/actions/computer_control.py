@@ -17,7 +17,7 @@ from pathlib import Path
 from jarvis.paths import memory_dir
 
 try:
-    import pyautogui
+    from jarvis.desktop_io import gui as pyautogui
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE    = 0.05
     _PYAUTOGUI = True

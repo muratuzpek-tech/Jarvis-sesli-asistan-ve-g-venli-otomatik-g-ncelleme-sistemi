@@ -196,7 +196,7 @@ def _get_steam_window_rect() -> tuple[int, int, int, int] | None:
 def _click_first_profile_by_screenshot() -> bool:
 
     try:
-        import pyautogui
+        from jarvis.desktop_io import gui as pyautogui
         import numpy as np
 
         time.sleep(1.5)
@@ -255,7 +255,7 @@ def _handle_steam_profile_selection() -> bool:
 
     wx, wy, ww, wh = win
     try:
-        import pyautogui
+        from jarvis.desktop_io import gui as pyautogui
         import numpy as np
         screenshot   = pyautogui.screenshot(region=(wx, wy, ww, wh))
         img          = np.array(screenshot)
@@ -346,7 +346,7 @@ def _click_button(window, keywords: list[str]) -> bool:
 
 def _handle_install_dialog_pyautogui(game_name: str, best_drive: dict) -> str:
     try:
-        import pyautogui
+        from jarvis.desktop_io import gui as pyautogui
         import pygetwindow as gw
     except ImportError:
         return (f"Install dialog opened for '{game_name}'. "
