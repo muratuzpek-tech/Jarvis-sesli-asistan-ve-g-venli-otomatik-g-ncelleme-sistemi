@@ -309,3 +309,34 @@ def placeholder_data_outputs(project_dir: Path, expected_outputs: list, descript
                 f"Program veriyi gerçek kaynaktan (site/dosya) okumalı; örnek veri yazıp başarılı gibi görünmemeli."
             )
     return problems
+
+
+_TRUNC = re.compile(r"(?:\.\.\.|…)\s*$")
+
+
+def truncated_value_outputs(project_dir: Path, expected_outputs: list) -> list[str]:
+    """Çıktı değerleri '...' ile KESİLMİŞ mi? (canlı test 2026-09-29: kitap
+    kazıyıcı bağlantı metnini aldı — 'A Light in the ...' — tam ad title=
+    özniteliğindeydi; JARVIS 'çalışıyor' dedi ama veri eksikti.)"""
+    problems = []
+    for item in expected_outputs or []:
+        rel = item.get("path") if isinstance(item, dict) else str(item)
+        if not rel or Path(rel).suffix.lower() not in {".csv", ".json", ".txt", ".tsv", ".md", ".html"}:
+            continue
+        target = project_dir / rel
+        try:
+            target.resolve().relative_to(project_dir.resolve())
+            if target.stat().st_size > 5_000_000:
+                continue
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            continue
+        values = [v.strip().strip('"') for v in re.split(r"[\n,;\t]|\":\s*\"|\"\s*[,}\]]", text) if v.strip()]
+        cut = [v for v in values if len(v) > 4 and _TRUNC.search(v)]
+        if len(cut) >= 3 and len(cut) >= 0.2 * max(1, len(values) // 2):
+            problems.append(
+                f"'{rel}' contains {len(cut)} TRUNCATED values ending with '...' (e.g. {cut[0][:60]!r}). This is "
+                f"shortened display text; take the FULL value (e.g. the title= attribute of the link, or the "
+                f"detail page) instead of the visible text."
+            )
+    return problems

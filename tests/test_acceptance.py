@@ -178,3 +178,20 @@ def test_bare_html_tag_token_accepts_attributes():
     assert _token_found("<TABLE>", "<table\n class=x>")
     assert not _token_found("<table>", "<tablet>")
     assert not _token_found("<table>", "tablo yok")
+
+
+def test_fixture_mtime_is_applied(tmp_path):
+    spec, why = validate_spec({
+        "applicable": True,
+        "fixtures": [{"path": "foto/a.jpg", "content": "x", "mtime": "2024-01-15"}],
+        "args": ["{FIXTURE}/foto"],
+        "expect": [{"output": "STDOUT", "contains": ["2024-01"]}],
+    })
+    assert spec, why
+    (tmp_path / "main.py").write_text(
+        "import sys, datetime, pathlib\n"
+        "for p in pathlib.Path(sys.argv[1]).iterdir():\n"
+        "    print(datetime.datetime.fromtimestamp(p.stat().st_mtime).strftime('%Y-%m'))\n")
+    assert run_acceptance(tmp_path, "main.py", spec)[0] == []
+    assert validate_spec({**spec, "applicable": True,
+                          "fixtures": [{"path": "a", "content": "", "mtime": "dün"}]})[0] is None

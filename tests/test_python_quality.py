@@ -180,3 +180,14 @@ def test_real_quotes_are_not_flagged(tmp_path):
         '"author": "Albert Einstein"}, {"id": 2, "text": "It is our choices, Harry...", "author": "J.K. Rowling"}]'
     )
     assert placeholder_data_outputs(tmp_path, [{"path": "quotes.json"}], "kazı") == []
+
+
+def test_truncated_values_are_detected(tmp_path):
+    from jarvis.actions.devkit.python_quality import truncated_value_outputs
+    (tmp_path / "books.csv").write_text(
+        "ad,fiyat\nA Light in the ...,51.77\nTipping the Velvet,53.74\nSoumission,50.10\n"
+        "Sharp Objects,47.82\nSapiens: A Brief History ...,54.23\nThe Requiem Red,22.65\n"
+        "The Dirty Little Secrets ...,33.34\n")
+    assert truncated_value_outputs(tmp_path, [{"path": "books.csv"}])
+    (tmp_path / "ok.csv").write_text("ad,fiyat\nA Light in the Attic,51.77\nSoumission,50.10\nWait...,1\n")
+    assert truncated_value_outputs(tmp_path, [{"path": "ok.csv"}]) == []

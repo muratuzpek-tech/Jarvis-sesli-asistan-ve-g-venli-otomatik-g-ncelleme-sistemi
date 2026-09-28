@@ -3268,8 +3268,16 @@ def _build_project(
             # YETMIYOR. Ici bos fonksiyon / cift __main__ / yalnizca basliktan
             # olusan rapor varsa proje BASARILI SAYILMAZ; duzeltme turuna girer.
             quality = _python_quality_issues(file_codes)
-            from jarvis.actions.devkit.python_quality import header_only_outputs, placeholder_data_outputs
+            from jarvis.actions.devkit.python_quality import (
+                header_only_outputs,
+                placeholder_data_outputs,
+                truncated_value_outputs,
+            )
             header_problems = header_only_outputs(project_dir, expected_outputs)
+            for _p in truncated_value_outputs(project_dir, expected_outputs):
+                quality.setdefault(entry_point, []).append(
+                    {"code": "OUTPUT-TRUNCATED", "message": _p, "line": 0, "col": 0}
+                )
             for _p in placeholder_data_outputs(project_dir, expected_outputs, description):
                 quality.setdefault(entry_point, []).append(
                     {"code": "OUTPUT-PLACEHOLDER-DATA", "message": _p, "line": 0, "col": 0}

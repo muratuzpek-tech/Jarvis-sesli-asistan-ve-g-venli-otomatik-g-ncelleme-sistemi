@@ -67,11 +67,12 @@ def snapshot() -> str:
             f"ram={mem.percent}% ({mem.used // 2**20} MB) disk={disk.percent}%")
 
 if __name__ == "__main__":
+    count = 5                                          # görevin istediği ölçüm sayısı
     lines = []
-    for _ in range(3):
+    for _ in range(count):
         lines.append(snapshot())
-        time.sleep(1)
-    Path("report.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        time.sleep(2)
+    Path("system_usage.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
 '''
 
 ZIP_BACKUP = r'''
@@ -139,7 +140,7 @@ if __name__ == "__main__":
     urls = [u.strip() for u in open(sys.argv[1], encoding="utf-8") if u.strip()]
     with ThreadPoolExecutor(max_workers=8) as ex:  # GUI yok; sonuçları beklemek doğru
         results = list(ex.map(status, urls))
-    with open("linkler.txt", "w", encoding="utf-8") as fh:
+    with open("url_status.txt", "w", encoding="utf-8") as fh:
         fh.writelines(f"{u} {s}\n" for u, s in results)
 '''
 

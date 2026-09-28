@@ -21,6 +21,7 @@ Akış (dev_agent._build_project içinden):
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -56,6 +57,8 @@ If applicable, create a small sample input ("fixtures") whose correct result you
 and list short tokens that ANY correct output must contain regardless of formatting:
 identifiers (function names), file names, or numbers — NOT full sentences, NOT line formats.
 Every token must be justified by the fixtures. Include at least one token per requested feature.
+If the result depends on file DATES (modification time), give EVERY fixture an "mtime": "YYYY-MM-DD" —
+otherwise fixtures are created with today's date and date-based expectations cannot hold.
 
 Return ONLY JSON:
 {{
@@ -115,7 +118,13 @@ def validate_spec(spec: object) -> tuple[dict | None, str]:
         content = fx.get("content", "")
         if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_FIXTURE_BYTES:
             return None, f"örnek dosya içeriği geçersiz/çok büyük: {fx.get('path')}"
-        clean_fx.append({"path": str(fx["path"]).replace("\\", "/"), "content": content})
+        item = {"path": str(fx["path"]).replace("\\", "/"), "content": content}
+        mtime = str(fx.get("mtime", "") or "").strip()
+        if mtime:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2})?", mtime):
+                return None, f"geçersiz mtime: {mtime!r}"
+            item["mtime"] = mtime
+        clean_fx.append(item)
     args = spec.get("args", [])
     if not isinstance(args, list) or len(args) > 10 or not all(isinstance(a, str) and len(a) < 300 for a in args):
         return None, "args düz metin listesi olmalı"
@@ -204,6 +213,12 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
         target.relative_to(fixture.resolve())  # validate_spec zaten garanti ediyor; ikinci kilit
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(fx["content"], encoding="utf-8")
+        if fx.get("mtime"):
+            # Tarihe bağlı görevler için (canlı test 2026-09-29: örnek dosyalar
+            # bugünün tarihiyle oluştuğu için '2024-01' beklentisi imkânsızdı).
+            from datetime import datetime
+            ts = datetime.fromisoformat(fx["mtime"].replace(" ", "T")).timestamp()
+            os.utime(target, (ts, ts))
 
     uses_url = any(URL_PLACEHOLDER in a for a in spec["args"])
     server = _serve_directory(fixture) if uses_url else None
