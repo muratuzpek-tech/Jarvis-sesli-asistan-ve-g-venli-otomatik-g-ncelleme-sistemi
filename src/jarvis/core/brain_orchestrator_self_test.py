@@ -274,24 +274,32 @@ def run() -> bool:
         old_cwd = __import__("os").getcwd()
         __import__("os").chdir(verify_dir)
         try:
+            # DUZELTME (2026-09-28, self-test guncellemesi): _verify_file_action
+            # artik (task, step, base_path=".") istiyor - asagidaki cagrilar
+            # eskiden tek bir dict (step) aliyordu, simdi ayrica bos bir
+            # 'task' da geciliyor (goal-fallback bu senaryolarda test
+            # edilmiyor, o yuzden bos payload yeterli).
+            verify_task = {"id": "T-verify", "payload": {}}
             # a) create_folder GERÇEKTEN oluşmuşsa -> exists=True, error=None
             (verify_dir / "klasorum").mkdir()
-            v = orch._verify_file_action({"agent": "executor_ai",
+            v = orch._verify_file_action(verify_task, {"agent": "executor_ai",
                                            "description": "`klasorum` adlı bir klasör oluşturmak."})
             assert v is not None and v["exists"] is True and v["error"] is None, \
                 f"Gerçekten var olan klasör için exists=True/error=None dönmeliydi: {v!r}"
 
             # b) create_folder GERÇEKTE oluşmamışsa -> exists=False + hata metni
-            v = orch._verify_file_action({"agent": "executor_ai",
+            v = orch._verify_file_action(verify_task, {"agent": "executor_ai",
                                            "description": "`hicyok` adlı bir klasör oluşturmak."})
             assert v is not None and v["exists"] is False and v["error"] and "klasör" in v["error"], \
                 f"Var olmayan klasör YAKALANMALIYDI: {v!r}"
 
             # c) create_file içerik DOĞRUysa -> exists=True, content_matches
-            #    True/None (bu senaryoda content boş gönderildiği için
-            #    karşılaştırma hiç yapılmıyor -> None), error=None
-            (verify_dir / "a.txt").write_text("merhaba", encoding="utf-8")
-            v = orch._verify_file_action({"agent": "executor_ai",
+            #    True (content hiç belirtilmedigi icin beklenen ""; dosya da
+            #    GERCEKTEN bos olusturulmussa bu artik HER ZAMAN karsilastirilip
+            #    trivyal sekilde eslesir - bkz. _resolve_action_with_file_modification
+            #    icindeki 2026-09-28 "0 byte sessizce gecme" duzeltmesi), error=None
+            (verify_dir / "a.txt").write_text("", encoding="utf-8")
+            v = orch._verify_file_action(verify_task, {"agent": "executor_ai",
                                            "description": "`a.txt` adlı bir dosya oluşturmak."})
             assert v is not None and v["exists"] is True and v["content_matches"] is not False and v["error"] is None, \
                 f"İçeriği (boş) doğru olan create_file için exists=True/error=None dönmeliydi: {v!r}"
@@ -301,7 +309,7 @@ def run() -> bool:
             #    önceden bu kontrol SADECE create_file için yapılıyordu, write
             #    buradan GEÇİYORDU.
             (verify_dir / "b.txt").write_text("BOZULMUŞ", encoding="utf-8")
-            v = orch._verify_file_action({"agent": "executor_ai",
+            v = orch._verify_file_action(verify_task, {"agent": "executor_ai",
                                            "description": "`b.txt` dosyasına 'doğru içerik' metnini yazmak."})
             assert v is not None and v["content_matches"] is False and v["error"] and "eşleşmiyor" in v["error"], \
                 f"write için içerik uyuşmazlığı YAKALANMALIYDI (önceden buradan geçiyordu!): {v!r}"
@@ -311,12 +319,12 @@ def run() -> bool:
 
             # e) isim çıkarılamıyorsa (boş) -> None (bu güvenlik ağının kapsamı
             #    dışında - eski davranış korunuyor, görevi ÇÖKERTMEZ).
-            v = orch._verify_file_action({"agent": "executor_ai",
+            v = orch._verify_file_action(verify_task, {"agent": "executor_ai",
                                            "description": "Bir şeyler yap ama isim belirtme."})
             assert v is None, f"İsim çıkarılamayan adımda bu kontrol devre dışı kalmalıydı: {v!r}"
 
             # f) executor_ai DIŞINDAKİ bir agent'a hiç karışmamalı.
-            v = orch._verify_file_action({"agent": "research_ai",
+            v = orch._verify_file_action(verify_task, {"agent": "research_ai",
                                            "description": "`a.txt` adlı bir dosya oluşturmak."})
             assert v is None, f"research_ai adımına bu güvenlik ağı hiç karışmamalıydı: {v!r}"
             print("[OK] _verify_file_action(): kapsam sınırları (boş isim, executor_ai dışı agent) "
