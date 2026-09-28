@@ -119,3 +119,14 @@ def test_extra_stdlib_recipes_really_work(tmp_path):
 
     out = _run(x.ZIP_BACKUP, tmp_path, "k")
     assert out.returncode == 0 and "3 dosya" in out.stdout
+
+
+@pytest.mark.parametrize("desc,folder", [
+    ("satislar.csv toplamlarını çalışma klasöründeki ozet.json dosyasına yaz", False),
+    ("sonucu çalışma klasörüne kaydet", False),
+    ("metinler klasöründeki txt dosyalarını say, çalışma klasöründeki report.txt'ye yaz", True),
+    ("bir klasördeki dosyaları tara", True),
+])
+def test_working_folder_phrase_does_not_trigger_folder_scan(desc, folder):
+    """PR #20 kod incelemesi: 'çalışma klasöründeki' hemen her görevde geçiyordu."""
+    assert ("folder_walk" in [n for n, _ in r.select_recipes(desc)]) is folder

@@ -167,6 +167,16 @@ def _web_static(d: str) -> bool:
     return has_url(d) and needs_browser_or_web(d) and not needs_browser(d)
 
 
+_WORKDIR_PHRASE = re.compile(r"(?:çalışma|calisma|working)\s+(?:klasör|klasor|folder|directory)\w*", re.IGNORECASE)
+_FOLDER_SCAN = re.compile(r"klasör|klasor|folder|dizin|directory", re.IGNORECASE)
+
+
+def _folder_scan(d: str) -> bool:
+    """Klasör TARAMA isteği mi? "çalışma klasöründeki X'e yaz" hemen her görevde
+    geçtiği için önce bu kalıp çıkarılır (PR #20 kod incelemesi bulgusu)."""
+    return bool(_FOLDER_SCAN.search(_WORKDIR_PHRASE.sub(" ", d)))
+
+
 # Öncelik sırasıyla (ad, eşleştirici, kod). Görev metnine uyan ilk `limit` tanesi seçilir.
 _TABLE = [
     ("playwright_scroll", needs_browser, PLAYWRIGHT_SCROLL),
@@ -181,7 +191,7 @@ _TABLE = [
     ("file_organize", _W(r"uzantı|uzanti|tarihe göre|tarihe gore|organize|sınıflandır|siniflandir|klasörlere ayır"),
      _x.FILE_ORGANIZE),
     ("csv_aggregate", _W(r"\bcsv\b"), CSV_AGGREGATE),
-    ("folder_walk", _W(r"klasör|klasor|folder|dizin|directory"), FOLDER_WALK),
+    ("folder_walk", _folder_scan, FOLDER_WALK),
     ("sqlite_store", _W(r"sqlite|veritaban|database|\.db\b"), SQLITE_STORE),
     ("json_api", _W(r"\bapi\b|json endpoint|\brest\b"), JSON_API),
 ]

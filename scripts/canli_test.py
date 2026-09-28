@@ -174,6 +174,8 @@ def calistir(gorev: dict, kok: Path) -> dict:
         dogru, neden = True, ""
     except (AssertionError, json.JSONDecodeError, OSError, StopIteration) as e:
         dogru, neden = False, str(e)[:300]
+    except Exception as e:  # noqa: BLE001 - beklenmeyen çıktı biçimi turu DURDURMAMALI
+        dogru, neden = False, f"doğrulama beklenmeyen çıktı yüzünden başarısız: {type(e).__name__}: {e}"[:300]
 
     if dogru and jarvis_dedi:
         durum = "GEÇTİ"

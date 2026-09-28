@@ -39,3 +39,18 @@ def test_correct_outputs_are_accepted(tmp_path):
     G[109]["dogrula"](tmp_path)
     (tmp_path / "uzantilar.txt").write_text(".txt: 3\n.go: 2\n.md: 1\n")
     G[111]["dogrula"](tmp_path)
+
+
+def test_unexpected_output_shape_does_not_abort_the_run(tmp_path, monkeypatch):
+    """PR #20 kod incelemesi: doğrulayıcıdan TypeError/ValueError tüm turu durdurmamalı."""
+    import canli_test as ct
+
+    monkeypatch.setattr(ct.da, "PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr(ct.da, "_build_project", lambda **k: "Project 'x' is working")
+
+    def boom(proje):
+        raise TypeError("'NoneType' object is not subscriptable")
+
+    sonuc = ct.calistir({"no": 999, "ad": "patlayan", "dil": "python", "hazirla": None,
+                         "dogrula": boom, "tarif": "x"}, tmp_path)
+    assert sonuc["durum"] == "YALANCI BAŞARI" and "TypeError" in sonuc["neden"]
