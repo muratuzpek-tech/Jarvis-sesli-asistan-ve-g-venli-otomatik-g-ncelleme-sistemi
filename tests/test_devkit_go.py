@@ -297,3 +297,27 @@ def test_stack_regex_keeps_windows_drive_letter():
 
     m = _STACK_RE.search("\tC:/Users/murat/proj/main.go:7 +0x1d")
     assert m and m.group(1) == "C:/Users/murat/proj/main.go" and m.group(2) == "7"
+
+
+@pytest.mark.skipif(not HAS_GO, reason="go kurulu değil")
+def test_lint_only_findings_stop_blocking_after_three_rounds(tmp_path, monkeypatch):
+    """Canlı test 2026-09-29: build + vet temizken yalnızca lint yüzünden 6 tur
+    harcandı ve program hiç çalıştırılmadı."""
+    from types import SimpleNamespace
+
+    from jarvis.actions.devkit import go_builder
+
+    calls = []
+
+    def always_lint_findings(self):
+        calls.append(1)
+        return SimpleNamespace(ok=False, output="main.go:3:1: exported func should have comment (revive)"), []
+
+    monkeypatch.setattr(go_builder.GoToolchain, "lint", always_lint_findings)
+    llm = FakeLLM([GOOD_MAIN], [GOOD_MAIN] * 10)
+    logs: list[str] = []
+    msg = build_go_project("rapor yaz", generate=llm, projects_dir=tmp_path, log=logs.append)
+    assert "çalışıyor" in msg and "3. turda" in msg, (msg, logs)
+    assert "stil uyarıları" in msg and "revive" in msg
+    assert (tmp_path / "ram_report" / "report.log").read_text().strip() == "RAM OK"
+    assert len(calls) == 3
