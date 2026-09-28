@@ -134,18 +134,27 @@ _QUOTED_RE = re.compile(r"[`'\"]([^`'\"]+)[`'\"]")
 
 
 def _extract_quoted(description: str) -> tuple[str, str]:
-    name, content = "", ""
-    for match in _QUOTED_RE.findall(description):
-        q = match.strip()
-        if not q:
-            continue
-        if " " in q:
-            if not content:
-                content = q
-        else:
-            if not name:
-                name = q
-    return name, content
+    matches = [m.strip() for m in _QUOTED_RE.findall(description) if m.strip()]
+    if not matches:
+        return "", ""
+    if len(matches) == 1:
+        # Tek tirnakli/backtick'li parca varsa eski sezgi aynen korunur:
+        # icinde bosluk varsa ICERIK, yoksa AD sayilir (geriye donuk uyumlu).
+        q = matches[0]
+        return ("", q) if " " in q else (q, "")
+    # DUZELTME (gercek canli hata, 2026-09-28, "jarvis_test_kaydi.txt 0
+    # byte" bulgusu): iki (veya daha fazla) tirnakli/backtick'li parca
+    # varsa, rol ARTIK ic boslugun olup olmamasina degil SIRAYA gore
+    # belirleniyor - ilki AD, ikincisi ICERIK sayilir. Eski "bosluk var mi"
+    # sezgisi, "JARVIS_DIRECT_WRITE_OK" gibi TEK KELIMELIK (bosluksuz) ama
+    # GERCEK bir icerik oldugunda - bu projenin kendi HelloProof/
+    # SQLiteProof/vb. testlerinde defalarca kullanilan TAM OLARAK bu bicimde
+    # - onu SESSIZCE gormezden geliyordu: iki quoted parca da bosluksuzsa
+    # (ör. `dosya.txt` ve `ICERIK_TEK_KELIME`), content hicbir zaman
+    # dolmuyordu. Iki ayri parca acikca verildiginde hangisinin ad
+    # hangisinin icerik oldugu zaten SIRADAN belli - bosluk kontrolüne
+    # gerek yok.
+    return matches[0], matches[1]
 
 
 class BrainOrchestrator:
@@ -721,6 +730,69 @@ class BrainOrchestrator:
                 except Exception:
                     pass
 
+                # DUZELTME (gercek canli hata, 2026-09-28, "jarvis_test_kaydi.txt
+                # 0 byte" bulgusu): yukaridaki geri kazanim denemesi de
+                # basarisiz olursa (goal metninde de tirnak/backtick icinde
+                # icerik yoksa - GERCEK kullanici komutlarinda neredeyse hic
+                # olmuyor, insanlar icerigi tirnaga almaz), content hala ""
+                # kaliyordu ve bu SESSIZCE file_controller'a gonderiliyordu:
+                # create_file/write kendi ic dogrulamasinda gonderilen icerik
+                # zaten "" oldugu icin "" == "" GECERLI sayilip GERCEKTEN
+                # basarili donuyordu - 0 byte'lik bir dosya "File created"
+                # diye raporlaniyordu. _verify_file_action (bagimsiz denetim)
+                # da content bos oldugu icin icerigi hic KARSILASTIRMIYORDU
+                # (content_matches=None, "kontrol edilmedi" anlaminda), yani
+                # bu guvenlik agi da bu spesifik hatayi YAKALAYAMIYORDU
+                # (canli kanit: '/home/murat/.../jarvis_test_kaydi.txt' ->
+                # exists=True, bytes=0, content="").
+                #
+                # Kok neden NLP tarafinda: _extract_quoted() SADECE tirnak/
+                # backtick icindeki metni icerik sayar; bu duzeltilemeyecek
+                # kadar kirilgan bir sezgi (dogal dilde icerik neredeyse hic
+                # tirnaklanmaz). Cozum: SESSIZCE YANLIS (bos) bir deger
+                # uretip basarili gibi davranmak yerine ACIKCA BASARISIZ OL -
+                # kullanici acikca "bos dosya" istemedigi surece, icerigi
+                # cikarilamayan bir create_file/write adimi ARTIK sessizce
+                # 0 byte'lik "basarili" bir dosya uretmiyor; adim FAILED
+                # olarak isaretlenip planner/kullaniciya gercek nedeni
+                # bildiriliyor (bkz. _tick()/approve() - RuntimeError burada
+                # failed_steps'e duser, gorev sessizce "basarili" sayilmaz).
+                # DUZELTME (mevcut e2e_file_task_self_test.py ile bulundu):
+                # yukaridaki ilk versiyon HER bos-content create_file/write
+                # adimini hata sayiyordu - ama bu, GECERLI bir plan deseninde
+                # (once bos dosya OLUSTUR, SONRA AYRI bir adimda GERCEK
+                # icerigi yaz - bkz. o test dosyasinin 2/3. adimlari) yanlis
+                # pozitif uretiyordu: "adı X olan bir dosya oluştur" gibi bir
+                # adimin acikca icerikle hicbir ilgisi yok, bos content
+                # burada TAMAMEN normal/beklenen. Ayirt edici gercek sinyal,
+                # content'in bos olmasi DEGIL - bu ADIMIN AÇIKLAMASININ
+                # (yalnizca BU adimin - genel "goal" degil, cunku goal daha
+                # sonraki bir adimdan bahsediyor olabilir) zaten bir icerik
+                # yazma niyeti tasimasi AMA yine de content'in bos kalmasidir.
+                if not params.get("content"):
+                    desc_lower = desc.lower()
+                    has_content_intent = (
+                        params.get("action") == "write"
+                        or (
+                            any(k in desc_lower for k in ("yaz", "içine", "içerik", "write", "content"))
+                            and not any(k in desc_lower for k in ("yazılım", "yazar", "yazıcı"))
+                        )
+                    )
+                    explicitly_empty = any(
+                        k in desc_lower
+                        for k in ("boş dosya", "boş bir dosya", "içeriksiz", "empty file", "boşalt", "temizle")
+                    )
+                    if has_content_intent and not explicitly_empty:
+                        raise RuntimeError(
+                            f"İçerik belirlenemedi: '{params.get('name')}' için yazılacak "
+                            f"GERÇEK içerik, adım açıklamasından veya hedeften çıkarılamadı "
+                            f"(içerik tırnak/backtick içinde değil). Sessizce 0 byte'lık bir "
+                            f"dosya oluşturup başarılı saymak yerine bu adım BAŞARISIZ "
+                            f"sayıldı - planner'ın 'parameters.content' alanını açıkça "
+                            f"doldurması gerekiyor. Kasıtlı olarak boş bir dosya isteniyorsa "
+                            f"adımda açıkça 'boş dosya' belirtin."
+                        )
+
             return self.bus.send("orchestrator", "executor_ai", desc, payload={"action": action, "params": params})
 
         raise RuntimeError(f"Bilinmeyen/uygun olmayan beyin: {agent!r}")
@@ -799,7 +871,21 @@ class BrainOrchestrator:
             # testin KENDI ayri son kontrolu tarafindan yakalandi).
             # file_controller.write_file() ile AYNI append/overwrite
             # mantigiyla simdi "write" icin de icerik karsilastiriliyor.
-            if inner in ("create_file", "write") and params.get("content"):
+            #
+            # DUZELTME (gercek canli hata, 2026-09-28): bu kontrol ONCEDEN
+            # SADECE "params.get('content')" DOLU ise calisiyordu - yani
+            # content zaten yukari akiste ("_execute_step") bos kaldiysa bu
+            # bagimsiz dogrulama devre disi kalip content_matches=None
+            # donuyordu, "kontrol edilmedi" _finish_step tarafindan "aksi
+            # ispatlanmadi" gibi degerlendirilip basariya cevriliyordu (bkz.
+            # _finish_step: "content_matches is not False" -> None de gecer).
+            # Artik content bos OLSA BILE karsilastirma HER ZAMAN yapiliyor -
+            # gercekten bos bir dosya istenmisse (content="" beklenen) bu
+            # trivyal sekilde eslesir (True), ama dosyada BASKA/eski bir
+            # icerik kalmissa (ör. write basarisiz/yarim kaldi ya da eski
+            # dosya ustune yazilmadi) artik bu da YAKALANIR (False) - eskiden
+            # sessizce gozden kaciyordu.
+            if inner in ("create_file", "write"):
                 actual = target.read_text(encoding="utf-8")
                 content = params.get("content", "")
                 ok = actual.endswith(content) if (inner == "write" and params.get("append")) else (actual == content)
