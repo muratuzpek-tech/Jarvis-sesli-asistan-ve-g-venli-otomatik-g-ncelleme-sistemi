@@ -18,8 +18,9 @@ import ast
 import re
 from pathlib import Path
 
-# Bir çıktı dosyası bundan az "anlamlı" satır içeriyorsa yalnızca başlık sayılır.
-MIN_CONTENT_LINES = 3
+# Bir çıktı dosyası bundan az "anlamlı" satır içeriyorsa yalnızca başlık sayılır
+# (başlık + en az bir gerçek sonuç satırı = 2).
+MIN_CONTENT_LINES = 2
 
 _PLACEHOLDER_RE = re.compile(r"\b(placeholder|todo|fixme|not implemented|implement (this|me|later))\b", re.I)
 _STUB_DECORATORS = {"abstractmethod", "overload", "abc.abstractmethod", "typing.overload"}

@@ -68,7 +68,12 @@ def _get_model(model_name: str):
             return _OllamaResponse(data.get("response", ""))
 
     # Ollama gercekten calisiyor mu, hizli bir saglik kontrolu (1sn)
+    # JARVIS_DEVAGENT_PREFER=gemini: yerel model yerine doğrudan Gemini (daha güçlü,
+    # ama kota tüketir). Varsayılan: önce yerel Ollama.
+    prefer_gemini = os.environ.get("JARVIS_DEVAGENT_PREFER", "").strip().lower() == "gemini"
     try:
+        if prefer_gemini:
+            raise RuntimeError("Gemini tercih edildi")
         tags = _requests.get("http://localhost:11434/api/tags", timeout=5).json()
         installed = {m.get("name", "") for m in tags.get("models", [])}
         if OLLAMA_MODEL not in installed and "qwen2.5-coder:7b" in installed and not os.environ.get("JARVIS_DEVAGENT_MODEL"):
@@ -128,6 +133,23 @@ def _strip_fences(text: str) -> str:
     text = re.sub(r"^```[a-zA-Z]*\r?\n?", "", text)
     text = re.sub(r"\r?\n?```\s*$", "", text)
     return text.strip()
+
+
+def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
+    """Kabul testi spesifikasyonu ister; her hatada None (build engellenmez)."""
+    try:
+        from jarvis.actions.devkit.acceptance import build_prompt, parse_spec, validate_spec
+        response = _get_model(MODEL_PLANNER).generate_content(build_prompt(description, plan))
+        spec, reason = validate_spec(parse_spec(response.text))
+    except Exception as e:  # noqa: BLE001
+        log(f"ℹ️ Kabul testi hazırlanamadı ({type(e).__name__}); yalnızca kalite kapısı kullanılacak.")
+        return None
+    if spec is None:
+        log(f"ℹ️ Kabul testi uygulanmayacak: {reason}")
+        return None
+    tokens = sum(len(e["contains"]) for e in spec["expect"])
+    log(f"🧪 Kabul testi hazır: {len(spec['fixtures'])} örnek dosya, {tokens} beklenen ifade.")
+    return spec
 
 
 def _python_quality_issues(file_codes: dict[str, str]) -> dict[str, list[dict]]:
@@ -2622,6 +2644,18 @@ def _build_project(
     proj_name    = project_name or plan.get("project_name", "jarvis_project")
     proj_name    = re.sub(r"[^\w\-]", "_", proj_name)
     project_dir  = PROJECTS_DIR / proj_name
+    # DUZELTME (2026-09-28): ayni adla yeni proje kurulurken eski denemenin
+    # dosyalari (eski main.py, utils/...) klasorde kalip yenileriyle karisiyordu.
+    # Eski klasor SILINMEZ, PROJECTS_DIR/.arsiv altina tasinir.
+    if project_dir.is_dir() and any(project_dir.iterdir()):
+        archive_root = PROJECTS_DIR / ".arsiv"
+        archive_root.mkdir(parents=True, exist_ok=True)
+        archived = archive_root / f"{proj_name}-{time.strftime('%Y%m%d-%H%M%S')}"
+        try:
+            shutil.move(str(project_dir), str(archived))
+            log(f"📦 Aynı adlı önceki proje arşivlendi: {archived}")
+        except OSError as exc:
+            log(f"⚠️ Önceki proje arşivlenemedi ({exc}); dosyalar karışabilir.")
     project_dir.mkdir(parents=True, exist_ok=True)
 
     files        = plan.get("files", [])
@@ -2636,6 +2670,15 @@ def _build_project(
         for o in expected_outputs if o
     )
     gui_task = bool(re.search(r"\b(?:tkinter|tk\.)\b", description, re.IGNORECASE))
+
+    # KABUL TESTI (2026-09-28): program, cevabi onceden bilinen kucuk bir
+    # ornek uzerinde de calistirilip "istenen isi DOGRU yapiyor mu" diye
+    # sinanir - bkz. jarvis/actions/devkit/acceptance.py. Spesifikasyon
+    # uretilemezse/gecersizse test ATLANIR, build engellenmez.
+    acceptance_spec = None if gui_task else _plan_acceptance(description, plan, log)
+    if acceptance_spec:
+        from jarvis.actions.devkit.acceptance import contract_text
+        shared_contracts_text = (shared_contracts_text + "\n- " + contract_text(acceptance_spec)).strip()
 
     # Aynı proje adıyla yapılan tekrar denemelerde eski database.db/report
     # dosyası yeni çalışmanın sonucu gibi görünmemeli. Yalnızca planner'ın
@@ -2998,6 +3041,50 @@ def _build_project(
                     return msg
                 time.sleep(1)
                 continue
+            if acceptance_spec and not is_timeout:
+                from jarvis.actions.devkit.acceptance import describe_fixtures, run_acceptance
+                acc_problems, acc_output = run_acceptance(
+                    project_dir, entry_point, acceptance_spec, timeout=max(30, timeout * 2)
+                )
+                if acc_problems:
+                    log(f"❌ Kabul testi geçilemedi: {acc_problems[0][:200]}")
+                    last_output = "ACCEPTANCE TEST FAILED:\n" + "\n".join(acc_problems) + f"\n\nProgram output:\n{acc_output}"
+                    if attempt == MAX_FIX_ATTEMPTS:
+                        break
+                    acc_issue = {
+                        "code": "ACCEPTANCE-FAILED",
+                        "message": (
+                            "The program was run on this KNOWN sample input and gave a WRONG result. "
+                            f"Command: python {entry_point} {' '.join(acceptance_spec['args'])} "
+                            f"(<FIXTURE> = sample folder below). Problems: {' | '.join(acc_problems)[:1500]}\n"
+                            f"Sample input files:\n{describe_fixtures(acceptance_spec, 2000)}"
+                        ),
+                        "line": 0, "col": 0,
+                    }
+                    try:
+                        fixed = _fix_files(
+                            error_output=last_output[:2500],
+                            project_description=description,
+                            all_files=files,
+                            file_codes=file_codes,
+                            language=language,
+                            project_dir=project_dir,
+                            entry_point=entry_point,
+                            shared_contracts=shared_contracts_text,
+                            expected_outputs=expected_outputs_text,
+                            known_error_type="lint_error",
+                            lint_issues={fp: [acc_issue] for fp in file_codes},
+                            repeat_of_previous=(previous_fix_error_output == last_output),
+                        )
+                        file_codes.update(fixed)
+                        previous_fix_error_output = last_output
+                    except RateLimitError:
+                        msg = "Rate limit reached during acceptance fix. Project saved, check it manually in VSCode."
+                        if speak: speak(msg)
+                        return msg
+                    time.sleep(1)
+                    continue
+                log("✅ Kabul testi geçti (örnek girdide beklenen sonuçlar üretildi).")
             if is_timeout:
                 if expected_outputs:
                     verified_note = f" Beklenen çıktılar gerçekten doğrulandı ({', '.join(str(o.get('path', o)) if isinstance(o, dict) else str(o) for o in expected_outputs)})."
@@ -3013,6 +3100,8 @@ def _build_project(
                     f" Verified outputs: {', '.join(str(o.get('path', o)) if isinstance(o, dict) else str(o) for o in expected_outputs)}."
                     if expected_outputs else ""
                 )
+                if acceptance_spec:
+                    verified_note += " Acceptance test on a known sample input passed."
                 msg = (
                     f"Project '{proj_name}' is working, sir. "
                     f"Built in {attempt} attempt{'s' if attempt > 1 else ''}.{verified_note} "

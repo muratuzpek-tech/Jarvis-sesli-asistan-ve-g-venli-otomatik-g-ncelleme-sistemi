@@ -118,3 +118,105 @@ def test_never_reports_success_while_stubs_remain(env, monkeypatch):
     result = da._build_project("not uygulaması", "python", "", 10, player=None, speak=None)
     assert "is working" not in result
     assert "QUALITY GATE FAILED" in result
+
+
+# ── kabul testi + arşivleme ──────────────────────────────────────────────
+import json  # noqa: E402
+
+WC_PLAN = {
+    "project_name": "word_counter",
+    "entry_point": "main.py",
+    "files": [{"path": "main.py", "description": "counts words", "imports": []}],
+    "run_command": "python main.py /home/murat/notlar.txt",
+    "dependencies": [],
+    "expected_outputs": [{"path": "report.txt", "description": "word count"}],
+}
+
+WC_SPEC = {
+    "applicable": True,
+    "fixtures": [{"path": "in.txt", "content": "elma armut elma kiraz elma"}],
+    "args": ["{FIXTURE}/in.txt"],
+    "input_contract": "First argument is the text file.",
+    "expect": [{"output": "report.txt", "contains": ["elma: 3", "kiraz: 1"]}],
+}
+
+WC_HARDCODED = '''
+import collections
+from pathlib import Path
+
+
+def main() -> None:
+    text = "tek kelime"  # girdi dosyasini hic okumuyor
+    counts = collections.Counter(text.split())
+    lines = ["Kelime sayimi", "============"] + [f"{w}: {c}" for w, c in counts.most_common()]
+    Path("report.txt").write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+WC_REAL = '''
+import collections
+import sys
+from pathlib import Path
+
+
+def main() -> None:
+    src = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("notlar.txt")
+    text = src.read_text(encoding="utf-8") if src.exists() else "bos"
+    counts = collections.Counter(text.split())
+    lines = ["Kelime sayimi", "============"] + [f"{w}: {c}" for w, c in counts.most_common()]
+    Path("report.txt").write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+class AcceptanceModel:
+    def __init__(self, versions):
+        self.versions = list(versions)
+        self.prompts = []
+
+    def generate_content(self, prompt):
+        self.prompts.append(prompt)
+
+        class R:
+            pass
+
+        r = R()
+        if prompt.startswith("You design an ACCEPTANCE TEST"):
+            r.text = "```json\n" + json.dumps(WC_SPEC) + "\n```"
+        else:
+            r.text = self.versions.pop(0) if len(self.versions) > 1 else self.versions[0]
+        return r
+
+
+def test_acceptance_catches_wrong_result_and_old_project_is_archived(env, monkeypatch):
+    monkeypatch.setattr(da, "_plan_project", lambda d, lang: dict(WC_PLAN))
+    old = env / "word_counter"
+    old.mkdir()
+    (old / "eski.py").write_text("# önceki denemeden kalan dosya")
+    model = AcceptanceModel([WC_HARDCODED, WC_REAL])
+    monkeypatch.setattr(da, "_get_model", lambda name: model)
+
+    result = da._build_project("kelime sayici", "python", "", 10, player=None, speak=None)
+
+    assert "is working" in result and "Acceptance test" in result, result
+    fix = [p for p in model.prompts if p.startswith("You are an expert python debugger")]
+    assert fix and "ACCEPTANCE-FAILED" in fix[0] and "elma: 3" in fix[0]
+    proj = env / "word_counter"
+    assert not (proj / "eski.py").exists()
+    archived = list((env / ".arsiv").iterdir())
+    assert len(archived) == 1 and (archived[0] / "eski.py").exists()
+    assert "elma: 3" in (proj / ".jarvis/acceptance/run/report.txt").read_text(encoding="utf-8")
+
+
+def test_acceptance_failure_is_reported_honestly(env, monkeypatch):
+    monkeypatch.setattr(da, "_plan_project", lambda d, lang: dict(WC_PLAN))
+    model = AcceptanceModel([WC_HARDCODED])
+    monkeypatch.setattr(da, "_get_model", lambda name: model)
+    result = da._build_project("kelime sayici", "python", "", 10, player=None, speak=None)
+    assert "is working" not in result and "ACCEPTANCE TEST FAILED" in result
