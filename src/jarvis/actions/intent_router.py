@@ -211,6 +211,23 @@ def _extract_quoted_parts(text: str) -> tuple[str, str]:
 
 
 
+# match_file_modification() icin sinirlar ve desenler (bkz. o fonksiyondaki
+# 2026-09-28 DUZELTME notlari).
+_FILE_MOD_MAX_CHARS = 300
+_FILE_MOD_CREATE_RE = re.compile(
+    r"(?<!\w)(?:olu.{0,2}tur(?:un|sana|ur\s+musun|abilir\s+misin)?"
+    r"|yarat(?:ın|in|sana)?|create|meydana\s+getir)(?!\w)"
+)
+_FILE_MOD_WRITE_RE = re.compile(
+    r"(?<!\w)(?:yaz(?:ın|in|sana|ıver|iver)?|yazar\s+m[ıi]s[ıi]n"
+    r"|yazabilir\s+m[ıi]s[ıi]n|write)(?!\w)"
+)
+_FILE_MOD_NAME_RE = re.compile(
+    r"(?<![\w.\-])[A-Za-z0-9_\-\u00c7\u011e\u0130\u00d6\u015e\u00dc\u00e7\u011f\u0131\u00f6\u015f\u00fc]+"
+    r"\.[A-Za-z][A-Za-z0-9]{0,7}(?![\w.])"
+)
+
+
 def match_file_modification(text: str) -> dict | None:
     """Dosya olusturma/yazma komutlarini Turkce karakterlerden bagimsiz cozer."""
 
@@ -219,6 +236,15 @@ def match_file_modification(text: str) -> dict | None:
 
     t = text.strip()
     low = t.lower()
+
+    # DUZELTME (2026-09-28, canli hata): uzun bir "rol + kurallar + gorev"
+    # istemi (Go kod yazdirma sablonu) bu hizli yola takilip repo kokunde
+    # "1.26" adli, icinde "JARVIS-ENGINE" yazan bir dosya olusturdu ve
+    # gorev "1/1 basarili" raporlandi. Bu deterministik kisayol SADECE kisa,
+    # tek cumlelik sesli/yazili dosya komutlari icindir; uzun veya cok
+    # satirli istekler Gemini/planner tarafindan anlasilmalidir.
+    if len(t) > _FILE_MOD_MAX_CHARS or t.count("\n") >= 2:
+        return None
 
     # Silme/tasima gibi yikici islemleri burada ele alma.
     destructive = (
@@ -231,25 +257,16 @@ def match_file_modification(text: str) -> dict | None:
 
     # Bozuk UTF-8/console durumlari icin:
     # olustur, olu?tur, olu?tur
-    has_create = bool(re.search(
-        r"olu.?tur|olustur|yarat|create|meydana\s+getir",
-        low,
-        re.IGNORECASE,
-    ))
+    # DUZELTME (2026-09-28): fiiller eskiden ALT DIZE olarak araniyordu -
+    # "Yazdığın kodda", "yazmanı istiyorum" gibi her kelime "yaz" komutu
+    # sayiliyordu. Artik yalnizca KOMUT bicimleri, TAM KELIME olarak eslesir.
+    has_create = bool(_FILE_MOD_CREATE_RE.search(low))
+    has_write = bool(_FILE_MOD_WRITE_RE.search(low))
 
-    # icine, i?ine, i?ine, yaz
-    has_write = bool(re.search(
-        r"i.?ine|icine|yaz|write",
-        low,
-        re.IGNORECASE,
-    ))
-
-    # Filename
-    m = re.search(
-        r"[A-Za-z0-9_\-\u00c7\u011e\u0130\u00d6\u015e\u00dc\u00e7\u011f\u0131\u00f6\u015f\u00fc]+\.[A-Za-z0-9]{1,8}",
-        t,
-        re.IGNORECASE,
-    )
+    # Filename - DUZELTME (2026-09-28): uzanti HARFLE baslamak zorunda,
+    # boylece "Go 1.26.0" icindeki "1.26" gibi surum numaralari dosya adi
+    # sayilmaz; token bir kelimenin/sayinin ortasindan da baslayamaz.
+    m = _FILE_MOD_NAME_RE.search(t)
     if not m:
         return None
 

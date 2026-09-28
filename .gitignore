@@ -44,3 +44,12 @@ src/jarvis/self_improvement/sandbox/logs/*
 !src/jarvis/self_improvement/sandbox/logs/.gitkeep
 venv/
 .aider*
+e2e_test_alani/
+
+# Sanal Beyin (virtual_brain) calisma zamani durumu - uretilen veri
+src/jarvis/self_improvement/virtual_brain/brain_state/state.json
+
+# kontrol_et.sh calisma ciktilari/raporlari
+.jarvis_kontrol/
+.jarvis_kontrol/
+src/jarvis/self_improvement/virtual_brain/brain_state/state.json
