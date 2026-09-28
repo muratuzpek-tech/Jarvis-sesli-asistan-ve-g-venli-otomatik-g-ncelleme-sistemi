@@ -13,6 +13,7 @@ import base64
 import hashlib
 import os
 import re
+import json
 import secrets
 import socket
 import string
@@ -586,6 +587,16 @@ class DashboardServer:
                 {"type": "sys", "text": "Remote connection established via QR code."}
             ))
 
+            # DUZELTME (2026-09-28, CodeQL: reflected XSS bulgusu): asagidaki
+            # degerler daha once duz '{{deger}}' seklinde JS string'ine
+            # gomuluyordu. `key` /auto-login?key=... sorgu parametresinden
+            # geliyor (bkz. _KEY_CHARS: sadece buyuk harf+rakam oldugu icin
+            # su an pratikte kacis karakteri iceremez), ama bu baska bir
+            # dosyadaki bir sabite guvenen kirilgan bir varsayim. json.dumps
+            # kullanmak bu bagimliligi tamamen ortadan kaldirir.
+            tok_js = json.dumps(tok)
+            key_js = json.dumps(key)
+            dev_tok_js = json.dumps(dev_tok)
             return HTMLResponse(f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width">
 <style>
@@ -595,9 +606,9 @@ class DashboardServer:
 </style></head>
 <body>
 <script>
-  sessionStorage.setItem('jarvis_token','{tok}');
-  sessionStorage.setItem('jarvis_key','{key}');
-  localStorage.setItem('jarvis_device_token','{dev_tok}');
+  sessionStorage.setItem('jarvis_token',{tok_js});
+  sessionStorage.setItem('jarvis_key',{key_js});
+  localStorage.setItem('jarvis_device_token',{dev_tok_js});
   setTimeout(function(){{location.replace('/')}},400);
 </script>
 <p>Connecting to JARVIS…</p>

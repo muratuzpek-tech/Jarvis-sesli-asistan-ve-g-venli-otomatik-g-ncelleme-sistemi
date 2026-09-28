@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from jarvis.core.secure_config import api_keys_path
@@ -35,6 +36,13 @@ def save_api_keys(gemini_api_key: str) -> None:
         json.dumps(data, indent=2),
         encoding="utf-8"
     )
+    # DUZELTME (2026-09-28, CodeQL: duz metin hassas veri saklama bulgusu):
+    # dosya API anahtari iceriyor - izinlerin sistemin umask'ina birakilmasi
+    # yerine acikca 0600 (yalnizca sahibi okur/yazar) olarak zorlaniyor.
+    try:
+        os.chmod(CONFIG_FILE, 0o600)
+    except OSError:
+        pass
 
 def load_api_keys() -> dict:
     if not CONFIG_FILE.exists():
