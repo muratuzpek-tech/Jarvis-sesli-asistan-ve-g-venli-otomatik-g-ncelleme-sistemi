@@ -33,6 +33,44 @@ MODEL_WRITER     = "gemini-flash-latest"
 # install / uretilen kodu calistirma adimlarina gecilmez.
 _pending_dev_agent: dict[str, dict] = {}
 
+# ONAY KAPISI, MODELE GUVENMEZ (2026-09-28, Windows canli testi): Gemini
+# "Onaylıyor musunuz?" dedikten sonra kullanicinin cevabini beklemeden ayni
+# turda confirm_code ile ikinci cagriyi yapti ve proje basladi. Artik main.py
+# her kullanici mesajinda/konusmasinda note_user_turn() cagirir; confirm_code
+# ancak kod VERILDIKTEN SONRA gercek bir kullanici turu geldiyse kabul edilir.
+# None = izleme yok (testler/CLI gibi arayuzsuz kullanim) → eski davranis.
+_last_user_turn_at: float | None = None
+# Kullanicinin ISTEK cumlesinin gec gelen ses-yazi parcalari "onay" sayilmasin.
+USER_TURN_GRACE_S = 1.5
+
+
+def note_user_turn(now: float | None = None) -> None:
+    """Kullanicidan gercek bir girdi (ses veya yazi) geldigini kaydeder."""
+    global _last_user_turn_at
+    _last_user_turn_at = time.monotonic() if now is None else now
+
+
+def _user_confirmed_after(issued_at: float) -> bool:
+    if _last_user_turn_at is None:
+        return True
+    return _last_user_turn_at >= issued_at + USER_TURN_GRACE_S
+
+
+def confirmation_problem(confirm_code: str) -> str | None:
+    """confirm_code kullanilabilir mi? Sorun varsa kullaniciya/modele donecek
+    mesaj, yoksa None. (agent_board da is baslatmadan once bunu kullanir.)"""
+    pending = _pending_dev_agent.get((confirm_code or "").strip())
+    if pending is None:
+        return "Onay kodu geçersiz veya süresi dolmuş. Önce confirm_code vermeden çağırıp yeni kod alın."
+    if not _user_confirmed_after(pending.get("issued_at", 0.0)):
+        print("[DevAgent] ⛔ confirm_code kullanıcı cevap vermeden kullanıldı — reddedildi.")
+        return (
+            "ONAY HENÜZ ALINMADI — proje BAŞLATILMADI. Onay kodu verildikten sonra kullanıcıdan "
+            "hiç cevap gelmedi. Kullanıcıya ne yapılacağını anlat ve SUS; kullanıcı açıkça "
+            "'evet/onaylıyorum' dedikten SONRA aynı confirm_code ile tekrar çağır."
+        )
+    return None
+
 
 def _get_api_key() -> str:
     from jarvis.core.secure_config import get_gemini_api_key
@@ -307,14 +345,25 @@ Critical rules:
 7. CRITICAL for correctness: if two or more files exchange a data structure (a dict, a class instance, a tuple shape) — even files that never import each other, because the data actually flows through a third file like main.py — describe its EXACT shape ONCE in "shared_data_contracts" (field names, types, whether it's a dict or a specific class). Every file that touches this data MUST use the identical shape. This is the most common source of real bugs: e.g. one file builds {{"amount": ..., "category": ...}} while another expects an object with .amount/.category attributes.
 8. If running the entry point is supposed to durably create or update a file (a database, a report, an exported document, a log, a generated image, etc.), list each such file's relative path in "expected_outputs" with a one-line description of what a CORRECT result looks like inside it. Leave this list EMPTY only for purely interactive/display-only programs that persist nothing (e.g. a calculator, a GUI that only shows numbers on screen). This is critical: a program can run to completion with NO Python error while silently producing nothing real (a network call that fails silently, a thread that never runs, wrong file path) — "expected_outputs" is what lets that be caught instead of wrongly reported as a success.
 9. This is a completely standalone, independent project with NO relationship to any AI assistant framework. NEVER plan a file path or an import under a top-level name "jarvis" (e.g. "jarvis/core/engine.py", or importing "jarvis.anything") — that name does not exist for this project and is never a real requirement, no matter what the description mentions.
+10. If the task needs content that appears only after JavaScript runs (infinite scroll, "load more" buttons, dynamic pages, "wait until the page is fully loaded"), plain HTTP clients (requests/httpx/urllib) are WRONG: use Playwright and list "playwright" in dependencies. If the task works on a web page, take the URL from the command line (sys.argv[1]) and put the real URL from the description into run_command.
 
 JSON:"""
 
     try:
         response = model.generate_content(prompt)
         raw = _strip_fences(response.text)
-        plan = json.loads(raw)
-        return _validate_plan(plan, description)
+        plan = _validate_plan(json.loads(raw), description)
+        from jarvis.actions.devkit.task_intake import BROWSER_RULE, needs_browser, plan_uses_browser
+        if language.strip().lower() == "python" and needs_browser(description) and not plan_uses_browser(plan):
+            print("[DevAgent] ⚠️ Görev JavaScript/kaydırma istiyor ama plan tarayıcı kullanmıyor — plan yeniden isteniyor.")
+            response = model.generate_content(prompt + "\n\n" + BROWSER_RULE + "\nJSON:")
+            plan = _validate_plan(json.loads(_strip_fences(response.text)), description)
+            if not plan_uses_browser(plan):
+                raise ValueError(
+                    "görev JavaScript ile yüklenen içerik istiyor (kaydırma/'daha fazla yükle') ama planlayıcı "
+                    "iki denemede de tarayıcı (Playwright) kullanmadı; requests ile bu içerik alınamaz."
+                )
+        return plan
     except json.JSONDecodeError as e:
         raise ValueError(f"Planner returned invalid JSON: {e}\nRaw: {response.text[:300]}") from e
     except Exception as e:
@@ -875,6 +924,26 @@ Code for {file_path}:"""
         raise
 
 def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
+    result = _pip_install_dependencies(dependencies, project_dir)
+    if any(re.split(r"[>=<!\[]", str(d))[0].strip().lower() == "playwright" for d in dependencies or []):
+        result += " | " + _ensure_playwright_browser()
+    return result
+
+
+def _ensure_playwright_browser() -> str:
+    """pip playwright'i kurar ama tarayiciyi indirmez; ilk calistirmada
+    "Executable doesn't exist" hatasi alinmasin. Zaten varsa hizlica doner."""
+    try:
+        r = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+        if r.returncode == 0:
+            return "Playwright Chromium ready."
+        return f"Playwright browser install warning (non-fatal): {(r.stderr or r.stdout)[-200:]}"
+    except Exception as e:  # noqa: BLE001
+        return f"Playwright browser install error (non-fatal): {e}"
+
+
+def _pip_install_dependencies(dependencies: list[str], project_dir: Path) -> str:
     if not dependencies:
         return "No external dependencies."
 
@@ -3205,6 +3274,18 @@ def dev_agent(
     if not description:
         return "Please describe the project you want me to build, sir."
 
+    # EKSIK BILGI KAPISI: "[Hedef URL]" gibi doldurulmamis sablonlarla ya da
+    # URL'si verilmemis bir kazima goreviyle plan yapilmaz; once sorulur.
+    if not confirm_code:
+        from jarvis.actions.devkit.task_intake import missing_inputs
+        missing = missing_inputs(description)
+        if missing:
+            return (
+                "BİLGİ EKSİK — proje BAŞLATILMADI: " + "; ".join(missing) + ". "
+                "Kullanıcıya eksik bilgiyi (ör. gerçek web adresini) sor; cevabını aldıktan sonra "
+                "açıklamayı gerçek değerle güncelleyip dev_agent'ı yeniden çağır. Değeri kendin uydurma."
+            )
+
     # ONAY KAPISI: bu adim pip ile paket kurar ve modelin urettigi kodu
     # gercekten calistirir - confirm_code verilmeden hicbiri yapilmaz.
     if not confirm_code:
@@ -3212,6 +3293,7 @@ def dev_agent(
         _pending_dev_agent[code] = {
             "description": description, "language": language,
             "project_name": project_name, "timeout": timeout,
+            "issued_at": time.monotonic(),
         }
         installer = "go mod tidy" if language.strip().lower() in ("go", "golang") else "pip"
         return (
@@ -3225,9 +3307,10 @@ def dev_agent(
     # Kota/ağ/model hatasında aynı açık onayla tekrar denenebilsin. Eski akış
     # build başlamadan kodu siliyor, Gemini 429 sonrasında kullanıcıyı yeni
     # onay döngüsüne zorluyordu.
-    pending = _pending_dev_agent.get(confirm_code)
-    if pending is None:
-        return "Onay kodu geçersiz veya süresi dolmuş. Önce confirm_code vermeden çağırıp yeni kod alın."
+    problem = confirmation_problem(confirm_code)
+    if problem:
+        return problem
+    pending = _pending_dev_agent[confirm_code]
 
     result = _build_project(
         description  = pending["description"],

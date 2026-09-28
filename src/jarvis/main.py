@@ -48,7 +48,7 @@ from jarvis.actions.desktop import desktop_control
 from jarvis.actions.browser_control import browser_control
 from jarvis.actions.file_controller import file_controller
 from jarvis.actions.code_helper import code_helper
-from jarvis.actions.dev_agent import dev_agent
+from jarvis.actions.dev_agent import dev_agent, note_user_turn
 from jarvis.actions.web_search import web_search as web_search_action
 from jarvis.actions.computer_control import computer_control
 from jarvis.actions.game_updater import game_updater
@@ -497,13 +497,14 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "start_parallel_task",
-        "description": "Starts a dev_agent coding task in the BACKGROUND and returns immediately without waiting — lets the user keep talking to you while the project is being built. Use this when the user wants to run multiple coding tasks at once, or explicitly asks for something to run 'in the background' / 'paralel' / 'arka planda'.",
+        "description": "Starts a dev_agent coding task in the BACKGROUND and returns immediately without waiting — lets the user keep talking to you while the project is being built. Use this when the user wants to run multiple coding tasks at once, or explicitly asks for something to run 'in the background' / 'paralel' / 'arka planda'. Same confirmation rule as dev_agent: the first call (no confirm_code) only returns a preview + code; call again with that code ONLY after the user's explicit confirmation in a later message.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "description":  {"type": "STRING", "description": "What to build, same as for dev_agent."},
                 "language":     {"type": "STRING", "description": "Programming language, default python."},
                 "project_name": {"type": "STRING", "description": "Optional project folder name."},
+                "confirm_code": {"type": "STRING", "description": "Leave empty on the first call (returns a preview + code). Pass the code ONLY after the user explicitly confirmed in a later message."},
             },
             "required": ["description"]
         }
@@ -899,7 +900,7 @@ class JarvisLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
-        self.ui.on_text_command   = self._on_text_command
+        self.ui.on_text_command   = self._on_ui_text_command
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_interrupt      = self.interrupt
         self._turn_done_event: asyncio.Event | None = None
@@ -944,6 +945,14 @@ class JarvisLive:
                 self.ui.write_log(ok_msg)
             except Exception:
                 pass
+
+    def _on_ui_text_command(self, text: str):
+        """Kullanicinin arayuzden YAZDIGI komut. Sesli girdi zaten transkripsiyon
+        aninda isaretlenir; _on_text_command ic yonlendirmelerde (ses → dosya
+        router'i, tur sonunda) da cagrildigi icin isaret burada konur — aksi halde
+        istegin kendisi gecikmeli olarak "onay" sayilabilirdi."""
+        note_user_turn()  # dev_agent onay kapisi: gercek kullanici girdisi
+        self._on_text_command(text)
 
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
@@ -1879,6 +1888,7 @@ class JarvisLive:
                                     pass
 
                                 self._last_user_speech = time.monotonic()
+                                note_user_turn()  # dev_agent onay kapisi: gercek kullanici girdisi
 
                                 # Turn complete gelmese bile dosya komutunu yakala.
 
