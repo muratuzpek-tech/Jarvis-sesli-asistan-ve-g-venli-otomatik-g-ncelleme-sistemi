@@ -103,3 +103,43 @@ def test_output_written_next_to_script_gets_precise_hint(tmp_path):
     spec, _ = validate_spec(SPEC)
     problems, _ = run_acceptance(tmp_path, "main.py", spec)
     assert len(problems) == 1 and "kendi klasörüne" in problems[0] and "report.txt" in problems[0]
+
+
+def test_llm_miscount_in_spec_is_corrected():
+    # Canlı testteki gerçek örnek: model 'hello: 3' dedi, doğrusu 4.
+    spec = {"applicable": True,
+            "fixtures": [{"path": "metinler/file1.txt", "content": "hello world hello"},
+                         {"path": "metinler/file2.txt", "content": "hello universe"},
+                         {"path": "metinler/file3.txt", "content": "world hello"}],
+            "args": ["{FIXTURE}/metinler"],
+            "expect": [{"output": "report.txt", "contains": ["hello: 3", "world: 2", "universe: 1"]}]}
+    clean, _ = validate_spec(spec)
+    assert clean["expect"][0]["contains"] == ["hello: 4", "world: 2", "universe: 1"]
+
+
+def test_counts_in_csv_fixtures_are_not_touched():
+    spec = {"applicable": True, "fixtures": [{"path": "s.csv", "content": "urun,adet\nkalem,2\nkalem,3\n"}],
+            "args": ["{FIXTURE}/s.csv"], "expect": [{"output": "o.json", "contains": ["kalem: 5"]}]}
+    assert validate_spec(spec)[0]["expect"][0]["contains"] == ["kalem: 5"]
+
+
+def test_script_dir_paths_are_rewritten_to_cwd():
+    from jarvis.actions.devkit.acceptance import rewrite_script_dir_paths
+    codes = {
+        "utils/helpers.py": "from pathlib import Path\np = Path(__file__).parent / filename\n",
+        "a.py": "import os\nd = os.path.dirname(os.path.abspath(__file__))\n",
+        "b.py": "x = os.path.dirname(__file__)\n",
+        "c.py": "print('no file refs')\n",
+    }
+    out = rewrite_script_dir_paths(codes)
+    assert out["utils/helpers.py"].endswith("p = Path.cwd() / filename\n")
+    assert "os.getcwd()" in out["a.py"] and "os.getcwd()" in out["b.py"] and out["b.py"].startswith("import os\n")
+    assert "c.py" not in out
+
+
+def test_rewritten_program_passes_acceptance(tmp_path):
+    from jarvis.actions.devkit.acceptance import rewrite_script_dir_paths
+    code = "from pathlib import Path\n(Path(__file__).parent / 'report.txt').write_text('empty_func old.bak.py')\n"
+    (tmp_path / "main.py").write_text(rewrite_script_dir_paths({"main.py": code})["main.py"])
+    spec, _ = validate_spec(SPEC)
+    assert run_acceptance(tmp_path, "main.py", spec)[0] == []

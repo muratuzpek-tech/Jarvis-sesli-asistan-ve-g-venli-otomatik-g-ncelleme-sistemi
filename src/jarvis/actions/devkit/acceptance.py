@@ -144,7 +144,39 @@ def validate_spec(spec: object) -> tuple[dict | None, str]:
             return None, "beklenen ifadeler kısa olmalı"
         clean_ex.append({"output": out, "contains": tokens})
     contract = str(spec.get("input_contract", "")).strip()[:500]
+    _correct_word_counts(clean_fx, clean_ex)
     return {"fixtures": clean_fx, "args": args, "expect": clean_ex, "input_contract": contract}, "ok"
+
+
+_COUNT_TOKEN = re.compile(r"^([^\W\d_][\w'-]{0,40})(\s*[:=]\s*)(\d{1,4})$")
+_TEXT_FIXTURE_SUFFIXES = (".txt", ".md", ".text")
+
+
+def _correct_word_counts(fixtures: list[dict], expect: list[dict]) -> list[str]:
+    """Kabul testini yazan model kendi örnek metnindeki kelimeleri YANLIŞ
+    sayabiliyor (canlı test 2026-09-28: 'hello world hello' + 'hello universe'
+    + 'world hello' için 'hello: 3' bekledi; doğrusu 4 — program doğruydu ama 5
+    denemede de reddedildi). Örnekler yalnızca düz metinse, 'kelime: N'
+    biçimindeki beklentileri gerçek sayımla deterministik olarak düzeltir."""
+    if not fixtures or not all(fx["path"].lower().endswith(_TEXT_FIXTURE_SUFFIXES) for fx in fixtures):
+        return []
+    corpus = "\n".join(fx["content"] for fx in fixtures).casefold()
+    fixed: list[str] = []
+    for ex in expect:
+        new_tokens = []
+        for tok in ex["contains"]:
+            m = _COUNT_TOKEN.match(tok)
+            if m:
+                word, sep, n = m.group(1), m.group(2), int(m.group(3))
+                real = len(re.findall(rf"(?<![\w'-]){re.escape(word.casefold())}(?![\w'-])", corpus))
+                if real and real != n and abs(real - n) <= 3:
+                    fixed.append(f"{tok} → {word}{sep}{real}")
+                    tok = f"{word}{sep}{real}"
+            new_tokens.append(tok)
+        ex["contains"] = new_tokens
+    if fixed:
+        print(f"[DevAgent] 🔧 Kabul testindeki yanlış sayımlar düzeltildi: {fixed}")
+    return fixed
 
 
 def contract_text(spec: dict) -> str:
@@ -228,6 +260,32 @@ def _written_elsewhere(project_dir: Path, output: str, since: float) -> str | No
         except OSError:
             continue
     return None
+
+
+_SCRIPT_DIR_PATTERNS = (
+    (re.compile(r"Path\(\s*__file__\s*\)(?:\.(?:resolve|absolute)\(\))?(?:\.parent)+"), "Path.cwd()"),
+    (re.compile(r"os\.path\.dirname\(\s*os\.path\.(?:abspath|realpath)\(\s*__file__\s*\)\s*\)"), "os.getcwd()"),
+    (re.compile(r"os\.path\.dirname\(\s*__file__\s*\)"), "os.getcwd()"),
+)
+
+
+def rewrite_script_dir_paths(file_codes: dict[str, str]) -> dict[str, str]:
+    """Çıktıyı programın kendi klasörüne (__file__) yazan yolları çalışma
+    klasörüne çevirir. Yalnızca kabul testi bunu KANITLADIĞINDA çağrılır
+    (canlı test 2026-09-28: 14b model ipucuna rağmen 5 denemede de
+    Path(__file__).parent kullandı). Değişen dosyaları döndürür."""
+    changed = {}
+    for path, code in file_codes.items():
+        if not path.endswith(".py") or "__file__" not in code:
+            continue
+        new = code
+        for rx, repl in _SCRIPT_DIR_PATTERNS:
+            new = rx.sub(repl, new)
+        if new != code:
+            if "os.getcwd()" in new and not re.search(r"^\s*import os\b", new, re.M):
+                new = "import os\n" + new
+            changed[path] = new
+    return changed
 
 
 def describe_fixtures(spec: dict, limit: int = 3000) -> str:

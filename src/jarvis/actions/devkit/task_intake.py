@@ -93,8 +93,12 @@ def needs_browser_or_web(description: str) -> bool:
 
 
 def plan_uses_browser(plan: dict) -> bool:
+    """Yalnızca Playwright kabul edilir: JARVIS tarayıcıyı yalnızca onun için
+    otomatik kurar. Selenium sistemde Chrome + chromedriver ister (canlı test
+    2026-09-28: Selenium seçilen program chromedriver çökmesiyle 5 denemede de
+    kaldı)."""
     deps = " ".join(str(d) for d in plan.get("dependencies", []) or []).casefold()
-    return any(pkg in deps for pkg in BROWSER_PACKAGES)
+    return "playwright" in deps
 
 
 BROWSER_RULE = (
