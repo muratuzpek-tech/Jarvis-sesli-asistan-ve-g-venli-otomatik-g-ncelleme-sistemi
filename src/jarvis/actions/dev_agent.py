@@ -1019,6 +1019,10 @@ def _pip_install_dependencies(dependencies: list[str], project_dir: Path) -> str
         return f"Install error (non-fatal): {e}"
 
 def _open_vscode(project_dir: Path) -> bool:
+    # JARVIS_DEVAGENT_OPEN_EDITOR=0 → proje bittiginde VSCode acilmaz
+    # (canli testte her gorev icin bir pencere acilmasin diye).
+    if os.environ.get("JARVIS_DEVAGENT_OPEN_EDITOR", "1").strip().lower() in ("0", "false", "no", "hayir", "hayır"):
+        return False
     vscode_candidates = [
         "code",
         rf"C:\Users\{Path.home().name}\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd",

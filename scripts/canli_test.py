@@ -20,6 +20,7 @@ import argparse
 import csv
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -192,6 +193,7 @@ def main() -> int:
     kok = Path.home() / "Desktop" / "JarvisProjects" / "_canli_test" / damga
     kok.mkdir(parents=True, exist_ok=True)
     da.PROJECTS_DIR = kok  # gerçek projelere dokunma
+    os.environ.setdefault("JARVIS_DEVAGENT_OPEN_EDITOR", "0")  # her görevde VSCode açılmasın
 
     sonuclar = [calistir(g, kok) for g in GOREVLER if g["no"] in secili]
 
