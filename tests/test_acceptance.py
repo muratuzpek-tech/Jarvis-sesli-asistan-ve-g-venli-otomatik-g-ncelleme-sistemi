@@ -244,3 +244,11 @@ def test_folder_tree_written_next_to_script_is_detected(tmp_path):
     (tmp_path / "main.py").write_text(TREE_PROGRAM.replace('Path("{root}")', 'Path(__file__).parent / "sorted"'))
     problems, _ = run_acceptance(tmp_path, "main.py", spec)
     assert len(problems) == 1 and "kendi klasörüne" in problems[0]
+
+
+def test_token_that_is_the_output_path_itself_is_satisfied(tmp_path):
+    """Canlı test 2026-09-29: beklenti 'sirali/2024-01/a.jpg' içinde 'a.jpg' arıyordu;
+    kopyalanan resmin içeriğinde kendi adı geçmez, doğru program 3 tur reddedildi."""
+    spec, _ = validate_spec({**TREE_SPEC, "expect": [{"output": "sorted/2024-01/a.jpg", "contains": ["a.jpg"]}]})
+    (tmp_path / "main.py").write_text(TREE_PROGRAM.replace("{root}", "sorted"))
+    assert run_acceptance(tmp_path, "main.py", spec)[0] == []

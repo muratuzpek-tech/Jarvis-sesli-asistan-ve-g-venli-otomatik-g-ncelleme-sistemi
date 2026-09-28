@@ -191,3 +191,30 @@ def test_truncated_values_are_detected(tmp_path):
     assert truncated_value_outputs(tmp_path, [{"path": "books.csv"}])
     (tmp_path / "ok.csv").write_text("ad,fiyat\nA Light in the Attic,51.77\nSoumission,50.10\nWait...,1\n")
     assert truncated_value_outputs(tmp_path, [{"path": "ok.csv"}]) == []
+
+
+TODO_SCANNER = '''
+import re
+
+def scan(lines):
+    """Satırlardaki notları bul."""
+    # TODO ve FIXME notlarını bul (yorum işareti sonrası)
+    pat = re.compile(r"#\\s*(TODO|FIXME)[:\\s]*(.*)")
+    return [m.group(0) for ln in lines if (m := pat.search(ln))]
+'''
+
+UNFINISHED = '''
+def scan(lines):
+    result = [ln for ln in lines]
+    # TODO: filtreleme mantığını ekle
+    return result
+'''
+
+
+def test_todo_scanner_is_not_a_placeholder():
+    """Canlı test 2026-09-29: TODO arayan doğru program 'yer tutucu yorum' sanıldı."""
+    assert "PLACEHOLDER-COMMENT" not in codes(analyze_sources({"s.py": TODO_SCANNER}), "s.py")
+
+
+def test_real_todo_comment_is_still_flagged():
+    assert "PLACEHOLDER-COMMENT" in codes(analyze_sources({"s.py": UNFINISHED}), "s.py")

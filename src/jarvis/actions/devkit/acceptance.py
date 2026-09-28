@@ -271,10 +271,51 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
             else:
                 text, label = path.read_text(encoding="utf-8", errors="replace"), f"'{ex['output']}'"
         low = text.lower()
-        missing = [t for t in ex["contains"] if not _token_found(t, low)]
+        # Beklenen ifade çıktının KENDİ yolunun parçasıysa (ör. çıktı
+        # 'sirali/2024-01/a.jpg', ifade 'a.jpg') dosyanın var olması yeter:
+        # kopyalanan resmin içeriğinde kendi adı geçmez (canlı test 2026-09-29).
+        own_path = ex["output"].lower()
+        missing = [t for t in ex["contains"] if not (_token_found(t, low) or t.lower() in own_path)]
         if missing:
             problems.append(f"{label} şu beklenen ifadeleri İÇERMİYOR: {missing}. İçerik (ilk 800 karakter): {text[:800]!r}")
     return problems, output[:2000]
+
+
+DISPUTE_PROMPT = """A program was tested on a small sample input, and the test expected certain text in its output.
+The program's output did NOT contain the expected text. Several DIFFERENT versions of the program all
+produced exactly the same output, so the EXPECTATION itself may have been written wrongly.
+
+TASK the program must do:
+{description}
+
+SAMPLE INPUT FILES:
+{fixtures}
+
+EXPECTED (written by a model before any program existed):
+{expected}
+
+WHAT THE PROGRAM ACTUALLY PRODUCED / PROBLEMS:
+{problems}
+
+Work it out yourself from the SAMPLE INPUT FILES, step by step (count every line/item carefully and
+follow every rule in the task). Then decide which is correct.
+Return ONLY JSON: {{"correct": "program" | "expectation", "reason": "short explanation with your own count"}}
+JSON:"""
+
+
+def build_dispute_prompt(description: str, spec: dict, problems: list[str], output: str) -> str:
+    expected = "\n".join(f"- {e['output']}: {e['contains']}" for e in spec["expect"])
+    return DISPUTE_PROMPT.format(description=description, fixtures=describe_fixtures(spec, 3000),
+                                 expected=expected, problems=("\n".join(problems) + "\n" + output)[:3000])
+
+
+def parse_dispute(text: str) -> tuple[bool, str]:
+    """(beklenti_yanlış_mı, gerekçe). Anlaşılamayan cevap = beklenti doğru sayılır."""
+    data = parse_spec(text)
+    if not isinstance(data, dict):
+        return False, "hakem cevabı anlaşılamadı"
+    reason = str(data.get("reason", ""))[:300]
+    return str(data.get("correct", "")).strip().lower() == "program", reason
 
 
 def _tree_text(folder: Path, limit: int = 500) -> str:

@@ -196,6 +196,18 @@ def _is_live_scrape(description: str) -> bool:
     return has_url(description) and needs_browser_or_web(description)
 
 
+def _acceptance_expectation_wrong(description: str, spec: dict, problems: list[str], output: str) -> tuple[bool, str]:
+    """Hakem: kabul testindeki beklenti mi yanlış, program mı? Her hatada
+    (False, ...) — şüphede program suçlu sayılır."""
+    try:
+        from jarvis.actions.devkit.acceptance import build_dispute_prompt, parse_dispute
+        response = _get_model(MODEL_PLANNER).generate_content(
+            build_dispute_prompt(description, spec, problems, output))
+        return parse_dispute(response.text)
+    except Exception as e:  # noqa: BLE001
+        return False, f"hakem çalışmadı: {type(e).__name__}"
+
+
 def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
     """Kabul testi spesifikasyonu ister; her hatada None (build engellenmez)."""
     if _is_live_scrape(description):
@@ -312,6 +324,17 @@ def _parse_traceback(output: str, project_files: list[str]) -> tuple[str | None,
                 return pf, int(line_str)
 
     return None, None
+
+
+def _traceback_project_files(output: str, project_files: list[str]) -> list[str]:
+    """Traceback'te geçen proje dosyaları (en derinden en dışa, tekrarsız)."""
+    pattern = re.compile(r'File ["\']([^"\']+\.py)["\'],\s+line\s+\d+', re.IGNORECASE)
+    found: list[str] = []
+    for raw_path in reversed(pattern.findall(output)):
+        for pf in project_files:
+            if (Path(pf).name == Path(raw_path).name or raw_path.endswith(pf)) and pf not in found:
+                found.append(pf)
+    return found
 
 
 def _classify_error(output: str, project_dir: Path | None = None) -> str:
@@ -2658,6 +2681,16 @@ def _fix_files(
     else:
         files_to_fix.append(entry_point)
 
+    if repeat_of_previous:
+        # Canlı test 2026-09-29 (js_kazima): hata main.py:29'da görünüyordu ama
+        # traceback'in en derin proje dosyası helpers.py olduğu için 4 tur
+        # boyunca YALNIZ helpers.py düzeltildi, hata birebir tekrarlandı.
+        # Aynı hata tekrarlanıyorsa traceback'teki TÜM proje dosyaları
+        # (çağıran taraf dahil) düzeltmeye açılır.
+        for fp in _traceback_project_files(error_output, list(file_codes.keys())):
+            if fp not in files_to_fix:
+                files_to_fix.append(fp)
+
     if import_mismatch and import_mismatch["target_path"] not in files_to_fix:
         # Hedef modulu (import EDILEN, ismi eksik olan dosya) de kendi
         # ayri duzeltme denemesini alsin - sadece error_file'in "read-only"
@@ -2939,6 +2972,9 @@ def _build_project(
     # sinanir - bkz. jarvis/actions/devkit/acceptance.py. Spesifikasyon
     # uretilemezse/gecersizse test ATLANIR, build engellenmez.
     acceptance_spec = None if gui_task else _plan_acceptance(description, plan, log)
+    acc_last: tuple[str, int] | None = None   # (son kabul hatası, o anki kodun imzası)
+    acc_judged = False
+    acceptance_disputed = ""
     if acceptance_spec:
         from jarvis.actions.devkit.acceptance import contract_text
         shared_contracts_text = (shared_contracts_text + "\n- " + contract_text(acceptance_spec)).strip()
@@ -3355,6 +3391,22 @@ def _build_project(
                         log(f"🔧 Çıktı yolu programın klasörü yerine çalışma klasörüne çevrildi (model yerine deterministik): {sorted(rewritten)}")
                         continue
                 if acc_problems:
+                    # Canlı test 2026-09-29 (hata_saatleri): modelin YAZDIĞI beklenti
+                    # yanlıştı ('15,1'); program 5 farklı yazımda da aynı doğru
+                    # sonucu verdi ve 5 tur boşa gitti. FARKLI kod aynı çıktıyı
+                    # veriyorsa beklenti şüphelidir: bir kez hakem sorusu sorulur.
+                    acc_sig = "\n".join(acc_problems)
+                    code_sig = hash(tuple(sorted(file_codes.items())))
+                    if (acc_last and acc_last[0] == acc_sig and acc_last[1] != code_sig and not acc_judged
+                            and not any("oluşturulmadı" in pr or "hata koduyla" in pr for pr in acc_problems)):
+                        acc_judged = True
+                        wrong, why = _acceptance_expectation_wrong(description, acceptance_spec, acc_problems, acc_output)
+                        if wrong:
+                            log(f"⚖️ Kabul testi beklentisinin kendisi hatalı bulundu (farklı kod aynı sonucu verdi): {why[:200]}")
+                            acceptance_disputed = why[:300]
+                            acc_problems = []
+                    acc_last = (acc_sig, code_sig)
+                if acc_problems:
                     log(f"❌ Kabul testi geçilemedi: {acc_problems[0][:200]}")
                     last_output = "ACCEPTANCE TEST FAILED:\n" + "\n".join(acc_problems) + f"\n\nProgram output:\n{acc_output}"
                     if attempt == MAX_FIX_ATTEMPTS:
@@ -3392,7 +3444,8 @@ def _build_project(
                         return msg
                     time.sleep(1)
                     continue
-                log("✅ Kabul testi geçti (örnek girdide beklenen sonuçlar üretildi).")
+                if not acceptance_disputed:
+                    log("✅ Kabul testi geçti (örnek girdide beklenen sonuçlar üretildi).")
             if is_timeout:
                 if expected_outputs:
                     verified_note = f" Beklenen çıktılar gerçekten doğrulandı ({', '.join(str(o.get('path', o)) if isinstance(o, dict) else str(o) for o in expected_outputs)})."
@@ -3408,7 +3461,10 @@ def _build_project(
                     f" Verified outputs: {', '.join(str(o.get('path', o)) if isinstance(o, dict) else str(o) for o in expected_outputs)}."
                     if expected_outputs else ""
                 )
-                if acceptance_spec:
+                if acceptance_disputed:
+                    verified_note += (" Not: örnek girdideki otomatik beklenti hatalı çıktı ve devre dışı bırakıldı "
+                                      f"({acceptance_disputed[:160]}) — sonucu bir kez kontrol edin.")
+                elif acceptance_spec:
                     verified_note += " Acceptance test on a known sample input passed."
                 elif _is_live_scrape(description):
                     # Dış analiz raporu (2026-09-29): gerçek site görevlerinde içerik
