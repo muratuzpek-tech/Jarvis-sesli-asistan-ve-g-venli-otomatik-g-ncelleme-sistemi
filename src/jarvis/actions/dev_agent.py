@@ -77,6 +77,21 @@ def _get_api_key() -> str:
     return get_gemini_api_key()
 
 
+def _ollama_options() -> dict:
+    """KARARLILIK (canli test 2026-09-28: ayni kod 4/5 sonra 2/5 verdi).
+    - num_ctx: Ollama'nin varsayilan baglam penceresi kucuk (2048-4096 token);
+      cok dosyali duzeltme istemleri SESSIZCE kesiliyor, model dosyanin bir
+      kismini hic gormeden 'duzeltiyor' ve ayni hatayi tekrarliyordu.
+    - temperature: kod icin dusuk sicaklik daha tutarli sonuc verir.
+    Ortam degiskenleriyle ayarlanabilir (JARVIS_OLLAMA_CTX, JARVIS_OLLAMA_TEMP)."""
+    def _num(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, "") or default)
+        except ValueError:
+            return default
+    return {"num_ctx": int(_num("JARVIS_OLLAMA_CTX", 16384)), "temperature": _num("JARVIS_OLLAMA_TEMP", 0.2)}
+
+
 def _get_model(model_name: str):
     """Once yerel Ollama'yi (qwen2.5-coder) dener - Google Gemini kesintilerinde
     bile calisir. Ollama kapaliysa/kurulu degilse otomatik olarak Gemini'ye
@@ -98,7 +113,8 @@ def _get_model(model_name: str):
             prompt = contents if isinstance(contents, str) else str(contents)
             resp = _requests.post(
                 OLLAMA_URL,
-                json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+                json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False,
+                      "options": _ollama_options()},
                 timeout=300,  # 14b model çok dosyalı istemlerde 120 sn'yi aşabiliyor
             )
             resp.raise_for_status()
@@ -363,13 +379,30 @@ JSON:"""
                     "görev JavaScript ile yüklenen içerik istiyor (kaydırma/'daha fazla yükle') ama planlayıcı "
                     "iki denemede de tarayıcı (Playwright) kullanmadı; requests ile bu içerik alınamaz."
                 )
-        return plan
+        return _ensure_url_in_run_command(plan, description)
     except json.JSONDecodeError as e:
         raise ValueError(f"Planner returned invalid JSON: {e}\nRaw: {response.text[:300]}") from e
     except Exception as e:
         if _is_rate_limit(e):
             raise RateLimitError(str(e)) from e
         raise
+
+
+_URL_IN_TEXT = re.compile(r"https?://[^\s'\"<>()\[\]]+")
+
+
+def _ensure_url_in_run_command(plan: dict, description: str) -> dict:
+    """Aciklamada bir URL varsa ve run_command hic URL icermiyorsa ekler.
+    (canli test 2026-09-28: plan 'python main.py' dedi, program 'Usage: python
+    main.py <URL>' ile cikti; duzeltme dongusu run_command'i degistiremedigi
+    icin 5 deneme bosa gitti.)"""
+    urls = _URL_IN_TEXT.findall(description or "")
+    cmd = str(plan.get("run_command") or "")
+    if urls and cmd and "://" not in cmd:
+        url = urls[0].rstrip(".,;:!?")
+        plan["run_command"] = f"{cmd} {url}"
+        print(f"[DevAgent] 🔧 run_command'a görevdeki URL eklendi: {plan['run_command']}")
+    return plan
 
 
 def _validate_plan(plan: dict, description: str) -> dict:

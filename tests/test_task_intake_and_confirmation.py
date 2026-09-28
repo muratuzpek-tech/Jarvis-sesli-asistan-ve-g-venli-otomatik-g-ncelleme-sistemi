@@ -217,3 +217,27 @@ def test_open_editor_can_be_disabled(monkeypatch, tmp_path):
                                   "tarayıcı kullanmadan indir", "javascriptsiz statik sayfa"])
 def test_negated_browser_mentions_do_not_force_playwright(text):
     assert not needs_browser(text)
+
+
+def test_url_from_description_is_added_to_run_command(monkeypatch):
+    plan = json.loads(_plan_json(["requests"]))
+    plan["run_command"] = "python main.py"
+    model = _SeqModel([json.dumps(plan)])
+    monkeypatch.setattr(da, "_get_model", lambda name: model)
+    out = da._plan_project("https://quotes.toscrape.com/ sayfasındaki alıntıları (JavaScript gerekmez) csv'ye yaz.", "python")
+    assert out["run_command"] == "python main.py https://quotes.toscrape.com/"
+
+
+def test_existing_url_in_run_command_is_kept(monkeypatch):
+    model = _SeqModel([_plan_json(["playwright"])])
+    monkeypatch.setattr(da, "_get_model", lambda name: model)
+    out = da._plan_project(GOOD_REQUEST, "python")
+    assert out["run_command"].count("://") == 1
+
+
+def test_ollama_options_have_large_context_and_low_temperature(monkeypatch):
+    monkeypatch.delenv("JARVIS_OLLAMA_CTX", raising=False)
+    monkeypatch.delenv("JARVIS_OLLAMA_TEMP", raising=False)
+    assert da._ollama_options() == {"num_ctx": 16384, "temperature": 0.2}
+    monkeypatch.setenv("JARVIS_OLLAMA_CTX", "8192")
+    assert da._ollama_options()["num_ctx"] == 8192
