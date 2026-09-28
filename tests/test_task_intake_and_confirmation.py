@@ -245,3 +245,11 @@ def test_ollama_options_have_large_context_and_low_temperature(monkeypatch):
 
 def test_selenium_plan_is_not_accepted_as_browser():
     assert not plan_uses_browser({"dependencies": ["selenium"]})
+
+
+def test_selenium_code_in_playwright_plan_is_flagged():
+    codes = {"main.py": "import sys\nfrom selenium import webdriver\n", "utils/h.py": "import json\n"}
+    found = da._selenium_instead_of_playwright(codes, ["playwright"])
+    assert list(found) == ["main.py"] and found["main.py"][0]["code"] == "USE-PLAYWRIGHT-NOT-SELENIUM"
+    assert found["main.py"][0]["line"] == 2
+    assert da._selenium_instead_of_playwright(codes, ["selenium"]) == {}

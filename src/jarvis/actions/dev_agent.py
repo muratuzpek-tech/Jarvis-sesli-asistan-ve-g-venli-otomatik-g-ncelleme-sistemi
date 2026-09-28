@@ -206,6 +206,33 @@ def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
     return spec
 
 
+_SELENIUM_HINT = (
+    "IMPORTANT: this project's plan uses PLAYWRIGHT, but the code uses SELENIUM. Selenium needs a system "
+    "Chrome + chromedriver that is NOT available here (errors like 'DevToolsActivePort file doesn't exist' or "
+    "'session not created' cannot be fixed by changing Selenium options). REWRITE the browser part with "
+    "Playwright's sync API: from playwright.sync_api import sync_playwright; with sync_playwright() as p: "
+    "browser = p.chromium.launch(headless=True); page = browser.new_page(); page.goto(url, timeout=...); "
+    "page.mouse.wheel(0, 10000) / page.click(...) in a loop until enough items are loaded; "
+    "html = page.content(). Remove every selenium import."
+)
+
+
+def _selenium_instead_of_playwright(file_codes: dict[str, str], dependencies) -> dict[str, list[dict]]:
+    """Plan Playwright istiyor ama kod Selenium import ediyorsa dosya başına bulgu."""
+    deps = " ".join(str(d) for d in dependencies or []).casefold()
+    if "playwright" not in deps:
+        return {}
+    found: dict[str, list[dict]] = {}
+    for path, code in file_codes.items():
+        for no, line in enumerate(code.splitlines(), 1):
+            if re.match(r"\s*(from|import)\s+selenium\b", line):
+                found.setdefault(path, []).append(
+                    {"code": "USE-PLAYWRIGHT-NOT-SELENIUM", "message": _SELENIUM_HINT, "line": no, "col": 0}
+                )
+                break
+    return found
+
+
 def _python_quality_issues(file_codes: dict[str, str]) -> dict[str, list[dict]]:
     """Modelden bagimsiz kalite bulgulari; hata olursa build'i asla engellemez."""
     try:
@@ -2906,6 +2933,11 @@ def _build_project(
     for _fp, _issues in _python_quality_issues(file_codes).items():
         lint_issues.setdefault(_fp, []).extend(_issues)
 
+    # Plan Playwright dediği hâlde yazar model Selenium kullandı mı? (canlı test
+    # 2026-09-28: 5 denemenin hepsinde Selenium'un Chrome hatası yamalandı.)
+    for _fp, _issues in _selenium_instead_of_playwright(file_codes, dependencies).items():
+        lint_issues.setdefault(_fp, []).extend(_issues)
+
     if lint_issues:
         affected = ", ".join(sorted(lint_issues.keys()))
         log(f"İlk çalıştırmadan önce statik analizle olası çalışma-zamanı/davranış hatası tespit edildi ({affected}), model ile düzeltiliyor (bir çalıştırma denemesi harcanmadan)...")
@@ -3278,8 +3310,9 @@ def _build_project(
             log("⚠️ Önceki düzeltme denemesiyle BİREBİR AYNI hata tekrar oluştu - model bu kez uyarılıyor.")
         log(f"Fixing errors (type: {error_type})...")
         try:
+            _sel = _selenium_instead_of_playwright(file_codes, dependencies)
             updated = _fix_files(
-                error_output=last_output,
+                error_output=(last_output + "\n\n" + _SELENIUM_HINT) if _sel else last_output,
                 project_description=description,
                 all_files=files,
                 file_codes=file_codes,
