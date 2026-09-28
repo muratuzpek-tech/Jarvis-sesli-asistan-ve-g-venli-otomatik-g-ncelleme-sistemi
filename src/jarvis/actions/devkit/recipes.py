@@ -188,7 +188,8 @@ _TABLE = [
     ("psutil_sysinfo", _W(r"\bcpu\b|\bram\b|bellek|işlemci|islemci|disk kullan|sistem bilgi"), _x.PSUTIL_SYSINFO),
     ("zip_backup", _W(r"yedek|backup|\bzip\b|arşiv|arsiv"), _x.ZIP_BACKUP),
     ("regex_extract", _W(r"e-?posta|\bemail|telefon|\bregex|düzenli ifade|duzenli ifade"), _x.REGEX_EXTRACT),
-    ("file_organize", _W(r"uzantı|uzanti|tarihe göre|tarihe gore|organize|sınıflandır|siniflandir|klasörlere ayır"),
+    ("file_organize", _W(r"uzantı|uzanti|tarih\w*\s+g[öo]re|organize|sınıflandır|siniflandir|klasörlere ayır"
+                          r"|alt klasörlere|kopyala"),
      _x.FILE_ORGANIZE),
     ("csv_aggregate", _W(r"\bcsv\b"), CSV_AGGREGATE),
     ("folder_walk", _folder_scan, FOLDER_WALK),

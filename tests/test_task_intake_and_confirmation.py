@@ -299,3 +299,19 @@ def test_projects_dir_can_move_to_another_disk(tmp_path, monkeypatch):
     finally:
         monkeypatch.delenv("JARVIS_PROJECTS_DIR")
         importlib.reload(da)
+
+
+def test_bare_filename_hint(tmp_path):
+    (tmp_path / "fotograflar").mkdir()
+    (tmp_path / "fotograflar" / "a.jpg").write_bytes(b"x")
+    out = "Error copying file a.jpg to sirali/2024-01/a.jpg: [Errno 2] No such file or directory: 'a.jpg'"
+    hint = da._bare_filename_hint(out, f"python main.py {tmp_path / 'fotograflar'}")
+    assert "ROOT CAUSE" in hint and "a.jpg" in hint
+    assert da._bare_filename_hint("No such file or directory: 'yok.txt'", f"python main.py {tmp_path}") == ""
+
+
+def test_surprise_101_wording_selects_file_organize():
+    from jarvis.actions.devkit.recipes import select_recipes
+    d = ("{K}/fotograflar klasöründeki dosyaları değiştirilme tarihlerine göre, çalışma klasöründe "
+         "'sirali/YYYY-AA/' alt klasörlerine KOPYALAYAN bir program yaz")
+    assert "file_organize" in [n for n, _ in select_recipes(d)]

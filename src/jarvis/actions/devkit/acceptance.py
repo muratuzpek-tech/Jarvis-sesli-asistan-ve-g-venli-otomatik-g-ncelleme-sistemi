@@ -245,10 +245,24 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
                 continue
             text, label = path.read_text(encoding="utf-8", errors="replace"), f"'{ex['output']}'"
         low = text.lower()
-        missing = [t for t in ex["contains"] if t.lower() not in low]
+        missing = [t for t in ex["contains"] if not _token_found(t, low)]
         if missing:
             problems.append(f"{label} şu beklenen ifadeleri İÇERMİYOR: {missing}. İçerik (ilk 800 karakter): {text[:800]!r}")
     return problems, output[:2000]
+
+
+_BARE_TAG = re.compile(r"^<([a-z][a-z0-9]*)>$", re.IGNORECASE)
+
+
+def _token_found(token: str, low_text: str) -> bool:
+    """Beklenen ifade çıktıda var mı? '<table>' gibi çıplak bir HTML etiketi,
+    özniteliklisini de ('<table border="1">') kabul eder (canlı test 2026-09-29:
+    doğru HTML tablosu yalnızca border özniteliği yüzünden 5 kez reddedildi)."""
+    t = token.lower()
+    if t in low_text:
+        return True
+    m = _BARE_TAG.match(t)
+    return bool(m and re.search(rf"<{m.group(1)}[\s>/]", low_text))
 
 
 def _output_snapshot(project_dir: Path, spec: dict) -> dict[Path, int]:

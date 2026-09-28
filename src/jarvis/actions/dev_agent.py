@@ -227,6 +227,29 @@ _SELENIUM_HINT = (
 )
 
 
+def _bare_filename_hint(output: str, run_command: str) -> str:
+    """'No such file or directory: 'a.jpg'' hatasında dosya aslında komut
+    satırındaki girdi klasöründeyse: program TAM YOL yerine yalnızca dosya adını
+    kullanıyor (os.listdir sonucu birleştirilmemiş). Canlı test 2026-09-29'da
+    model bunu 5 denemede de göremedi."""
+    names = set(re.findall(r"No such file or directory: '([^'/\\]+)'", output or ""))
+    if not names:
+        return ""
+    for arg in shlex.split(run_command or "", posix=os.name != "nt")[1:]:
+        d = Path(arg)
+        try:
+            if d.is_dir() and any((d / n).exists() or any(d.rglob(n)) for n in names):
+                return (
+                    f"\n\nROOT CAUSE: {sorted(names)} exist inside the input folder '{arg}', but the code opens/copies "
+                    f"them by BARE FILE NAME, which is resolved against the current working directory. Use the full "
+                    f"path: iterate with Path(src).iterdir()/rglob('*') and use those Path objects, or "
+                    f"os.path.join(src_dir, name) — never the bare name from os.listdir()."
+                )
+        except OSError:
+            continue
+    return ""
+
+
 def _selenium_instead_of_playwright(file_codes: dict[str, str], dependencies) -> dict[str, list[dict]]:
     """Plan Playwright istiyor ama kod Selenium import ediyorsa dosya başına bulgu."""
     deps = " ".join(str(d) for d in dependencies or []).casefold()
@@ -3421,8 +3444,9 @@ def _build_project(
         log(f"Fixing errors (type: {error_type})...")
         try:
             _sel = _selenium_instead_of_playwright(file_codes, dependencies)
+            _extra = (("\n\n" + _SELENIUM_HINT) if _sel else "") + _bare_filename_hint(last_output, run_command)
             updated = _fix_files(
-                error_output=(last_output + "\n\n" + _SELENIUM_HINT) if _sel else last_output,
+                error_output=last_output + _extra,
                 project_description=description,
                 all_files=files,
                 file_codes=file_codes,
