@@ -20,6 +20,7 @@ import argparse
 import csv
 import io
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -35,6 +36,8 @@ import jarvis.actions.dev_agent as da  # noqa: E402
 from jarvis.paths import logs_dir  # noqa: E402
 
 GECMIS = logs_dir() / "canli_test_gecmisi.jsonl"
+_ALTYAPI = re.compile(r"RESOURCE_EXHAUSTED|Rate limit|Gemini'ye ulaşılamıyor|devre kesici|No space left on device|"
+                      r"Connection refused|Max retries exceeded", re.IGNORECASE)
 
 
 # ── bağımsız doğrulama yardımcıları ──────────────────────────────────────
@@ -172,6 +175,8 @@ def calistir(gorev: dict, kok: Path) -> dict:
         durum = "YALANCI BAŞARI"   # en kötü durum: "çalışıyor" dedi ama çıktı yanlış
     elif dogru:
         durum = "DOĞRU AMA REDDETTİ"
+    elif _ALTYAPI.search(sonuc):
+        durum = "ALTYAPI HATASI"  # kota/bağlantı/disk — JARVIS'in başarısı ölçülemedi, puana sayılmaz
     else:
         durum = "KALDI"
     return {"no": gorev["no"], "ad": gorev["ad"], "durum": durum, "neden": neden or sonuc[-300:],
@@ -198,12 +203,22 @@ def main() -> int:
     sonuclar = [calistir(g, kok) for g in GOREVLER if g["no"] in secili]
 
     gecen = sum(s["durum"] == "GEÇTİ" for s in sonuclar)
-    sayilan = sum(s["durum"] != "ATLANDI" for s in sonuclar)
+    sayilan = sum(s["durum"] not in ("ATLANDI", "ALTYAPI HATASI") for s in sonuclar)
     kayit = {"zaman": damga, "surum": _git_surum(), "gecen": gecen, "toplam": sayilan, "sonuclar": sonuclar}
     onceki = None
     if GECMIS.exists():
         satirlar = [s for s in GECMIS.read_text(encoding="utf-8").splitlines() if s.strip()]
-        onceki = json.loads(satirlar[-1]) if satirlar else None
+        # Karşılaştırma: aynı görev kümesiyle yapılmış ve en az bir görevi
+        # ölçülebilmiş (tamamen altyapı hatası olmayan) son çalıştırma.
+        ayni = {s["no"] for s in sonuclar}
+        for satir in reversed(satirlar):
+            try:
+                k = json.loads(satir)
+            except json.JSONDecodeError:
+                continue
+            if k.get("toplam") and {s["no"] for s in k.get("sonuclar", [])} == ayni:
+                onceki = k
+                break
     GECMIS.parent.mkdir(parents=True, exist_ok=True)
     with GECMIS.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(kayit, ensure_ascii=False) + "\n")

@@ -191,6 +191,14 @@ def _strip_fences(text: str) -> str:
 
 def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
     """Kabul testi spesifikasyonu ister; her hatada None (build engellenmez)."""
+    from jarvis.actions.devkit.task_intake import has_url, needs_browser_or_web
+    if has_url(description) and needs_browser_or_web(description):
+        # Canlı test 2026-09-28: model gerçek siteye benzemeyen bir örnek sayfa
+        # uydurdu; gerçek sitede DOĞRU çalışan program bu sayfada reddedildi.
+        # Gerçek URL'li kazıma görevlerinde doğrulama gerçek çalıştırmanın
+        # çıktısı üzerinden yapılır (beklenen çıktı + uydurma-veri kontrolü).
+        log("ℹ️ Kabul testi uygulanmayacak: gerçek bir siteyi kazıma görevi — doğrulama gerçek çalıştırmanın çıktısıyla yapılacak.")
+        return None
     try:
         from jarvis.actions.devkit.acceptance import build_prompt, parse_spec, validate_spec
         response = _get_model(MODEL_PLANNER).generate_content(build_prompt(description, plan))
@@ -3139,8 +3147,12 @@ def _build_project(
             # YETMIYOR. Ici bos fonksiyon / cift __main__ / yalnizca basliktan
             # olusan rapor varsa proje BASARILI SAYILMAZ; duzeltme turuna girer.
             quality = _python_quality_issues(file_codes)
-            from jarvis.actions.devkit.python_quality import header_only_outputs
+            from jarvis.actions.devkit.python_quality import header_only_outputs, placeholder_data_outputs
             header_problems = header_only_outputs(project_dir, expected_outputs)
+            for _p in placeholder_data_outputs(project_dir, expected_outputs, description):
+                quality.setdefault(entry_point, []).append(
+                    {"code": "OUTPUT-PLACEHOLDER-DATA", "message": _p, "line": 0, "col": 0}
+                )
             if header_problems:
                 quality.setdefault(entry_point, []).extend(
                     {"code": "OUTPUT-HEADER-ONLY", "message": p, "line": 0, "col": 0} for p in header_problems

@@ -253,3 +253,10 @@ def test_selenium_code_in_playwright_plan_is_flagged():
     assert list(found) == ["main.py"] and found["main.py"][0]["code"] == "USE-PLAYWRIGHT-NOT-SELENIUM"
     assert found["main.py"][0]["line"] == 2
     assert da._selenium_instead_of_playwright(codes, ["selenium"]) == {}
+
+
+def test_real_url_scraping_skips_fabricated_acceptance(monkeypatch):
+    called = []
+    monkeypatch.setattr(da, "_get_model", lambda name: called.append(name))
+    assert da._plan_acceptance(GOOD_REQUEST, {"entry_point": "main.py"}, log=lambda m: None) is None
+    assert called == [], "gerçek URL'li kazımada model kabul testi uydurmamalı"
