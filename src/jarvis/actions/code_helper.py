@@ -261,7 +261,7 @@ def _has_error(output: str) -> bool:
 
 def _take_screenshot() -> Path | None:
     try:
-        from jarvis.desktop_io import gui as pyautogui
+        import pyautogui
         screenshot_path = Path.home() / "Desktop" / f"jarvis_debug_{int(time.time())}.png"
         screenshot = pyautogui.screenshot()
         screenshot.save(str(screenshot_path))

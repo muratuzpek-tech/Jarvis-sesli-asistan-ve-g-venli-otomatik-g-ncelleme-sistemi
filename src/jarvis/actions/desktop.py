@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime
 
 try:
-    from jarvis.desktop_io import gui as pyautogui
+    import pyautogui
     _PYAUTOGUI = True
 except Exception:
     pyautogui = None

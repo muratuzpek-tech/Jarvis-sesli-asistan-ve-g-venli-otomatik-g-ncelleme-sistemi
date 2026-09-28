@@ -7,7 +7,7 @@ from datetime import datetime
 from urllib.parse import quote_plus
 
 try:
-    from jarvis.desktop_io import gui as pyautogui
+    import pyautogui
     _PYAUTOGUI = True
 except Exception:
     pyautogui = None

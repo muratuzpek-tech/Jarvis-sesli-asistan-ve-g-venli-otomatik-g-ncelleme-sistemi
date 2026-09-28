@@ -108,13 +108,6 @@ def _compress(img_bytes: bytes, source_format: str = "PNG") -> tuple[bytes, str]
 
 def _capture_screen() -> tuple[bytes, str]:
 
-    # Wayland (Ubuntu 26.04/GNOME 50): mss burada SIYAH goruntu donduruyor;
-    # resmi yol xdg-desktop-portal (bkz. jarvis/desktop_io/portal.py).
-    from jarvis.desktop_io import is_wayland_session
-    if is_wayland_session():
-        from jarvis.desktop_io.portal import screenshot_png
-        return _compress(screenshot_png(), "PNG")
-
     if not _MSS:
         raise RuntimeError("mss is not installed. Run: pip install mss")
 

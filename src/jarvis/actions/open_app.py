@@ -106,7 +106,7 @@ def _launch_windows(app_name: str) -> bool:
             pass
 
     try:
-        from jarvis.desktop_io import gui as pyautogui
+        import pyautogui
         pyautogui.PAUSE = 0.1
         pyautogui.press("win")
         time.sleep(0.7)
@@ -159,7 +159,7 @@ def _launch_macos(app_name: str) -> bool:
             pass
 
     try:
-        from jarvis.desktop_io import gui as pyautogui
+        import pyautogui
         pyautogui.hotkey("command", "space")
         time.sleep(0.6)
         pyautogui.write(app_name, interval=0.05)

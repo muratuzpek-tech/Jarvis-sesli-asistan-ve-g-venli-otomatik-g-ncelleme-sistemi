@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 try:
-    from jarvis.desktop_io import gui as pyautogui
+    import pyautogui
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE    = 0.06
     _PYAUTOGUI = True

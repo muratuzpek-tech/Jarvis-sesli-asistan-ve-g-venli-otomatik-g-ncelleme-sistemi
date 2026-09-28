@@ -553,7 +553,7 @@ TOOL_DECLARATIONS = [
             "type": "OBJECT",
             "properties": {
                 "description":  {"type": "STRING", "description": "What the project should do"},
-                "language":     {"type": "STRING", "description": "Programming language: 'python' (default) or 'go' (Go projects are verified with go build, go vet and golangci-lint)"},
+                "language":     {"type": "STRING", "description": "Programming language (default: python)"},
                 "project_name": {"type": "STRING", "description": "Optional project folder name"},
                 "timeout":      {"type": "INTEGER", "description": "Run timeout in seconds (default: 30)"},
                 "confirm_code": {"type": "STRING", "description": "The code returned by a PRIOR unconfirmed call, after the user has explicitly confirmed. Leave empty on the first attempt."},
@@ -1630,9 +1630,6 @@ class JarvisLive:
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
                 self.speak("Goodbye, sir.")
-                # os._exit() atexit'i atladığı için kapanma nedeni burada
-                # açıkça loglanıyor (bkz. __main__._setup_crash_logging).
-                print("[JARVIS] shutdown_jarvis aracı çağrıldı - Gemini kapatma istedi.", flush=True)
                 def _shutdown():
                     import time
                     import os
