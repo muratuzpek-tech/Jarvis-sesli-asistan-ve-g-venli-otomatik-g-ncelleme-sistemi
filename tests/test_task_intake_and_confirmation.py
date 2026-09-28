@@ -191,13 +191,13 @@ def test_acceptance_fixture_url(tmp_path):
             "expect": [{"output": "out.json", "contains": ["Birinci", "Ikinci"]}]}
     clean, why = validate_spec(spec)
     assert clean, why
-    assert "file:///<sample_folder>/page.html" in contract_text(clean)
+    assert "http://127.0.0.1:<port>/page.html" in contract_text(clean)
     assert validate_spec({**spec, "args": ["{FIXTURE_URL}/../../etc/passwd"]})[0] is None
 
     (tmp_path / "main.py").write_text(
         "import json, re, sys, urllib.parse, urllib.request\n"
         "url = sys.argv[1]\n"
-        "assert url.startswith('file://'), url\n"
+        "assert url.startswith('http://127.0.0.1:'), url\n"
         "html = urllib.request.urlopen(url).read().decode()\n"
         "json.dump(re.findall(r'<h2>(.*?)</h2>', html), open('out.json', 'w'))\n",
         encoding="utf-8",
@@ -245,3 +245,18 @@ def test_ollama_options_have_large_context_and_low_temperature(monkeypatch):
 
 def test_selenium_plan_is_not_accepted_as_browser():
     assert not plan_uses_browser({"dependencies": ["selenium"]})
+
+
+def test_selenium_code_in_playwright_plan_is_flagged():
+    codes = {"main.py": "import sys\nfrom selenium import webdriver\n", "utils/h.py": "import json\n"}
+    found = da._selenium_instead_of_playwright(codes, ["playwright"])
+    assert list(found) == ["main.py"] and found["main.py"][0]["code"] == "USE-PLAYWRIGHT-NOT-SELENIUM"
+    assert found["main.py"][0]["line"] == 2
+    assert da._selenium_instead_of_playwright(codes, ["selenium"]) == {}
+
+
+def test_real_url_scraping_skips_fabricated_acceptance(monkeypatch):
+    called = []
+    monkeypatch.setattr(da, "_get_model", lambda name: called.append(name))
+    assert da._plan_acceptance(GOOD_REQUEST, {"entry_point": "main.py"}, log=lambda m: None) is None
+    assert called == [], "gerçek URL'li kazımada model kabul testi uydurmamalı"

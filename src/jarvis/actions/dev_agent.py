@@ -191,6 +191,14 @@ def _strip_fences(text: str) -> str:
 
 def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
     """Kabul testi spesifikasyonu ister; her hatada None (build engellenmez)."""
+    from jarvis.actions.devkit.task_intake import has_url, needs_browser_or_web
+    if has_url(description) and needs_browser_or_web(description):
+        # Canlı test 2026-09-28: model gerçek siteye benzemeyen bir örnek sayfa
+        # uydurdu; gerçek sitede DOĞRU çalışan program bu sayfada reddedildi.
+        # Gerçek URL'li kazıma görevlerinde doğrulama gerçek çalıştırmanın
+        # çıktısı üzerinden yapılır (beklenen çıktı + uydurma-veri kontrolü).
+        log("ℹ️ Kabul testi uygulanmayacak: gerçek bir siteyi kazıma görevi — doğrulama gerçek çalıştırmanın çıktısıyla yapılacak.")
+        return None
     try:
         from jarvis.actions.devkit.acceptance import build_prompt, parse_spec, validate_spec
         response = _get_model(MODEL_PLANNER).generate_content(build_prompt(description, plan))
@@ -204,6 +212,42 @@ def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
     tokens = sum(len(e["contains"]) for e in spec["expect"])
     log(f"🧪 Kabul testi hazır: {len(spec['fixtures'])} örnek dosya, {tokens} beklenen ifade.")
     return spec
+
+
+_SELENIUM_HINT = (
+    "IMPORTANT: this project's plan uses PLAYWRIGHT, but the code uses SELENIUM. Selenium needs a system "
+    "Chrome + chromedriver that is NOT available here (errors like 'DevToolsActivePort file doesn't exist' or "
+    "'session not created' cannot be fixed by changing Selenium options). REWRITE the browser part with "
+    "Playwright's sync API: from playwright.sync_api import sync_playwright; with sync_playwright() as p: "
+    "browser = p.chromium.launch(headless=True); page = browser.new_page(); page.goto(url, timeout=...); "
+    "page.mouse.wheel(0, 10000) / page.click(...) in a loop until enough items are loaded; "
+    "html = page.content(). Remove every selenium import."
+)
+
+
+def _selenium_instead_of_playwright(file_codes: dict[str, str], dependencies) -> dict[str, list[dict]]:
+    """Plan Playwright istiyor ama kod Selenium import ediyorsa dosya başına bulgu."""
+    deps = " ".join(str(d) for d in dependencies or []).casefold()
+    if "playwright" not in deps:
+        return {}
+    found: dict[str, list[dict]] = {}
+    for path, code in file_codes.items():
+        for no, line in enumerate(code.splitlines(), 1):
+            if re.match(r"\s*(from|import)\s+selenium\b", line):
+                found.setdefault(path, []).append(
+                    {"code": "USE-PLAYWRIGHT-NOT-SELENIUM", "message": _SELENIUM_HINT, "line": no, "col": 0}
+                )
+                break
+    return found
+
+
+def _recipes_for_fix(description: str, language: str) -> str:
+    """Düzeltme istemine de usta şablonlarını ekler (hata olursa boş döner)."""
+    try:
+        from jarvis.actions.devkit.recipes import recipes_block
+        return recipes_block(description, language)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _python_quality_issues(file_codes: dict[str, str]) -> dict[str, list[dict]]:
@@ -861,6 +905,9 @@ JS/TS-specific rules:
         "import each other (data often flows through a third file like main.py):\n"
         + shared_contracts
     ) if shared_contracts else ""
+
+    from jarvis.actions.devkit.recipes import recipes_block
+    lang_rules += "\n\n" + recipes_block(project_description, language)
 
     expected_outputs_block = (
         "Files this project MUST create or update on disk when it runs, with the "
@@ -2639,6 +2686,7 @@ Other files for context (read-only — fix only the target file):
 
 {expected_outputs_block}
 
+{_recipes_for_fix(project_description, language)}
 File to fix: {fix_path}{line_hint}
 Error type: {error_type}
 
@@ -2906,6 +2954,11 @@ def _build_project(
     for _fp, _issues in _python_quality_issues(file_codes).items():
         lint_issues.setdefault(_fp, []).extend(_issues)
 
+    # Plan Playwright dediği hâlde yazar model Selenium kullandı mı? (canlı test
+    # 2026-09-28: 5 denemenin hepsinde Selenium'un Chrome hatası yamalandı.)
+    for _fp, _issues in _selenium_instead_of_playwright(file_codes, dependencies).items():
+        lint_issues.setdefault(_fp, []).extend(_issues)
+
     if lint_issues:
         affected = ", ".join(sorted(lint_issues.keys()))
         log(f"İlk çalıştırmadan önce statik analizle olası çalışma-zamanı/davranış hatası tespit edildi ({affected}), model ile düzeltiliyor (bir çalıştırma denemesi harcanmadan)...")
@@ -3091,6 +3144,19 @@ def _build_project(
             )
             if not output_problems:
                 output_problems.extend(_check_output_contents(project_dir, expected_outputs))
+        if is_timeout and output_problems and not gui_task:
+            # Canlı test 2026-09-29: JS kazıyıcı sonsuz kaydırma döngüsünde
+            # takıldı; model yalnızca "çıktı yok" duyduğu için 4 denemede de
+            # asıl sorunu (bitmeyen döngü) görmedi ve her deneme 360 sn sürdü.
+            output_problems.insert(0, (
+                f"The program NEVER FINISHED — it was killed after {current_timeout}s. This is a batch task, "
+                f"not a server/GUI: it is stuck in an endless loop or waiting forever (e.g. scrolling an "
+                f"infinite-scroll page until 'no new content' which never happens, waiting for a selector that "
+                f"never appears, a retry loop without a limit). Add a HARD STOP: stop as soon as the requested "
+                f"number of items is collected, cap loops with a maximum iteration count, and give every wait a "
+                f"timeout. Write the output file as soon as the data is collected."
+            ))
+            current_timeout = timeout  # uzatılmış süre yalnızca soğuk başlangıç içindi
         if output_problems:
             log(f"Program çökmedi ama beklenen çıktı üretilmedi: {output_problems}")
             filename_mismatches = _detect_output_filename_mismatch(
@@ -3107,8 +3173,12 @@ def _build_project(
             # YETMIYOR. Ici bos fonksiyon / cift __main__ / yalnizca basliktan
             # olusan rapor varsa proje BASARILI SAYILMAZ; duzeltme turuna girer.
             quality = _python_quality_issues(file_codes)
-            from jarvis.actions.devkit.python_quality import header_only_outputs
+            from jarvis.actions.devkit.python_quality import header_only_outputs, placeholder_data_outputs
             header_problems = header_only_outputs(project_dir, expected_outputs)
+            for _p in placeholder_data_outputs(project_dir, expected_outputs, description):
+                quality.setdefault(entry_point, []).append(
+                    {"code": "OUTPUT-PLACEHOLDER-DATA", "message": _p, "line": 0, "col": 0}
+                )
             if header_problems:
                 quality.setdefault(entry_point, []).extend(
                     {"code": "OUTPUT-HEADER-ONLY", "message": p, "line": 0, "col": 0} for p in header_problems
@@ -3278,8 +3348,9 @@ def _build_project(
             log("⚠️ Önceki düzeltme denemesiyle BİREBİR AYNI hata tekrar oluştu - model bu kez uyarılıyor.")
         log(f"Fixing errors (type: {error_type})...")
         try:
+            _sel = _selenium_instead_of_playwright(file_codes, dependencies)
             updated = _fix_files(
-                error_output=last_output,
+                error_output=(last_output + "\n\n" + _SELENIUM_HINT) if _sel else last_output,
                 project_description=description,
                 all_files=files,
                 file_codes=file_codes,

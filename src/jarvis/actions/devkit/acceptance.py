@@ -50,7 +50,7 @@ Decide whether the program can be checked automatically on a tiny, fully known s
 - ALSO applicable for WEB SCRAPERS that take the page URL as a command-line argument: write a
   small local HTML page as a fixture (it may contain a <script> that appends items on scroll or
   on a "load more" click, if the task is about that) and pass it as "{{FIXTURE_URL}}/page.html"
-  in "args". The expected tokens are the exact titles/texts you put in that HTML.
+  in "args" (it is served over a local http://127.0.0.1 server, so plain HTTP clients work too). The expected tokens are the exact titles/texts you put in that HTML.
 
 If applicable, create a small sample input ("fixtures") whose correct result you know EXACTLY,
 and list short tokens that ANY correct output must contain regardless of formatting:
@@ -68,7 +68,7 @@ Return ONLY JSON:
 }}
 Rules: fixture paths are relative (no "..", no absolute paths), at most {max_fixtures} files.
 "args" are the command-line arguments for the test run; use {{FIXTURE}} for the fixture folder,
-or {{FIXTURE_URL}} for its file:// URL (web scrapers).
+or {{FIXTURE_URL}} for its local http:// URL (web scrapers).
 "output" is a relative output file path from the program's working directory, or "STDOUT".
 If not applicable return {{"applicable": false, "reason": "..."}}.
 JSON:"""
@@ -181,7 +181,7 @@ def _correct_word_counts(fixtures: list[dict], expect: list[dict]) -> list[str]:
 
 def contract_text(spec: dict) -> str:
     """Yazılacak dosyalara eklenecek zorunlu sözleşme."""
-    shown = " ".join(spec["args"]).replace(URL_PLACEHOLDER, "file:///<sample_folder>").replace(PLACEHOLDER, "<sample_folder>")
+    shown = " ".join(spec["args"]).replace(URL_PLACEHOLDER, "http://127.0.0.1:<port>").replace(PLACEHOLDER, "<sample_folder>")
     base = spec.get("input_contract") or "The program must take its input path from the command line."
     return (
         f"ACCEPTANCE CONTRACT (automatically tested): {base} The program will ALSO be run as: "
@@ -205,11 +205,13 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(fx["content"], encoding="utf-8")
 
-    fixture_url = fixture.resolve().as_uri()
+    uses_url = any(URL_PLACEHOLDER in a for a in spec["args"])
+    server = _serve_directory(fixture) if uses_url else None
+    fixture_url = f"http://127.0.0.1:{server.server_address[1]}" if server else ""
     args = [a.replace(URL_PLACEHOLDER, fixture_url, 1).replace(PLACEHOLDER, str(fixture.resolve()), 1)
             for a in spec["args"]]
     entry = (project_dir / entry_point).resolve()
-    started = __import__("time").time() - 1
+    before = _output_snapshot(project_dir, spec)
     try:
         proc = subprocess.run([python or sys.executable, str(entry), *args], cwd=str(run_dir),
                               capture_output=True, text=True, timeout=timeout, check=False)
@@ -217,6 +219,10 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
         code = proc.returncode
     except subprocess.TimeoutExpired:
         return [f"Kabul testi {timeout:.0f} sn içinde bitmedi."], ""
+    finally:
+        if server:
+            server.shutdown()
+            server.server_close()
     problems: list[str] = []
     if code != 0:
         problems.append(f"Program kabul testinde hata koduyla bitti ({code}).")
@@ -226,7 +232,7 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
         else:
             path = run_dir / ex["output"]
             if not path.is_file():
-                stray = _written_elsewhere(project_dir, ex["output"], started)
+                stray = _written_elsewhere(project_dir, ex["output"], before)
                 if stray:
                     problems.append(
                         f"'{ex['output']}' çalışma klasörüne DEĞİL, programın kendi klasörüne yazıldı ({stray}). "
@@ -245,21 +251,58 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
     return problems, output[:2000]
 
 
-def _written_elsewhere(project_dir: Path, output: str, since: float) -> str | None:
-    """Beklenen çıktı çalışma klasörü yerine proje içinde başka bir yere mi
-    yazıldı? (canlı test 2026-09-28: quotes.csv __file__ klasörüne yazıldı,
-    model 5 denemede de sebebi anlamadı.)"""
-    name = PurePosixPath(output).name
+def _output_snapshot(project_dir: Path, spec: dict) -> dict[Path, int]:
+    """Kabul testi ÖNCESİNDE, beklenen çıktı adlarını taşıyan proje
+    dosyalarının değişim zamanları. (canlı test 2026-09-28: gerçek çalıştırma
+    quotes.csv'yi 1 sn önce proje köküne yazmıştı; zaman penceresine dayalı eski
+    kontrol bunu 'kabul testinde yanlış klasöre yazdı' sandı ve modeli yanlış
+    yöne itti.)"""
+    snap: dict[Path, int] = {}
     root = project_dir / ACCEPT_DIR
-    for p in project_dir.rglob(name):
+    for ex in spec["expect"]:
+        if ex["output"] == "STDOUT":
+            continue
+        for p in project_dir.rglob(PurePosixPath(ex["output"]).name):
+            try:
+                if root not in p.parents and p.is_file():
+                    snap[p] = p.stat().st_mtime_ns
+            except OSError:
+                continue
+    return snap
+
+
+def _written_elsewhere(project_dir: Path, output: str, before: dict[Path, int]) -> str | None:
+    """Beklenen çıktı, kabul testi SIRASINDA çalışma klasörü yerine proje
+    içinde başka bir yere mi yazıldı? Yalnızca bu çalıştırmada oluşan ya da
+    değişen dosyalar sayılır."""
+    root = project_dir / ACCEPT_DIR
+    for p in project_dir.rglob(PurePosixPath(output).name):
         try:
             if root in p.parents or not p.is_file():
                 continue
-            if p.stat().st_mtime >= since:
+            if before.get(p) != p.stat().st_mtime_ns:
                 return p.relative_to(project_dir).as_posix()
         except OSError:
             continue
     return None
+
+
+def _serve_directory(directory: Path):
+    """Örnek HTML'i yerel bir HTTP sunucusundan sunar. file:// adresini
+    requests açamaz (canlı test 2026-09-28: düz kazıyıcı kabul testinde hiç
+    çıktı üretemedi); http://127.0.0.1 hem requests hem Playwright ile çalışır."""
+    import functools
+    import threading
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+    class _Quiet(SimpleHTTPRequestHandler):
+        def log_message(self, *args):  # noqa: D401 - sessiz
+            pass
+
+    handler = functools.partial(_Quiet, directory=str(directory))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 _SCRIPT_DIR_PATTERNS = (

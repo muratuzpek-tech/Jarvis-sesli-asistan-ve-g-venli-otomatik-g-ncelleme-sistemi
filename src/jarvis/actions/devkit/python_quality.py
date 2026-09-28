@@ -266,3 +266,46 @@ def header_only_outputs(project_dir: Path, expected_outputs: list) -> list[str]:
                 f"Program gerçek sonuçları yazmalı; hiç bulgu yoksa bunu açıkça belirten bir satır yazmalı."
             )
     return problems
+
+
+_PLACEHOLDER_PATTERNS = (
+    re.compile(r"\b(?:sample|dummy|placeholder|fake|example|mock)\s+(?:quote|text|data|author|title|item|name|content|entry|record)s?\b", re.I),
+    re.compile(r"\blorem\s+ipsum\b", re.I),
+)
+# "Author 1", "Quote 2", "Title 3" … — tek başına masum olabilir, en az iki farklı numara gerekir.
+_NUMBERED_PLACEHOLDER = re.compile(r"\b(author|quote|title|item|user|product|article)\s*[_-]?\s*(\d{1,3})\b", re.I)
+_SAMPLE_TASK_WORDS = re.compile(r"sample|örnek|ornek|dummy|sahte|mock|test verisi|lorem", re.I)
+
+
+def placeholder_data_outputs(project_dir: Path, expected_outputs: list, description: str = "") -> list[str]:
+    """Çıktıda gerçek veri yerine UYDURMA örnek veri var mı?
+
+    Canlı test 2026-09-28: JS kazıma görevinde program siteyi hiç kazımadan
+    'Sample quote 1 / Author 1' yazdı. Görev açıkça örnek veri istiyorsa
+    (ör. 'örnek veri üret') kontrol yapılmaz."""
+    if _SAMPLE_TASK_WORDS.search(description or ""):
+        return []
+    problems = []
+    for item in expected_outputs or []:
+        rel = item.get("path") if isinstance(item, dict) else str(item)
+        if not rel:
+            continue
+        target = project_dir / rel
+        try:
+            target.resolve().relative_to(project_dir.resolve())
+            if target.stat().st_size > 5_000_000:
+                continue
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            continue
+        hits = [m.group(0) for rx in _PLACEHOLDER_PATTERNS for m in rx.finditer(text)]
+        numbered: dict[str, set[str]] = {}
+        for m in _NUMBERED_PLACEHOLDER.finditer(text):
+            numbered.setdefault(m.group(1).lower(), set()).add(m.group(2))
+        hits += [f"{word} 1..{max(map(int, nums))}" for word, nums in numbered.items() if len(nums) >= 2]
+        if hits:
+            problems.append(
+                f"'{rel}' gerçek veri yerine UYDURMA örnek veri içeriyor ({', '.join(sorted(set(hits))[:4])}). "
+                f"Program veriyi gerçek kaynaktan (site/dosya) okumalı; örnek veri yazıp başarılı gibi görünmemeli."
+            )
+    return problems

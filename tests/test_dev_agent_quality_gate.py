@@ -236,3 +236,55 @@ def test_output_next_to_script_is_fixed_without_model(env, monkeypatch):
     assert "is working" in result, result
     assert not [p for p in model.prompts if p.startswith("You are an expert python debugger")]
     assert "Path.cwd()" in (env / "word_counter" / "main.py").read_text(encoding="utf-8")
+
+
+HANG = '''
+import time
+
+
+def main() -> None:
+    while True:  # bitmeyen kaydırma döngüsü
+        time.sleep(0.2)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+DONE = '''
+from pathlib import Path
+
+
+def main() -> None:
+    Path("report.txt").write_text("Notlar\\n======\\n- elma\\n- armut\\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def test_hanging_batch_program_gets_hard_stop_hint(env, monkeypatch):
+    """Canlı test 2026-09-29: sonsuz döngüdeki kazıyıcı 4 denemede de 'çıktı yok'
+    diye düzeltildi; modele programın BİTMEDİĞİ söylenmedi."""
+    plan = {"project_name": "hang_app", "entry_point": "main.py",
+            "files": [{"path": "main.py", "description": "entry", "imports": []}],
+            "run_command": "python main.py", "dependencies": [],
+            "expected_outputs": [{"path": "report.txt", "description": "notes"}]}
+    monkeypatch.setattr(da, "_plan_project", lambda d, lang: dict(plan))
+    prompts = []
+
+    class M:
+        def generate_content(self, prompt):
+            prompts.append(prompt)
+            r = type("R", (), {})()
+            if prompt.startswith("You design an ACCEPTANCE TEST"):
+                r.text = '{"applicable": false, "reason": "x"}'
+            else:
+                r.text = DONE if any("NEVER FINISHED" in p for p in prompts) else HANG
+            return r
+
+    monkeypatch.setattr(da, "_get_model", lambda name: M())
+    result = da._build_project("not raporu", "python", "", 1, player=None, speak=None)
+    assert "is working" in result, result
+    assert any("NEVER FINISHED" in p for p in prompts)

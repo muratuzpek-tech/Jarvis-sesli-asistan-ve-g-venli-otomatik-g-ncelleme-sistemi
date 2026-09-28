@@ -159,3 +159,24 @@ def test_detects_written_but_never_called_features():
     assert unused == ["CodeAnalyzer.check_leftover_backup_files", "CodeAnalyzer.check_unused_functions"]
     # geri çağırma (command=self.on_click) ve getattr(\"helper\") kullanılmış sayılır
     assert "main.py" not in r
+
+
+def test_placeholder_data_is_detected(tmp_path):
+    from jarvis.actions.devkit.python_quality import placeholder_data_outputs
+    (tmp_path / "quotes.json").write_text(
+        '[{"id": 1, "text": "Sample quote 1", "author": "Author 1"}, {"id": 2, "text": "x", "author": "Author 2"}]'
+    )
+    out = [{"path": "quotes.json"}]
+    problems = placeholder_data_outputs(tmp_path, out, "quotes.toscrape.com'u kazı")
+    assert problems and "UYDURMA" in problems[0]
+    # Görev açıkça örnek veri istiyorsa bayrak kalkmaz
+    assert placeholder_data_outputs(tmp_path, out, "örnek veri üreten program") == []
+
+
+def test_real_quotes_are_not_flagged(tmp_path):
+    from jarvis.actions.devkit.python_quality import placeholder_data_outputs
+    (tmp_path / "quotes.json").write_text(
+        '[{"id": 1, "text": "The world as we have created it is a process of our thinking.", '
+        '"author": "Albert Einstein"}, {"id": 2, "text": "It is our choices, Harry...", "author": "J.K. Rowling"}]'
+    )
+    assert placeholder_data_outputs(tmp_path, [{"path": "quotes.json"}], "kazı") == []

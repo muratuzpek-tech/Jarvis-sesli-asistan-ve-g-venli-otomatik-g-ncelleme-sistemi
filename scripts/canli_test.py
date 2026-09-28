@@ -10,6 +10,12 @@ Kullanım:
     .venv/bin/python scripts/canli_test.py            # beş görevin hepsi
     .venv/bin/python scripts/canli_test.py --sec 1,3  # yalnızca 1. ve 3. görev
     .venv/bin/python scripts/canli_test.py --liste    # görevleri göster
+    .venv/bin/python scripts/canli_test.py --surpriz 3   # + havuzdan 3 rastgele sürpriz görev
+    .venv/bin/python scripts/canli_test.py --surpriz 0   # sürpriz görev yok
+
+Sabit görevler ilerlemeyi ölçer (puan bunlardan hesaplanır). Sürpriz görevler
+(scripts/canli_test_surpriz.py) JARVIS'in HİÇ GÖRMEDİĞİ işlerde de başarılı olup
+olmadığını ayrı bir puanla gösterir — "teste göre ders çalışma" riskine karşı.
 
 Not: Sesli arayüzü değil, kod yazma motorunu (dev_agent) ölçer. Her görev
 birkaç dakika sürebilir; toplam 15-45 dk beklenebilir.
@@ -20,6 +26,7 @@ import argparse
 import csv
 import io
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -35,6 +42,8 @@ import jarvis.actions.dev_agent as da  # noqa: E402
 from jarvis.paths import logs_dir  # noqa: E402
 
 GECMIS = logs_dir() / "canli_test_gecmisi.jsonl"
+_ALTYAPI = re.compile(r"RESOURCE_EXHAUSTED|Rate limit|Gemini'ye ulaşılamıyor|devre kesici|No space left on device|"
+                      r"Connection refused|Max retries exceeded", re.IGNORECASE)
 
 
 # ── bağımsız doğrulama yardımcıları ──────────────────────────────────────
@@ -172,6 +181,8 @@ def calistir(gorev: dict, kok: Path) -> dict:
         durum = "YALANCI BAŞARI"   # en kötü durum: "çalışıyor" dedi ama çıktı yanlış
     elif dogru:
         durum = "DOĞRU AMA REDDETTİ"
+    elif _ALTYAPI.search(sonuc):
+        durum = "ALTYAPI HATASI"  # kota/bağlantı/disk — JARVIS'in başarısı ölçülemedi, puana sayılmaz
     else:
         durum = "KALDI"
     return {"no": gorev["no"], "ad": gorev["ad"], "durum": durum, "neden": neden or sonuc[-300:],
@@ -182,12 +193,21 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sec", help="virgülle görev numaraları, ör. 1,3")
     ap.add_argument("--liste", action="store_true")
+    ap.add_argument("--surpriz", type=int, default=2, help="havuzdan rastgele sürpriz görev sayısı (varsayılan 2)")
     a = ap.parse_args()
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from canli_test_surpriz import SURPRIZ
     if a.liste:
-        for g in GOREVLER:
+        for g in GOREVLER + SURPRIZ:
             print(f"{g['no']}. {g['ad']} ({g['dil']}): {g['tarif'][:110]}…")
         return 0
     secili = {int(x) for x in a.sec.split(",")} if a.sec else {g["no"] for g in GOREVLER}
+    surprizler = []
+    if a.surpriz > 0 and not a.sec:
+        import random
+        surprizler = random.sample(SURPRIZ, min(a.surpriz, len(SURPRIZ)))
+    elif a.sec:
+        surprizler = [g for g in SURPRIZ if g["no"] in secili]
 
     damga = datetime.now().strftime("%Y%m%d-%H%M%S")
     kok = Path.home() / "Desktop" / "JarvisProjects" / "_canli_test" / damga
@@ -196,14 +216,28 @@ def main() -> int:
     os.environ.setdefault("JARVIS_DEVAGENT_OPEN_EDITOR", "0")  # her görevde VSCode açılmasın
 
     sonuclar = [calistir(g, kok) for g in GOREVLER if g["no"] in secili]
+    s_sonuclar = [calistir(g, kok) for g in surprizler]
+    s_gecen = sum(s["durum"] == "GEÇTİ" for s in s_sonuclar)
+    s_sayilan = sum(s["durum"] not in ("ATLANDI", "ALTYAPI HATASI") for s in s_sonuclar)
 
     gecen = sum(s["durum"] == "GEÇTİ" for s in sonuclar)
-    sayilan = sum(s["durum"] != "ATLANDI" for s in sonuclar)
-    kayit = {"zaman": damga, "surum": _git_surum(), "gecen": gecen, "toplam": sayilan, "sonuclar": sonuclar}
+    sayilan = sum(s["durum"] not in ("ATLANDI", "ALTYAPI HATASI") for s in sonuclar)
+    kayit = {"zaman": damga, "surum": _git_surum(), "gecen": gecen, "toplam": sayilan, "sonuclar": sonuclar,
+             "surpriz": {"gecen": s_gecen, "toplam": s_sayilan, "sonuclar": s_sonuclar}}
     onceki = None
     if GECMIS.exists():
         satirlar = [s for s in GECMIS.read_text(encoding="utf-8").splitlines() if s.strip()]
-        onceki = json.loads(satirlar[-1]) if satirlar else None
+        # Karşılaştırma: aynı görev kümesiyle yapılmış ve en az bir görevi
+        # ölçülebilmiş (tamamen altyapı hatası olmayan) son çalıştırma.
+        ayni = {s["no"] for s in sonuclar}
+        for satir in reversed(satirlar):
+            try:
+                k = json.loads(satir)
+            except json.JSONDecodeError:
+                continue
+            if k.get("toplam") and {s["no"] for s in k.get("sonuclar", [])} == ayni:
+                onceki = k
+                break
     GECMIS.parent.mkdir(parents=True, exist_ok=True)
     with GECMIS.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(kayit, ensure_ascii=False) + "\n")
@@ -213,13 +247,19 @@ def main() -> int:
     for s in sonuclar:
         ek = f" — {s['neden'][:140]}" if s["durum"] != "GEÇTİ" else ""
         print(f"  {s['no']}. {s['ad']:<15} {s['durum']:<20} {s['sure_sn']:>4} sn{ek}")
-    print(f"\n  Başarı: {gecen}/{sayilan}")
+    print(f"\n  Başarı (sabit görevler): {gecen}/{sayilan}")
+    if s_sonuclar:
+        print("\n  SÜRPRİZ GÖREVLER (JARVIS bunları daha önce görmedi):")
+        for s in s_sonuclar:
+            ek = f" — {s['neden'][:140]}" if s["durum"] != "GEÇTİ" else ""
+            print(f"  {s['no']}. {s['ad']:<20} {s['durum']:<20} {s['sure_sn']:>4} sn{ek}")
+        print(f"  Sürpriz başarı: {s_gecen}/{s_sayilan}")
     if onceki:
         print(f"  Önceki çalıştırma ({onceki['zaman']}, sürüm {onceki['surum']}): {onceki['gecen']}/{onceki['toplam']}")
-    if any(s["durum"] == "YALANCI BAŞARI" for s in sonuclar):
+    if any(s["durum"] == "YALANCI BAŞARI" for s in sonuclar + s_sonuclar):
         print("  ⚠️  YALANCI BAŞARI var: JARVIS 'çalışıyor' dedi ama çıktı yanlış — öncelikli hata!")
     print(f"\n  Projeler ve SONUC.json: {kok}\n  Geçmiş: {GECMIS}")
-    return 0 if gecen == sayilan else 1
+    return 0 if gecen == sayilan and s_gecen == s_sayilan else 1
 
 
 if __name__ == "__main__":
