@@ -31,6 +31,8 @@ MAX_FIXTURES = 12
 MAX_FIXTURE_BYTES = 8000
 MAX_TOKENS = 20
 PLACEHOLDER = "{FIXTURE}"
+# Web kazıyıcılar için: örnek klasörün file:// adresi (ör. {FIXTURE_URL}/page.html).
+URL_PLACEHOLDER = "{FIXTURE_URL}"
 ACCEPT_DIR = PurePosixPath(".jarvis/acceptance")
 
 PROMPT = """You design an ACCEPTANCE TEST for a small program that is about to be written.
@@ -42,9 +44,13 @@ Planned entry point: {entry}
 Planned expected output files: {outputs}
 
 Decide whether the program can be checked automatically on a tiny, fully known sample input:
-- NOT applicable for GUI-only apps, network/web scraping, randomness, real-time/system-state
-  readings (CPU/RAM/processes/time), or anything needing a human.
+- NOT applicable for GUI-only apps, randomness, real-time/system-state readings
+  (CPU/RAM/processes/time), login-protected sites, or anything needing a human.
 - Applicable for programs that read files/folders/text and produce a deterministic result.
+- ALSO applicable for WEB SCRAPERS that take the page URL as a command-line argument: write a
+  small local HTML page as a fixture (it may contain a <script> that appends items on scroll or
+  on a "load more" click, if the task is about that) and pass it as "{{FIXTURE_URL}}/page.html"
+  in "args". The expected tokens are the exact titles/texts you put in that HTML.
 
 If applicable, create a small sample input ("fixtures") whose correct result you know EXACTLY,
 and list short tokens that ANY correct output must contain regardless of formatting:
@@ -61,7 +67,8 @@ Return ONLY JSON:
   "expect": [{{"output": "report.txt", "contains": ["empty_func", "old.bak.py"]}}]
 }}
 Rules: fixture paths are relative (no "..", no absolute paths), at most {max_fixtures} files.
-"args" are the command-line arguments for the test run; use {{FIXTURE}} for the fixture folder.
+"args" are the command-line arguments for the test run; use {{FIXTURE}} for the fixture folder,
+or {{FIXTURE_URL}} for its file:// URL (web scrapers).
 "output" is a relative output file path from the program's working directory, or "STDOUT".
 If not applicable return {{"applicable": false, "reason": "..."}}.
 JSON:"""
@@ -113,9 +120,12 @@ def validate_spec(spec: object) -> tuple[dict | None, str]:
     if not isinstance(args, list) or len(args) > 10 or not all(isinstance(a, str) and len(a) < 300 for a in args):
         return None, "args düz metin listesi olmalı"
     for a in args:
-        rest = a.replace(PLACEHOLDER, "", 1) if a.startswith(PLACEHOLDER) else a
-        if a.startswith(PLACEHOLDER) and rest and not _safe_rel(rest.lstrip("/")):
-            return None, f"arg örnek klasör dışına çıkıyor: {a}"
+        for ph in (URL_PLACEHOLDER, PLACEHOLDER):
+            if a.startswith(ph):
+                rest = a[len(ph):]
+                if rest and not _safe_rel(rest.lstrip("/")):
+                    return None, f"arg örnek klasör dışına çıkıyor: {a}"
+                break
     expect = spec.get("expect")
     if not isinstance(expect, list) or not expect:
         return None, "beklenti listesi boş"
@@ -139,7 +149,7 @@ def validate_spec(spec: object) -> tuple[dict | None, str]:
 
 def contract_text(spec: dict) -> str:
     """Yazılacak dosyalara eklenecek zorunlu sözleşme."""
-    shown = " ".join(spec["args"]).replace(PLACEHOLDER, "<sample_folder>")
+    shown = " ".join(spec["args"]).replace(URL_PLACEHOLDER, "file:///<sample_folder>").replace(PLACEHOLDER, "<sample_folder>")
     base = spec.get("input_contract") or "The program must take its input path from the command line."
     return (
         f"ACCEPTANCE CONTRACT (automatically tested): {base} The program will ALSO be run as: "
@@ -163,7 +173,9 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(fx["content"], encoding="utf-8")
 
-    args = [a.replace(PLACEHOLDER, str(fixture.resolve()), 1) for a in spec["args"]]
+    fixture_url = fixture.resolve().as_uri()
+    args = [a.replace(URL_PLACEHOLDER, fixture_url, 1).replace(PLACEHOLDER, str(fixture.resolve()), 1)
+            for a in spec["args"]]
     entry = (project_dir / entry_point).resolve()
     try:
         proc = subprocess.run([python or sys.executable, str(entry), *args], cwd=str(run_dir),

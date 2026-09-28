@@ -93,7 +93,8 @@ def _update_job(job_id: str, **fields: Any) -> None:
             logger.error("Failed to update job %s: %s", job_id, exc)
 
 
-def _run_job_in_background(job_id: str, description: str, language: str, project_name: str) -> None:
+def _run_job_in_background(job_id: str, description: str, language: str, project_name: str,
+                           confirm_code: str = "") -> None:
     """Ayri bir thread'de calisir - dev_agent'in kendi (senkron, uzun surebilen)
     calisma dongusunu bloklamadan yurutur."""
     _update_job(job_id, status="running")
@@ -104,11 +105,16 @@ def _run_job_in_background(job_id: str, description: str, language: str, project
             "description": description,
             "language": language,
             "project_name": project_name,
+            "confirm_code": confirm_code,
         })
         res_str = str(result) if result is not None else ""
+        # DUZELTME (2026-09-28): eskiden onay kodu hic verilmedigi icin dev_agent
+        # yalnizca "ONAY GEREKLİ" donuyor, proje HIC olusmuyor ama is yine de
+        # "completed" gorunuyordu. Artik yalnizca gercek basari "completed".
+        succeeded = "is working" in res_str or "çalışıyor" in res_str
         _update_job(
             job_id,
-            status="completed",
+            status="completed" if succeeded else "failed",
             result=res_str[:500],
             finished_at=datetime.now().isoformat(),
         )
@@ -131,6 +137,22 @@ def start_parallel_task(parameters: dict[str, Any] | None = None, player: Any = 
         return "Görev açıklaması gerekli."
     language = str(p.get("language", "python") or "python").strip()
     project_name = str(p.get("project_name", "") or "").strip()
+    confirm_code = str(p.get("confirm_code", "") or "").strip()
+
+    from jarvis.actions.dev_agent import confirmation_problem, dev_agent
+
+    # Arka plan gorevi de ayni onay kapisindan gecer: once onizleme + kod,
+    # kullanici acikca onaylayinca ayni kodla ikinci cagri isi baslatir.
+    if not confirm_code:
+        preview = dev_agent(parameters={"description": description, "language": language,
+                                        "project_name": project_name})
+        if "confirm_code='" in preview:
+            preview += (" ARKA PLAN İÇİN: onaydan sonra dev_agent yerine start_parallel_task'ı aynı "
+                        "description/language/project_name ve bu confirm_code ile çağır.")
+        return preview
+    problem = confirmation_problem(confirm_code)
+    if problem:
+        return problem
 
     job_id = uuid.uuid4().hex[:8]
     now_iso = datetime.now().isoformat()
@@ -152,7 +174,7 @@ def start_parallel_task(parameters: dict[str, Any] | None = None, player: Any = 
 
     thread = threading.Thread(
         target=_run_job_in_background,
-        args=(job_id, description, language, project_name),
+        args=(job_id, description, language, project_name, confirm_code),
         daemon=True,
         name=f"AgentBoard-{job_id}",
     )
