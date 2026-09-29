@@ -330,6 +330,25 @@ def _acceptance_expectation_wrong(description: str, spec: dict, problems: list[s
         return False, f"hakem çalışmadı: {type(e).__name__}"
 
 
+MAX_ROLLBACKS = 2
+
+
+def _restore_codes(project_dir: Path, current: dict[str, str], stable: dict[str, str]) -> None:
+    """Dosyaları çökmeyen son sürüme döndürür; bozuk sürüm .jarvis/backups'a kaydedilir."""
+    backup_dir = project_dir / ".jarvis" / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for rel, code in current.items():
+        if stable.get(rel) != code:
+            (backup_dir / f"{rel.replace('/', '__')}.bozuk.{stamp}.bak").write_text(code, encoding="utf-8")
+    for rel, code in stable.items():
+        target = project_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(code, encoding="utf-8")
+    for rel in set(current) - set(stable):
+        (project_dir / rel).unlink(missing_ok=True)
+
+
 SAMPLE_INPUT_DIR = "ornek_girdi"
 
 
@@ -402,6 +421,25 @@ _SELENIUM_HINT = (
     "page.mouse.wheel(0, 10000) / page.click(...) in a loop until enough items are loaded; "
     "html = page.content(). Remove every selenium import."
 )
+
+
+_DIGITS_ONLY_NUMBER = re.compile(r"filter\(\s*str\.isdigit|if\s+\w+\.isdigit\(\)\s*\)|\.isdigit\(\)\s*\]\s*\)")
+
+
+def _known_code_hint(file_codes: dict[str, str]) -> str:
+    """Kodda bilinen SESSİZ hata kalıpları (program çökmez, sonuç yanlış olur).
+    Murat@goxs 2026-09-29 (book_scraper): fiyat ''.join(filter(str.isdigit, '51.77'))
+    ile okundu → 5177; hiçbir kitap '20 £'dan ucuz' olmadı, 5 denemede de fark edilmedi."""
+    hints = []
+    for path, code in file_codes.items():
+        if _DIGITS_ONLY_NUMBER.search(code or ""):
+            hints.append(
+                f"{path}: a number is built by keeping ONLY DIGITS (str.isdigit). That DELETES the decimal point "
+                "and minus sign: '£51.77' becomes 5177, so every price looks huge and filters like '< 20' match "
+                "nothing. Parse with a regex that keeps the decimal part, e.g. "
+                "float(re.search(r'\\d+(?:\\.\\d+)?', text).group()). If the text shows 'Â£', pass "
+                "resp.content (bytes) to BeautifulSoup instead of resp.text.")
+    return ("\n\nKNOWN SILENT BUG IN THE CODE (fix this first):\n- " + "\n- ".join(hints)) if hints else ""
 
 
 _STRPTIME_MISMATCH = re.compile(r"time data '([^']*)' does not match format '([^']*)'")
@@ -3591,6 +3629,13 @@ def _build_project(
     timeout_extended = False
     current_timeout  = timeout
     previous_fix_error_output: str | None = None
+    # GERİ ALMA (Murat@goxs 2026-09-29, file_cleaner_report): ilk sürüm çalışıp
+    # rapor üretti; model "düzeltirken" programı bozdu ('root' is not defined) ve
+    # kalan 4 deneme bu yeni hatayla harcandı. Çökmeyen son sürüm saklanır; bir
+    # düzeltme onu çökertirse o sürüme dönülür ve bozan değişiklik modele söylenir.
+    stable_codes: dict[str, str] | None = None
+    rollbacks = 0
+    revert_note = ""
 
     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
         log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
@@ -3628,6 +3673,24 @@ def _build_project(
             continue
 
         has_crash_error = _has_error(last_output, run_command)
+        if not has_crash_error and not is_timeout:
+            stable_codes = dict(file_codes)
+        elif (has_crash_error and stable_codes is not None and rollbacks < MAX_ROLLBACKS
+              and stable_codes != file_codes and attempt < MAX_FIX_ATTEMPTS):
+            rollbacks += 1
+            _restore_codes(project_dir, file_codes, stable_codes)
+            file_codes.clear()
+            file_codes.update(stable_codes)
+            crash_tail = last_output.strip()[-500:]
+            revert_note = (
+                "\n\nIMPORTANT: a previous fix attempt BROKE the program (it crashed with the error below) and "
+                "was REVERTED — you are looking at the last version that ran without crashing. Do NOT repeat "
+                "that change; make a smaller, careful fix for the ORIGINAL problem above.\n"
+                f"Crash caused by the reverted fix:\n{crash_tail}"
+            )
+            previous_fix_error_output = None
+            log("↩️ Son düzeltme çalışan programı bozdu; önceki çalışan sürüme geri dönüldü.")
+            continue
 
         # DUZELTME (2026-09-23, web_scraper canli testi): "cokmedi" ile
         # "gercekten dogru calisti" AYNI SEY DEGIL. O testte program hicbir
@@ -3730,7 +3793,7 @@ def _build_project(
                         error_output=(
                             "The program ran without crashing, but an automated quality gate found that it "
                             "does NOT really do its job (see per-file findings). Fix every finding."
-                        ),
+                        ) + revert_note,
                         project_description=description,
                         all_files=files,
                         file_codes=file_codes,
@@ -3821,7 +3884,7 @@ def _build_project(
                     }
                     try:
                         fixed = _fix_files(
-                            error_output=last_output[:2500],
+                            error_output=last_output[:2500] + revert_note,
                             project_description=description,
                             all_files=files,
                             file_codes=file_codes,
@@ -3928,20 +3991,30 @@ def _build_project(
         try:
             _sel = _selenium_instead_of_playwright(file_codes, dependencies)
             _extra = ((("\n\n" + _SELENIUM_HINT) if _sel else "") + _bare_filename_hint(last_output, run_command)
-                      + _known_error_hint(last_output))
-            updated = _fix_files(
-                error_output=last_output + _extra,
-                project_description=description,
-                all_files=files,
-                file_codes=file_codes,
-                language=language,
-                project_dir=project_dir,
-                entry_point=entry_point,
-                shared_contracts=shared_contracts_text,
-                expected_outputs=expected_outputs_text,
-                known_error_type=error_type,
-                repeat_of_previous=repeat_of_previous,
-            )
+                      + _known_error_hint(last_output) + _known_code_hint(file_codes))
+            # Aynı hata tekrarlıyorsa düşük sıcaklıktaki model aynı (yanlış) kodu yeniden
+            # üretiyor: bu turda daha yüksek sıcaklıkla FARKLI bir çözüm denenir.
+            _diversify = repeat_of_previous and "JARVIS_OLLAMA_TEMP" not in os.environ
+            if _diversify:
+                os.environ["JARVIS_OLLAMA_TEMP"] = "0.7"
+                log("🎲 Aynı hata tekrarladı: bu düzeltmede farklı bir çözüm aranıyor (sıcaklık 0.7).")
+            try:
+                updated = _fix_files(
+                    error_output=last_output + _extra + revert_note,
+                    project_description=description,
+                    all_files=files,
+                    file_codes=file_codes,
+                    language=language,
+                    project_dir=project_dir,
+                    entry_point=entry_point,
+                    shared_contracts=shared_contracts_text,
+                    expected_outputs=expected_outputs_text,
+                    known_error_type=error_type,
+                    repeat_of_previous=repeat_of_previous,
+                )
+            finally:
+                if _diversify:
+                    os.environ.pop("JARVIS_OLLAMA_TEMP", None)
             file_codes.update(updated)
             previous_fix_error_output = last_output
             time.sleep(1)
@@ -4002,7 +4075,9 @@ def dev_agent(
         return (
             f"ONAY GEREKLİ: \"{description}\" açıklamasıyla yeni bir {language} projesi "
             f"oluşturulacak. Bu adım gerekli paketleri {installer} ile kurar ve üretilen kodu "
-            f"gerçekten çalıştırır. Kullanıcıya bunu tarif et; kullanıcı SESLİ/YAZILI olarak "
+            f"gerçekten çalıştırır. Kullanıcıya bunu kısaca tarif et ve yalnızca 'Onaylıyor musunuz?' "
+            f"diye sor. Onay kodunu kullanıcıya SÖYLEME, kullanıcıdan kod YAZMASINI İSTEME — kod senin "
+            f"iç kullanımın içindir; kullanıcının 'evet' demesi yeter. Kullanıcı SESLİ/YAZILI olarak "
             f"açıkça onaylarsa (bir sonraki mesajında), dev_agent'ı aynı description/language/"
             f"project_name ile ve confirm_code='{code}' parametresiyle TEKRAR çağır. "
             f"Kullanıcı onaylamadan bu kodu kendi kendine kullanma."
