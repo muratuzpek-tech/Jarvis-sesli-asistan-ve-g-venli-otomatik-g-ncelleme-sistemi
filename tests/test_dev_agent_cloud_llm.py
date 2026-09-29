@@ -77,3 +77,15 @@ def test_no_key_means_no_cloud(monkeypatch):
     assert da._cloud_llm() == (da.CLOUD_LLM_DEFAULT_URL, da.CLOUD_LLM_DEFAULT_MODEL, "gsk_testanahtar12345")
     monkeypatch.setenv("JARVIS_DEVAGENT_BACKEND", "local")
     assert da._cloud_llm() is None
+
+
+def test_tokens_per_minute_limit_waits_as_told_and_retries(monkeypatch):
+    """Canlı deneme 2026-09-30: 3. dosyada TPM 429 → 10 dk yerel modele düşülmüştü."""
+    waits = []
+    monkeypatch.setattr(da.time, "sleep", lambda s: waits.append(s))
+    tpm = ('{"error":{"message":"Rate limit reached for model on tokens per minute (TPM): Limit 8000, '
+           'Used 7000, Requested 3000. Please try again in 7.5s."}}')
+    _post(monkeypatch, [_Resp(429, text=tpm), _Resp(429, text=tpm),
+                        _Resp(200, {"choices": [{"message": {"content": "OK"}}]})])
+    assert da._CloudLLM("u", "m", "k", fallback=_Local()).generate_content("x").text == "OK"
+    assert waits == [8.5, 8.5] and da._CLOUD_OFF_UNTIL == 0.0

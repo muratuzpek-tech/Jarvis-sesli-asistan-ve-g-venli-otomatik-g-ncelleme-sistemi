@@ -201,14 +201,22 @@ class _CloudLLM:
             "max_tokens": int(os.environ.get("JARVIS_CLOUD_LLM_MAX_TOKENS", "4096") or 4096),
         }
         headers = {"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"}
-        for attempt in range(2):
+        # Canlı deneme 2026-09-30: ücretsiz planda DAKİKADA 8K token; ardışık dosya
+        # yazımında 3. dosyada 429 alındı ve 10 dk yerel modele düşüldü. Dakikalık
+        # sınırda Groq'un söylediği kadar (en fazla 65 sn) beklenip 4 kez denenir.
+        for attempt in range(5):
             resp = _requests.post(f"{self.url}/chat/completions", json=body, headers=headers, timeout=self.timeout)
-            if resp.status_code == 429 and attempt == 0:
-                # Dakikalık sınır: bir kez bekleyip yeniden dene (en fazla 30 sn).
-                wait = min(30.0, float(resp.headers.get("retry-after", "10") or 10))
+            if resp.status_code == 429 and attempt < 4:
                 text = resp.text
                 if "per day" in text or "TPD" in text or "RPD" in text:
                     raise RuntimeError(f"429 per day: {text[:200]}")
+                m = re.search(r"try again in\s+(?:(\d+)m)?([\d.]+)s", text)
+                if m:
+                    wait = int(m.group(1) or 0) * 60 + float(m.group(2))
+                else:
+                    wait = float(resp.headers.get("retry-after", "10") or 10)
+                wait = min(65.0, wait + 1.0)
+                print(f"[DevAgent] ⏳ Bulut modeli dakikalık sınırda; {wait:.0f} sn bekleniyor…")
                 time.sleep(wait)
                 continue
             if resp.status_code >= 400:
