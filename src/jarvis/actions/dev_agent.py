@@ -202,6 +202,9 @@ SOFT_QUALITY_CODES = frozenset({"UNUSED-DEFINITION"})
 SOFT_QUALITY_ROUNDS = 1
 
 
+_JUDGE_GEMINI_OFF_UNTIL = 0.0
+
+
 def _judge_generate(prompt: str, log=print):
     """Kabul testini YAZMA ve HAKEMLİK işi (kod yazımı değil) için model.
 
@@ -211,14 +214,24 @@ def _judge_generate(prompt: str, log=print):
     (2026-09-29) bu küçük istemler Gemini'ye gider; kod yazımı yerelde kalır.
     JARVIS_DEVAGENT_JUDGE=local ile kapatılır. Gemini'ye ulaşılamazsa yerel
     modele düşer — kabul testi hiçbir zaman yüzünden engellenmez."""
-    if os.environ.get("JARVIS_DEVAGENT_JUDGE", "gemini").strip().lower() != "local":
+    global _JUDGE_GEMINI_OFF_UNTIL
+    if (os.environ.get("JARVIS_DEVAGENT_JUDGE", "gemini").strip().lower() != "local"
+            and time.time() >= _JUDGE_GEMINI_OFF_UNTIL):
         try:
             text = _get_model(MODEL_PLANNER, prefer="gemini").generate_content(prompt).text
             if text and text.strip():
                 log("🧠 Test/hakem: Gemini kullanıldı.")
                 return text
         except Exception as e:  # noqa: BLE001
-            log(f"ℹ️ Test/hakem için Gemini kullanılamadı ({type(e).__name__}); yerel model kullanılıyor.")
+            # Canlı test 41dc3e7: ücretsiz Gemini kotası günde 20 istek; dolunca her
+            # görevde ~60 sn yeniden deneme boşa gitti. Kota dolunca gün boyu,
+            # yoğunlukta (503) 10 dk Gemini hiç denenmez.
+            msg = f"{type(e).__name__}: {e}"
+            quota = any(k in msg for k in ("429", "RESOURCE_EXHAUSTED", "quota"))
+            _JUDGE_GEMINI_OFF_UNTIL = time.time() + (6 * 3600 if quota else 600)
+            why = "günlük kota doldu" if quota else "Gemini şu an yoğun/ulaşılamıyor"
+            log(f"ℹ️ Test/hakem için Gemini kullanılamadı ({why}); "
+                f"{'6 saat' if quota else '10 dakika'} boyunca yerel model kullanılacak.")
     return _get_model(MODEL_PLANNER).generate_content(prompt).text
 
 
