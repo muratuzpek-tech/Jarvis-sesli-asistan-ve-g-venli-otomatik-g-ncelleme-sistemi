@@ -284,3 +284,18 @@ def test_dispute_consistency_check():
     assert not dispute_is_consistent(["hello: 6"], "hello: 3\nworld: 2", ["hello: 6"])[0]
     assert not dispute_is_consistent([], prog, ["x"])[0]
     assert not dispute_is_consistent(["satir: 3"], prog, ["satir: 3"])[0]
+
+
+def test_quote_space_and_float_differences_are_tolerated():
+    from jarvis.actions.devkit.acceptance import _token_found
+    low = '{\n    "satir": 3,\n    "kelime": 10,\n    "elma": 50.0\n}'
+    assert _token_found("satir: 3", low) and _token_found('"elma": 50', low)
+    assert not _token_found("satir: 4", low) and not _token_found("elma: 5", low)
+
+
+def test_list_of_objects_gets_shape_hint(tmp_path):
+    spec, _ = validate_spec({**TREE_SPEC, "expect": [{"output": "o.json", "contains": ['"elma": 50']}]})
+    (tmp_path / "main.py").write_text(
+        "import json; json.dump([{'urun': 'elma', 'toplam': 50.0}], open('o.json', 'w'))")
+    problems = run_acceptance(tmp_path, "main.py", spec)[0]
+    assert len(problems) == 1 and "nesne LİSTESİ" in problems[0]

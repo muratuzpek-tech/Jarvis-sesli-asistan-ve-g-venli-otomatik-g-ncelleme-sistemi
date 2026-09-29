@@ -315,7 +315,8 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
         own_path = ex["output"].lower()
         missing = [t for t in ex["contains"] if not (_token_found(t, low) or t.lower() in own_path)]
         if missing:
-            problems.append(f"{label} şu beklenen ifadeleri İÇERMİYOR: {missing}. İçerik (ilk 800 karakter): {text[:800]!r}")
+            problems.append(f"{label} şu beklenen ifadeleri İÇERMİYOR: {missing}. İçerik (ilk 800 karakter): {text[:800]!r}"
+                            + _json_shape_hint(text, missing))
     return problems, output[:2000]
 
 
@@ -410,7 +411,34 @@ def _token_found(token: str, low_text: str) -> bool:
     if t in low_text:
         return True
     m = _BARE_TAG.match(t)
-    return bool(m and re.search(rf"<{m.group(1)}[\s>/]", low_text))
+    if m and re.search(rf"<{m.group(1)}[\s>/]", low_text):
+        return True
+    # Yalnızca boşluk/tırnak ya da 50 ↔ 50.0 farkı: 'satir: 3' ile '"satir": 3'
+    # aynı bilgidir (canlı test 2026-09-29: doğru JSON 5 tur reddedildi).
+    lt = _loose(t)
+    return bool(lt) and re.search(rf"(?<![\w.]){re.escape(lt)}(?![\w.])"
+                                  if lt[0].isalnum() and lt[-1].isalnum() else re.escape(lt), _loose(low_text)) is not None
+
+
+def _loose(text: str) -> str:
+    text = re.sub(r"(\d)\.0+(?!\d)", r"\1", text)
+    return re.sub(r"[\s\"'`]+", "", text)
+
+
+def _json_shape_hint(text: str, missing: list[str]) -> str:
+    """Beklenen '"anahtar": değer' ama çıktı nesne LİSTESİ ise biçim ipucu."""
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return ""
+    if not (isinstance(data, list) and data and all(isinstance(x, dict) for x in data)):
+        return ""
+    values = {str(v).lower() for x in data for v in x.values()}
+    keys = [m.group(1).lower() for t in missing if (m := re.match(r'^"?([^":]+)"?\s*:', t.strip()))]
+    if keys and any(k in values for k in keys):
+        return (" BİÇİM: beklenen tek bir JSON NESNESİ ({\"anahtar\": değer, ...}); program ise nesne LİSTESİ "
+                "([{...}, {...}]) yazdı. Görevdeki biçime birebir uy.")
+    return ""
 
 
 def _output_snapshot(project_dir: Path, spec: dict) -> dict[Path, int]:
