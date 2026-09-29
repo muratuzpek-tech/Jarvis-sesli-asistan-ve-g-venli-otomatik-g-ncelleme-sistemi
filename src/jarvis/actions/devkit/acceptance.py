@@ -267,7 +267,12 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
     entry = (project_dir / entry_point).resolve()
     before = _output_snapshot(project_dir, spec)
     try:
-        proc = subprocess.run([python or sys.executable, str(entry), *args], cwd=str(run_dir),
+        from jarvis.actions.devkit import sandbox
+        cmd, env, sb_state = sandbox.wrap([python or sys.executable, str(entry), *args], project_dir,
+                                          cwd=run_dir, log=lambda m: None)
+        if sb_state.startswith("REFUSED"):
+            return [sb_state], ""
+        proc = subprocess.run(cmd, cwd=str(run_dir), env=env,
                               capture_output=True, text=True, timeout=timeout, check=False)
         output = (proc.stdout + ("\n" + proc.stderr if proc.stderr else "")).strip()
         code = proc.returncode

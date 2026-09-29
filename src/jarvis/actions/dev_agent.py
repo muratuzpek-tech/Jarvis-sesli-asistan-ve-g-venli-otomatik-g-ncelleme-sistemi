@@ -1405,6 +1405,18 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
         if parts[0].lower() == "python":
             parts[0] = sys.executable
 
+        # GÜVENLİK KAFESİ (2026-09-29): üretilen program kullanıcının hesabıyla
+        # tam erişimle çalışmasın — bkz. devkit/sandbox.py.
+        from jarvis.actions.devkit import sandbox
+        gui = "--headless-test" not in parts and sandbox.project_uses_gui(project_dir)
+        parts, run_env, sb_state = sandbox.wrap(parts, project_dir, gui=gui,
+                                                log=lambda m: print(f"[DevAgent] {m}"))
+        if sb_state.startswith("REFUSED"):
+            print(f"[DevAgent] 🛑 {sb_state}")
+            return sb_state
+        if sb_state == "kafes":
+            print("[DevAgent] 🔒 Güvenlik kafesinde çalışıyor (yalnız proje klasörü yazılabilir, ev klasörü görünmez).")
+
         # NOT: cikti dogrudan PIPE'a degil, gercek bir dosyaya yaziliyor ve
         # surecin sadece KENDI CIKISI (Popen.wait) bekleniyor - subprocess.run(
         # capture_output=True) KULLANMIYORUZ. SEBEP: Windows'ta bazi antivirus/
@@ -1445,6 +1457,8 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
                     parts,
                     stdout=out_f, stderr=err_f,
                     cwd=str(project_dir),
+                    env=run_env,
+                    start_new_session=(os.name != "nt"),
                 )
                 disk_problem = _wait_with_disk_guard(proc, timeout, project_dir, (out_path, err_path))
                 if disk_problem == "timeout":
@@ -1558,7 +1572,13 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
                 capture_output=True, timeout=10,
             )
         else:
-            proc.kill()
+            # start_new_session=True ile başlatıldıysa tüm süreç grubunu (torunlar
+            # dahil: Flask reloader, Playwright tarayıcısı) öldür.
+            import signal
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
     except Exception:
         pass
     try:
