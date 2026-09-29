@@ -134,6 +134,95 @@ def _ollama_options() -> dict:
     return {"num_ctx": int(_num("JARVIS_OLLAMA_CTX", 8192)), "temperature": _num("JARVIS_OLLAMA_TEMP", 0.2)}
 
 
+# ── Gemini CLI (Murat'ın kararı 2026-09-29) ─────────────────────────────────
+# Kişisel Google hesabıyla giriş yapılan Gemini CLI'ın ücretsiz kotası günde 1000
+# istek (API anahtarıyla yalnızca 20). Kod YAZIMI buraya gider; kontroller, kabul
+# testi ve güvenlik kafesi aynen çalışır. Gemini CLI yoksa/giriş yapılmamışsa/kota
+# dolmuşsa yerel Ollama modeli kullanılır. JARVIS_DEVAGENT_BACKEND=local ile kapanır.
+_GEMINI_CLI_OFF_UNTIL = 0.0
+_GEMINI_CLI_RULES = (
+    "You are used as a plain text generator by another program. Do NOT use any tools, do NOT read, "
+    "create or edit files and do NOT run commands. Reply ONLY with the requested text.\n\n"
+)
+
+
+def _gemini_cli_path() -> "str | None":
+    if os.environ.get("JARVIS_DEVAGENT_BACKEND", "").strip().lower() == "local":
+        return None
+    if time.time() < _GEMINI_CLI_OFF_UNTIL:
+        return None
+    import shutil
+    explicit = os.environ.get("JARVIS_GEMINI_CLI", "").strip()
+    if explicit:
+        return explicit if os.access(explicit, os.X_OK) else None
+    found = shutil.which("gemini")
+    if found:
+        return found
+    for cand in (Path.home() / ".npm-global" / "bin" / "gemini", Path.home() / ".local" / "bin" / "gemini",
+                 Path("/usr/local/bin/gemini")):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+
+class _GeminiCliResponse:
+    def __init__(self, text: str):
+        self.text = text
+
+
+class _GeminiCli:
+    """Gemini CLI'ı başsız (headless) çalıştırır: istem stdin'den, cevap JSON.
+    Boş bir geçici klasörde çalışır (proje dosyalarını görmez); araç kullanmaması
+    istemde açıkça söylenir ve --yolo verilmez (yazma/komut araçları onaysız çalışmaz)."""
+
+    def __init__(self, path: str, fallback=None, timeout: int = 300):
+        self.path, self.fallback, self.timeout = path, fallback, timeout
+
+    def generate_content(self, contents):
+        prompt = contents if isinstance(contents, str) else str(contents)
+        try:
+            return _GeminiCliResponse(self._run(prompt))
+        except Exception as e:  # noqa: BLE001
+            global _GEMINI_CLI_OFF_UNTIL
+            msg = str(e)
+            quota = any(k in msg for k in ("429", "RESOURCE_EXHAUSTED", "quota", "Quota"))
+            auth = any(k in msg.lower() for k in ("login", "auth", "credential", "sign in"))
+            _GEMINI_CLI_OFF_UNTIL = time.time() + (6 * 3600 if quota or auth else 600)
+            why = ("günlük kota doldu" if quota else "giriş yapılmamış olabilir (terminalde 'gemini' çalıştırıp "
+                   "Google ile giriş yapın)" if auth else f"çalışmadı: {msg[:160]}")
+            print(f"[DevAgent] ℹ️ Gemini CLI kullanılamadı ({why}); yerel model kullanılıyor.")
+            if self.fallback is None:
+                raise
+            return self.fallback.generate_content(contents)
+
+    def _run(self, prompt: str) -> str:
+        import json as _json
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="jarvis-gemini-") as work:
+            proc = subprocess.run(
+                [self.path, "--output-format", "json"],
+                input=_GEMINI_CLI_RULES + prompt, capture_output=True, text=True,
+                timeout=self.timeout, cwd=work, check=False,
+            )
+        out, err = proc.stdout.strip(), proc.stderr.strip()
+        data = None
+        if out.startswith("{"):
+            try:
+                data = _json.loads(out)
+            except ValueError:
+                data = None
+        if isinstance(data, dict):
+            if data.get("error"):
+                raise RuntimeError(f"Gemini CLI hata: {data['error']}")
+            text = data.get("response") or ""
+        else:
+            text = out
+        if proc.returncode != 0 or not text.strip():
+            raise RuntimeError(f"Gemini CLI çıkış kodu {proc.returncode}: {(err or out)[-400:]}")
+        return text
+
+
 _REMOTE_STATE: dict = {"checked_at": -1e9, "result": None}
 
 
@@ -201,6 +290,11 @@ def _get_model(model_name: str, prefer: str = ""):
     # JARVIS_DEVAGENT_PREFER=gemini: yerel model yerine doğrudan Gemini (daha güçlü,
     # ama kota tüketir). Varsayılan: önce yerel Ollama.
     prefer_gemini = (prefer or os.environ.get("JARVIS_DEVAGENT_PREFER", "")).strip().lower() == "gemini"
+    cli = _gemini_cli_path()
+    if cli and prefer_gemini:
+        # Test/hakem (prefer="gemini"): önce Gemini CLI (günde 1000 ücretsiz istek);
+        # hata olursa çağıran taraf (_judge_generate) yerel modele düşer.
+        return _GeminiCli(cli, fallback=None)
     try:
         if prefer_gemini:
             raise RuntimeError("Gemini tercih edildi")
@@ -212,6 +306,10 @@ def _get_model(model_name: str, prefer: str = ""):
         if OLLAMA_MODEL not in installed and "qwen2.5-coder:7b" in installed and not os.environ.get("JARVIS_DEVAGENT_MODEL"):
             print(f"[DevAgent] ⚠️ {OLLAMA_MODEL} kurulu değil, qwen2.5-coder:7b kullanılıyor.")
             OLLAMA_MODEL = "qwen2.5-coder:7b"
+        if cli:
+            print("[DevAgent] ✨ Gemini CLI kullanılıyor (ulaşılamazsa yerel model: "
+                  f"{OLLAMA_MODEL}).")
+            return _GeminiCli(cli, fallback=_OllamaWrapper())
         print(f"[DevAgent] Yerel Ollama kullaniliyor: {OLLAMA_MODEL} (Gemini'ye bagimli degil).")
         return _OllamaWrapper()
     except Exception:

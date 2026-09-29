@@ -9,3 +9,4 @@ import os
 os.environ.setdefault("JARVIS_SANDBOX", "auto")
 # Testler gerçek Gemini çağrısı yapmaz (kabul testi/hakem yerel sahte modelle).
 os.environ.setdefault("JARVIS_DEVAGENT_JUDGE", "local")
+os.environ.setdefault("JARVIS_DEVAGENT_BACKEND", "local")  # testlerde gerçek Gemini CLI çağrılmaz
