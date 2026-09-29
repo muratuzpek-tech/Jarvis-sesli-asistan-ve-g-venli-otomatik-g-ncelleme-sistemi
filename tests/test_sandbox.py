@@ -164,3 +164,27 @@ def test_gui_detection(tmp_path):
     assert sandbox.project_uses_gui(tmp_path)
     (tmp_path / "a.py").write_text("import json\n")
     assert not sandbox.project_uses_gui(tmp_path)
+
+
+def test_linux_default_is_required(monkeypatch):
+    monkeypatch.delenv("JARVIS_SANDBOX", raising=False)
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    assert sandbox.mode() == "required"
+    monkeypatch.setattr(sandbox.sys, "platform", "win32")
+    assert sandbox.mode() == "auto"
+
+
+@needs_bwrap
+def test_go_binary_runs_in_sandbox(tmp_path, monkeypatch):
+    """Derlenmiş Go ikilisi de kafeste: API anahtarını göremez (burada bir kabuk betiğiyle taklit)."""
+    from jarvis.actions.devkit import go_toolchain as gt
+    monkeypatch.setenv("GEMINI_API_KEY", "sizmasin-go")
+    work = tmp_path / gt.WORK_DIR
+    work.mkdir(parents=True)
+    fake = work / gt.BINARY_NAME
+    fake.write_text("#!/bin/sh\nenv; ls /home 2>&1\n")
+    fake.chmod(0o755)
+    tc = gt.GoToolchain.__new__(gt.GoToolchain)
+    tc.project_dir = tmp_path
+    r = tc.run_binary([], 30)
+    assert "sizmasin-go" not in r.output and "JARVIS_IN_SANDBOX=1" in r.output, r.output

@@ -71,6 +71,7 @@ def run_tool(
     cwd: Path,
     timeout: float,
     env: Mapping[str, str] | None = None,
+    replace_env: bool = False,
 ) -> CommandResult:
     """Bir komutu GÜVENLİ biçimde çalıştırır.
 
@@ -81,8 +82,9 @@ def run_tool(
     * Zaman aşımında tüm süreç grubu öldürülür; o ana kadarki çıktı korunur.
     """
     argv = [str(a) for a in args]
-    full_env = dict(os.environ)
-    if env:
+    # replace_env=True: güvenlik kafesi ortamı SIFIRDAN kurar (API anahtarları aktarılmaz).
+    full_env = dict(env or {}) if replace_env else dict(os.environ)
+    if env and not replace_env:
         full_env.update(env)
 
     with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out:

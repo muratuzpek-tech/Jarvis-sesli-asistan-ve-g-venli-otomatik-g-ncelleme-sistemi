@@ -134,4 +134,9 @@ class GoToolchain:
         binary = self.project_dir / WORK_DIR / BINARY_NAME
         if not binary.is_file():
             return CommandResult([str(binary)], None, "Derlenmiş ikili bulunamadı", not_found=True)
-        return run_tool([str(binary), *args], self.project_dir, timeout)
+        # Derlenen program da güvenlik kafesinde çalışır (bkz. devkit/sandbox.py).
+        from jarvis.actions.devkit import sandbox
+        argv, env, state = sandbox.wrap([str(binary), *args], self.project_dir, log=lambda m: None)
+        if state.startswith("REFUSED"):
+            return CommandResult(argv, None, state, not_found=True)
+        return run_tool(argv, self.project_dir, timeout, env, replace_env=env is not None)

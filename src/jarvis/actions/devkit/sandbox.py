@@ -17,8 +17,8 @@ program dışarıdaki süreçleri göremez/öldüremez; kafes kapanınca içinde
 süreçler de kapanır (--die-with-parent + PID ad alanı).
 
 JARVIS_SANDBOX ortam değişkeni:
-  auto      (varsayılan) bubblewrap çalışıyorsa kullan; yoksa UYARI ver, kafessiz çalıştır
-  required  kafes çalışmıyorsa programı HİÇ çalıştırma
+  required  (Linux'ta varsayılan) kafes kurulamıyorsa programı HİÇ çalıştırma
+  auto      (Windows/macOS varsayılanı) kafes varsa kullan; yoksa UYARI ver, kafessiz çalıştır
   off       kafesi kapat (yalnızca hata ayıklama için)
 """
 from __future__ import annotations
@@ -35,9 +35,16 @@ SAFE_ENV_KEYS = ("LANG", "LC_ALL", "LC_CTYPE", "LANGUAGE", "TZ", "TERM")
 _SYSTEM_LINKS = ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
 
 
+def default_mode() -> str:
+    """Linux'ta varsayılan ZORUNLU: kafes kurulamazsa üretilen kod çalışmaz
+    (sessiz güvenlik düşüşü yok). Windows/macOS'ta bubblewrap olmadığından
+    'auto' (açık uyarıyla kafessiz)."""
+    return "required" if sys.platform.startswith("linux") else "auto"
+
+
 def mode() -> str:
-    m = (os.environ.get("JARVIS_SANDBOX", "") or "auto").strip().lower()
-    return m if m in MODES else "auto"
+    m = (os.environ.get("JARVIS_SANDBOX", "") or default_mode()).strip().lower()
+    return m if m in MODES else default_mode()
 
 
 def bwrap_path() -> str | None:
