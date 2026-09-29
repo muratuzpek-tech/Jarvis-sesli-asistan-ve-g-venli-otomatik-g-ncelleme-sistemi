@@ -134,6 +134,93 @@ def _ollama_options() -> dict:
     return {"num_ctx": int(_num("JARVIS_OLLAMA_CTX", 8192)), "temperature": _num("JARVIS_OLLAMA_TEMP", 0.2)}
 
 
+# ── Ücretsiz bulut modeli (Murat'ın kararı 2026-09-29: Groq) ────────────────
+# Gemini CLI'ın ücretsiz kişisel kullanımı 18 Haziran 2026'da kapandı. Groq gibi
+# kart gerektirmeyen OpenAI uyumlu servisler kod yazımı için kullanılır; anahtar
+# yoksa, kota dolduysa ya da istek fazla büyükse yerel modele düşülür.
+CLOUD_LLM_DEFAULT_URL = "https://api.groq.com/openai/v1"
+CLOUD_LLM_DEFAULT_MODEL = "openai/gpt-oss-120b"
+_CLOUD_OFF_UNTIL = 0.0
+
+
+def _cloud_llm() -> "tuple[str, str, str] | None":
+    """(url, model, key) ya da None. JARVIS_DEVAGENT_BACKEND=local ile kapanır."""
+    if os.environ.get("JARVIS_DEVAGENT_BACKEND", "").strip().lower() == "local":
+        return None
+    if time.time() < _CLOUD_OFF_UNTIL:
+        return None
+    try:
+        from jarvis.core.secure_config import get_cloud_llm_key, load_config
+        key = get_cloud_llm_key()
+        cfg = load_config()
+    except Exception:  # noqa: BLE001
+        return None
+    if not key:
+        return None
+    url = (os.environ.get("JARVIS_CLOUD_LLM_URL") or cfg.get("cloud_llm_url") or CLOUD_LLM_DEFAULT_URL).rstrip("/")
+    model = os.environ.get("JARVIS_CLOUD_LLM_MODEL") or cfg.get("cloud_llm_model") or CLOUD_LLM_DEFAULT_MODEL
+    return url, str(model), key
+
+
+class _CloudLLM:
+    """OpenAI uyumlu /chat/completions. Günlük sınır dolarsa 6 saat, geçici hatada
+    10 dk denenmez; istek çok büyükse (ücretsiz planda dakikada 8K token) yalnız o
+    istek yerel modelle yapılır. Anahtar hiçbir çıktıya yazılmaz."""
+
+    def __init__(self, url: str, model: str, key: str, fallback=None, timeout: int = 180):
+        self.url, self.model, self._key, self.fallback, self.timeout = url, model, key, fallback, timeout
+
+    def generate_content(self, contents):
+        prompt = contents if isinstance(contents, str) else str(contents)
+        try:
+            return _GeminiCliResponse(self._call(prompt))
+        except Exception as e:  # noqa: BLE001
+            global _CLOUD_OFF_UNTIL
+            msg = str(e).replace(self._key, "***")
+            too_big = any(k in msg for k in ("413", "too large", "Request too large", "context_length"))
+            daily = any(k in msg for k in ("per day", "RPD", "TPD", "insufficient_quota"))
+            if daily:
+                _CLOUD_OFF_UNTIL = time.time() + 6 * 3600
+                why = "günlük ücretsiz sınır doldu (6 saat yerel model)"
+            elif too_big:
+                why = "istek ücretsiz plan için fazla büyük (bu istek yerel modelle)"
+            else:
+                _CLOUD_OFF_UNTIL = time.time() + 600
+                why = f"ulaşılamadı: {msg[:160]} (10 dk yerel model)"
+            print(f"[DevAgent] ℹ️ Bulut modeli kullanılamadı — {why}.")
+            if self.fallback is None:
+                raise
+            return self.fallback.generate_content(contents)
+
+    def _call(self, prompt: str) -> str:
+        import requests as _requests
+        body = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": _ollama_options().get("temperature", 0.2),
+            "max_tokens": int(os.environ.get("JARVIS_CLOUD_LLM_MAX_TOKENS", "4096") or 4096),
+        }
+        headers = {"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"}
+        for attempt in range(2):
+            resp = _requests.post(f"{self.url}/chat/completions", json=body, headers=headers, timeout=self.timeout)
+            if resp.status_code == 429 and attempt == 0:
+                # Dakikalık sınır: bir kez bekleyip yeniden dene (en fazla 30 sn).
+                wait = min(30.0, float(resp.headers.get("retry-after", "10") or 10))
+                text = resp.text
+                if "per day" in text or "TPD" in text or "RPD" in text:
+                    raise RuntimeError(f"429 per day: {text[:200]}")
+                time.sleep(wait)
+                continue
+            if resp.status_code >= 400:
+                raise RuntimeError(f"{resp.status_code}: {resp.text[:300]}")
+            data = resp.json()
+            text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            if not text.strip():
+                raise RuntimeError("boş cevap")
+            return text
+        raise RuntimeError("429: dakikalık sınır aşıldı")
+
+
 # ── Gemini CLI (Murat'ın kararı 2026-09-29) ─────────────────────────────────
 # Kişisel Google hesabıyla giriş yapılan Gemini CLI'ın ücretsiz kotası günde 1000
 # istek (API anahtarıyla yalnızca 20). Kod YAZIMI buraya gider; kontroller, kabul
@@ -290,6 +377,14 @@ def _get_model(model_name: str, prefer: str = ""):
     # JARVIS_DEVAGENT_PREFER=gemini: yerel model yerine doğrudan Gemini (daha güçlü,
     # ama kota tüketir). Varsayılan: önce yerel Ollama.
     prefer_gemini = (prefer or os.environ.get("JARVIS_DEVAGENT_PREFER", "")).strip().lower() == "gemini"
+    cloud = None if (remote and not (prefer or "").strip()) else _cloud_llm()
+    if cloud and prefer_gemini:
+        # Test/hakem: önce ücretsiz bulut modeli; hata olursa _judge_generate yerel modele düşer.
+        return _CloudLLM(*cloud, fallback=None)
+    if cloud and not prefer_gemini:
+        print(f"[DevAgent] ☁️ Ücretsiz bulut modeli kullanılıyor: {cloud[1]} "
+              f"(ulaşılamazsa yerel model: {OLLAMA_MODEL}).")
+        return _CloudLLM(*cloud, fallback=_OllamaWrapper())
     cli = _gemini_cli_path()
     if cli and prefer_gemini:
         # Test/hakem (prefer="gemini"): önce Gemini CLI (günde 1000 ücretsiz istek);
