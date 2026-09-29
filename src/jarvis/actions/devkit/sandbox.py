@@ -114,28 +114,46 @@ def _symlink_hops(path: str, limit: int = 20) -> list[Path]:
     return hops
 
 
+_SYSTEM_PREFIXES = ("/usr", "/etc", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
+
+
+def _is_system(p: Path) -> bool:
+    return any(str(p) == s or str(p).startswith(s + "/") for s in _SYSTEM_PREFIXES)
+
+
 def _python_runtime_paths() -> list[Path]:
-    """Kafesin içinde aynı Python'un (ve kurulu paketlerin) çalışması için:
-    sanal ortam, temel kurulum ve yorumlayıcıya giden her bağlantı adımının
-    kurulum kökü (bin/'in bir üstü) — takma adlar dahil."""
-    paths = {Path(sys.prefix), Path(sys.base_prefix)}
-    for hop in _symlink_hops(sys.executable):
-        paths.add(hop.parent.parent)
-    roots: set[Path] = set()
+    """Kafese salt okunur bağlanan klasörler: YALNIZ sanal ortam ve Python'un
+    gerçek kurulum kökü. Aradaki bağlantı adımları (uv'nin ~/.local/bin
+    kısayolu, cpython-3.12-… takma adı) klasör olarak bağlanmaz; kafeste
+    --symlink ile birebir yeniden kurulur (bkz. _python_runtime_symlinks).
+    (murat@goxs 2026-09-29: kısayol yüzünden ~/.local'ın TAMAMI — anahtarlık,
+    JARVIS ayarları — kafese görünür oluyordu.)"""
     home = Path.home()
-    for p in paths:
-        # Kök bir takma adsa (uv: cpython-3.12-… → cpython-3.12.14-…) takma ada
-        # bağlama YAPILMAZ; takma adı ve hedefini içeren klasörün tamamı bağlanır,
-        # takma ad kafeste kendiliğinden çözülür. (murat@goxs, bwrap 0.11.1:
-        # "Can't bind mount … on …/cpython-3.12-linux…: No such file or directory")
-        while p.is_symlink() and len(p.parent.parts) > 3 and p.parent != home:
-            p = p.parent
-        roots.add(p)
-    # /usr ve /etc zaten salt okunur bağlı; kök dizin ya da ev klasörünün TAMAMI asla bağlanmaz.
-    roots = {p for p in roots if p.exists() and p not in (Path("/"), home)
-             and not any(str(p) == s or str(p).startswith(s + "/") for s in ("/usr", "/etc"))}
-    # İç içe bağlamalardan kaçın: bir kök başka bir kökün içindeyse yalnız dıştaki kalır.
+    cands = {Path(sys.prefix), Path(os.path.realpath(sys.base_prefix)),
+             Path(os.path.realpath(sys.executable)).parent.parent}
+    roots = {p for p in cands if p.exists() and not _is_system(p) and p not in (Path("/"), home)}
     return sorted(p for p in roots if not any(o != p and o in p.parents for o in roots))
+
+
+def _python_runtime_symlinks(roots: list[Path]) -> list[tuple[str, str]]:
+    """(hedef, yol): yorumlayıcıya giden zincirde, bağlı köklerin DIŞINDA kalan
+    her sembolik bağlantı (dosya ya da üst klasör)."""
+    def inside_root(p: Path) -> bool:
+        return any(p == r or r in p.parents for r in roots)
+
+    links: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for hop in _symlink_hops(sys.executable):
+        # Yolun kendisi ve üst klasörleri arasındaki bağlantılar (ör. takma ad klasörü).
+        parts = hop.parts
+        for i in range(2, len(parts) + 1):
+            q = Path(*parts[:i])
+            if str(q) in seen or _is_system(q) or inside_root(q):
+                continue
+            if q.is_symlink():
+                seen.add(str(q))
+                links.append((os.readlink(q), str(q)))
+    return links
 
 
 def _playwright_browsers() -> Path | None:
@@ -169,8 +187,11 @@ def build(argv: list[str], project_dir: Path, *, network: bool = True, gui: bool
     bw = bwrap_path() or "bwrap"
     project = str(project_dir)
     args = [bw, *_base_args(network)]
-    for p in _python_runtime_paths():
+    roots = _python_runtime_paths()
+    for p in roots:
         args += _ro(Path(os.path.realpath(p)), str(p))
+    for target, link in _python_runtime_symlinks(roots):
+        args += ["--symlink", target, link]
     browsers = _playwright_browsers()
     if browsers:
         args += _ro(Path(os.path.realpath(browsers)), str(browsers))

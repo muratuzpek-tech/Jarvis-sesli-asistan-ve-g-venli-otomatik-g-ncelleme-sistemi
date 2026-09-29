@@ -204,9 +204,34 @@ def test_interpreter_symlink_chain_roots_are_bound(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox.sys, "executable", str(venv / "bin" / "python"))
     monkeypatch.setattr(sandbox.sys, "prefix", str(venv))
     monkeypatch.setattr(sandbox.sys, "base_prefix", str(real))
-    roots = {str(p) for p in sandbox._python_runtime_paths()}
-    # Takma adın kendisine bağlama yapılmaz; takma adla hedefi içeren klasör bağlanır.
-    assert roots == {str(venv), str(tmp_path / "uv")}
+    roots = sandbox._python_runtime_paths()
+    # Yalnız sanal ortam ve gerçek kurulum bağlanır; takma ad kafeste bağlantı olarak kurulur.
+    assert {str(p) for p in roots} == {str(venv), str(real)}
+    assert (str(real), str(alias)) in sandbox._python_runtime_symlinks(roots)
+
+
+def test_uv_shim_does_not_expose_parent_folder(tmp_path, monkeypatch):
+    """murat@goxs: .venv/bin/python → ~/.local/bin/python3.12 (uv kısayolu) zinciri
+    yüzünden ~/.local'ın TAMAMI (anahtarlık, JARVIS ayarları) kafese bağlanıyordu."""
+    local = tmp_path / ".local"
+    real = local / "share" / "uv" / "python" / "cpython-3.12.14"
+    (real / "bin").mkdir(parents=True)
+    (real / "bin" / "python3.12").write_text("")
+    alias = real.parent / "cpython-3.12"
+    alias.symlink_to(real)
+    (local / "bin").mkdir()
+    (local / "bin" / "python3.12").symlink_to(alias / "bin" / "python3.12")
+    (local / "share" / "keyrings").mkdir()
+    venv = tmp_path / "proje" / ".venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(local / "bin" / "python3.12")
+    monkeypatch.setattr(sandbox.sys, "executable", str(venv / "bin" / "python"))
+    monkeypatch.setattr(sandbox.sys, "prefix", str(venv))
+    monkeypatch.setattr(sandbox.sys, "base_prefix", str(real))
+    roots = sandbox._python_runtime_paths()
+    assert {str(p) for p in roots} == {str(venv), str(real)}
+    links = dict((b, a) for a, b in sandbox._python_runtime_symlinks(roots))
+    assert str(local / "bin" / "python3.12") in links and str(alias) in links
 
 
 def test_system_and_home_roots_are_never_bound_from_the_chain(tmp_path, monkeypatch):
@@ -215,3 +240,13 @@ def test_system_and_home_roots_are_never_bound_from_the_chain(tmp_path, monkeypa
     monkeypatch.setattr(sandbox.sys, "base_prefix", "/usr")
     roots = [str(p) for p in sandbox._python_runtime_paths()]
     assert "/etc" not in roots and "/" not in roots and str(sandbox.Path.home()) not in roots
+
+
+def test_no_broad_home_folder_is_bound(tmp_path):
+    """Bu makinedeki GERÇEK Python kurulumuyla: ev klasörü, ~/.local ya da
+    ~/.local/share asla bütün olarak kafese bağlanmaz."""
+    cmd, _ = sandbox.build([sys.executable, "-c", "pass"], tmp_path)
+    home = sandbox.Path.home()
+    forbidden = {str(home), str(home / ".local"), str(home / ".local" / "share"), str(home / ".config"), "/"}
+    dests = [cmd[i + 2] for i, a in enumerate(cmd) if a in ("--ro-bind", "--bind")]
+    assert not forbidden & set(dests), dests
