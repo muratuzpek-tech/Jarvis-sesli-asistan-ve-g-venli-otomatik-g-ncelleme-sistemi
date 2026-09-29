@@ -50,7 +50,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = ["pytest>=8.0", "ruff>=0.6", "pyright>=1.1"]
 
 [project.scripts]
 jarvis = "jarvis.__main__:main"
