@@ -351,3 +351,17 @@ def test_run_acceptance_accepts_correct_log_counter_despite_wrong_spec(tmp_path)
             "expect": [{"output": "durum.json", "contains": ['"200": 4', '"404": 1']}]}
     problems, _ = run_acceptance(tmp_path, "main.py", spec)
     assert problems == []
+
+
+def test_word_counts_use_occurrences_not_lines():
+    """Canlı test 7282da2: 'world' bir satırda 2 kez → 4 geçiş, 3 satır. Program 3
+    dediğinde (yanlış) doğru beklenti 'world: 4' DÜŞÜRÜLMEMELİ."""
+    fx = [{"path": "a.txt", "content": "hello world world\nworld\nhello world\n"}]
+    assert _drop_miscounted(["world: 4"], "world: 3\n", fx) == ["world: 4"]
+    assert _drop_miscounted(["world: 5"], "world: 4\n", fx) == []
+
+
+def test_word_and_line_metrics_are_computed():
+    fx = [{"path": "hikaye.txt", "content": "bir iki üç\ndört beş\naltı yedi sekiz dokuz\n"}]
+    assert _drop_miscounted(['"kelime": 7', '"satir": 2'], '{"satir": 3, "kelime": 9}', fx) == []
+    assert _drop_miscounted(['"kelime": 7'], '{"kelime": 8}', fx) == ['"kelime": 7']

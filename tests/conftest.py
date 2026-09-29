@@ -7,3 +7,5 @@ import os
 # REFUSED alırdı. Testlerde kafes varsa kullanılır, yoksa uyarıyla atlanır;
 # kafesin kendisi tests/test_sandbox.py'de ayrıca ve zorunlu olarak sınanır.
 os.environ.setdefault("JARVIS_SANDBOX", "auto")
+# Testler gerçek Gemini çağrısı yapmaz (kabul testi/hakem yerel sahte modelle).
+os.environ.setdefault("JARVIS_DEVAGENT_JUDGE", "local")

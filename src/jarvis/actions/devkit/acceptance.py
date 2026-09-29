@@ -457,21 +457,48 @@ def _drop_miscounted(missing: list[str], output_text: str, fixtures: list[dict])
     beklentidir (canlı test 2026-09-29 log_analizi: örnek logda 7 tane 200 vardı,
     kabul testi 4 bekledi, yerel hakem de beklentiyi haklı buldu → doğru program
     5 tur reddedildi). Yalnızca programla bağımsız sayım UYUŞURSA düşürülür."""
-    lines = [ln for fx in fixtures for ln in fx["content"].splitlines()]
+    corpus = "\n".join(fx["content"] for fx in fixtures)
     keep: list[str] = []
     for tok in missing:
         m = _KEYED_COUNT.match(tok.strip())
         if m:
             key, expected = m.group(1), int(m.group(2))
-            pat = re.compile(rf"(?<![\w.]){re.escape(key)}(?![\w.])", re.I)
-            real = sum(1 for ln in lines if pat.search(ln))
+            real = _metric(key, fixtures)
+            if real is None:
+                # Geçiş SAYISI (satır değil): canlı test 7282da2 kelime_sayici'de satır
+                # sayımı, 'world' bir satırda iki kez geçtiği için doğru beklentiyi düşürdü.
+                real = len(re.findall(rf"(?<![\w.]){re.escape(key)}(?![\w.])", corpus, re.I))
             got = re.search(rf'(?<![\w.])"?{re.escape(key)}"?\s*[:=,]\s*(\d+)(?:\.0+)?(?![\d.])', output_text, re.I)
             if real and real != expected and got and int(got.group(1)) == real:
-                print(f"[DevAgent] 🔧 Kabul testi yanlış saymış: {tok!r} — örnekte gerçekte {real} satır var, "
+                print(f"[DevAgent] 🔧 Kabul testi yanlış saymış: {tok!r} — örnekte gerçekte {real}, "
                       f"program da {real} buldu; bu beklenti düşürüldü.")
                 continue
         keep.append(tok)
     return keep
+
+
+_METRICS = {
+    "words": {"kelime", "kelimeler", "kelime_sayisi", "kelime_sayısı", "word", "words", "word_count"},
+    "lines": {"satir", "satır", "satirlar", "satır_sayısı", "satir_sayisi", "line", "lines", "line_count"},
+    "chars": {"karakter", "karakter_sayisi", "karakter_sayısı", "char", "chars", "characters", "char_count"},
+}
+
+
+def _metric(key: str, fixtures: list[dict]) -> int | None:
+    """'kelime', 'satir', 'karakter' gibi iyi tanımlı ölçüler tek bir düz metin
+    örnek dosyada kodla hesaplanır (canlı test 7282da2 metin_istatistigi: 15
+    kelimelik metin için kabul testi 'kelime: 11' bekledi, program 15 dedi)."""
+    k = key.casefold()
+    kind = next((name for name, names in _METRICS.items() if k in names), None)
+    texts = [fx["content"] for fx in fixtures if fx["path"].lower().endswith(_TEXT_FIXTURE_SUFFIXES)]
+    if not kind or len(texts) != 1 or len(fixtures) != 1:
+        return None
+    text = texts[0]
+    if kind == "words":
+        return len(text.split())
+    if kind == "lines":
+        return len(text.splitlines())
+    return len(text)
 
 
 def _is_structured(output_name: str, text: str) -> bool:

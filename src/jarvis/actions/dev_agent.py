@@ -94,7 +94,7 @@ def _ollama_options() -> dict:
     return {"num_ctx": int(_num("JARVIS_OLLAMA_CTX", 8192)), "temperature": _num("JARVIS_OLLAMA_TEMP", 0.2)}
 
 
-def _get_model(model_name: str):
+def _get_model(model_name: str, prefer: str = ""):
     """Once yerel Ollama'yi (qwen2.5-coder) dener - Google Gemini kesintilerinde
     bile calisir. Ollama kapaliysa/kurulu degilse otomatik olarak Gemini'ye
     (orijinal davranis) duser."""
@@ -126,7 +126,7 @@ def _get_model(model_name: str):
     # Ollama gercekten calisiyor mu, hizli bir saglik kontrolu (1sn)
     # JARVIS_DEVAGENT_PREFER=gemini: yerel model yerine doğrudan Gemini (daha güçlü,
     # ama kota tüketir). Varsayılan: önce yerel Ollama.
-    prefer_gemini = os.environ.get("JARVIS_DEVAGENT_PREFER", "").strip().lower() == "gemini"
+    prefer_gemini = (prefer or os.environ.get("JARVIS_DEVAGENT_PREFER", "")).strip().lower() == "gemini"
     try:
         if prefer_gemini:
             raise RuntimeError("Gemini tercih edildi")
@@ -202,15 +202,34 @@ SOFT_QUALITY_CODES = frozenset({"UNUSED-DEFINITION"})
 SOFT_QUALITY_ROUNDS = 1
 
 
+def _judge_generate(prompt: str, log=print):
+    """Kabul testini YAZMA ve HAKEMLİK işi (kod yazımı değil) için model.
+
+    Canlı test 7282da2: yerel 14b model kendi örnek dosyasındaki kelimeleri,
+    durum kodlarını, satır numaralarını yanlış saydı ve hakem olarak da doğru
+    programları haksız buldu (3 görev 'doğru ama reddetti'). Murat'ın kararıyla
+    (2026-09-29) bu küçük istemler Gemini'ye gider; kod yazımı yerelde kalır.
+    JARVIS_DEVAGENT_JUDGE=local ile kapatılır. Gemini'ye ulaşılamazsa yerel
+    modele düşer — kabul testi hiçbir zaman yüzünden engellenmez."""
+    if os.environ.get("JARVIS_DEVAGENT_JUDGE", "gemini").strip().lower() != "local":
+        try:
+            text = _get_model(MODEL_PLANNER, prefer="gemini").generate_content(prompt).text
+            if text and text.strip():
+                log("🧠 Test/hakem: Gemini kullanıldı.")
+                return text
+        except Exception as e:  # noqa: BLE001
+            log(f"ℹ️ Test/hakem için Gemini kullanılamadı ({type(e).__name__}); yerel model kullanılıyor.")
+    return _get_model(MODEL_PLANNER).generate_content(prompt).text
+
+
 def _acceptance_expectation_wrong(description: str, spec: dict, problems: list[str], output: str,
                                   program_text: str = "") -> tuple[bool, str]:
     """Hakem: kabul testindeki beklenti mi yanlış, program mı? Her hatada ve
     hakem kendi hesabıyla çelişkiliyse (False, ...) — şüphede program suçlu."""
     try:
         from jarvis.actions.devkit.acceptance import build_dispute_prompt, dispute_is_consistent, parse_dispute
-        response = _get_model(MODEL_PLANNER).generate_content(
-            build_dispute_prompt(description, spec, problems, output))
-        wrong, reason, values = parse_dispute(response.text)
+        wrong, reason, values = parse_dispute(_judge_generate(
+            build_dispute_prompt(description, spec, problems, output)))
         if not wrong:
             return False, reason
         missing = [t for m in re.finditer(r"İÇERMİYOR: (\[.*?\])\.", "\n".join(problems))
@@ -232,8 +251,7 @@ def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
         return None
     try:
         from jarvis.actions.devkit.acceptance import build_prompt, parse_spec, validate_spec
-        response = _get_model(MODEL_PLANNER).generate_content(build_prompt(description, plan))
-        spec, reason = validate_spec(parse_spec(response.text))
+        spec, reason = validate_spec(parse_spec(_judge_generate(build_prompt(description, plan), log)))
     except Exception as e:  # noqa: BLE001
         log(f"ℹ️ Kabul testi hazırlanamadı ({type(e).__name__}); yalnızca kalite kapısı kullanılacak.")
         return None
