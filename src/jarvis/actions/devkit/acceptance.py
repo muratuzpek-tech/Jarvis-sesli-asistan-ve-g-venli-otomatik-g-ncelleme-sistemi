@@ -344,7 +344,8 @@ WHAT THE PROGRAM ACTUALLY PRODUCED / PROBLEMS:
 
 Work it out yourself from the SAMPLE INPUT FILES, step by step (count every line/item carefully and
 follow every rule in the task). Then decide which is correct.
-Return ONLY JSON: {{"correct": "program" | "expectation", "reason": "short explanation with your own count",
+Return ONLY JSON: {{"program_output_is_correct": true | false, "expectation_is_correct": true | false,
+ "reason": "short explanation with your own count",
  "correct_values": ["2-5 short exact lines/values the CORRECT output must contain, by your own count"]}}
 JSON:"""
 
@@ -363,6 +364,12 @@ def parse_dispute(text: str) -> tuple[bool, str, list[str]]:
         return False, "hakem cevabı anlaşılamadı", []
     reason = str(data.get("reason", ""))[:300]
     values = [str(v).strip() for v in (data.get("correct_values") or []) if str(v).strip()][:5]
+    # İki ayrı evet/hayır: tek alanlı "correct": "expectation" cevabı hem "beklenti
+    # doğru" hem "sorun beklentide" diye okunabiliyordu (canlı test 2026-09-29).
+    if "program_output_is_correct" in data or "expectation_is_correct" in data:
+        prog_ok = data.get("program_output_is_correct") is True
+        exp_ok = data.get("expectation_is_correct")
+        return prog_ok and exp_ok is False, reason, values
     return str(data.get("correct", "")).strip().lower() == "program", reason, values
 
 

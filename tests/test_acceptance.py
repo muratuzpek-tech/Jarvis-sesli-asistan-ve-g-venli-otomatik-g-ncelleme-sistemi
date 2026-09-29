@@ -299,3 +299,12 @@ def test_list_of_objects_gets_shape_hint(tmp_path):
         "import json; json.dump([{'urun': 'elma', 'toplam': 50.0}], open('o.json', 'w'))")
     problems = run_acceptance(tmp_path, "main.py", spec)[0]
     assert len(problems) == 1 and "nesne LİSTESİ" in problems[0]
+
+
+def test_parse_dispute_boolean_schema():
+    from jarvis.actions.devkit.acceptance import parse_dispute
+    assert parse_dispute('{"program_output_is_correct": true, "expectation_is_correct": false, '
+                         '"correct_values": ["a: 1"]}')[0] is True
+    assert parse_dispute('{"program_output_is_correct": true, "expectation_is_correct": true}')[0] is False
+    assert parse_dispute('{"program_output_is_correct": false, "expectation_is_correct": false}')[0] is False
+    assert parse_dispute('{"correct": "program"}')[0] is True   # eski biçim

@@ -310,7 +310,9 @@ class DisputeModel(AcceptanceModel):
         if prompt.startswith("A program was tested on a small sample input"):
             self.prompts.append(prompt)
             r = R()
-            r.text = json.dumps({"correct": self.verdict, "reason": "elma 3 kez geçiyor; TOPLAM görevde yok",
+            r.text = json.dumps({"program_output_is_correct": self.verdict == "program",
+                                 "expectation_is_correct": self.verdict != "program",
+                                 "reason": "elma 3 kez geçiyor; TOPLAM görevde yok",
                                  "correct_values": self.values})
             return r
         return super().generate_content(prompt)
