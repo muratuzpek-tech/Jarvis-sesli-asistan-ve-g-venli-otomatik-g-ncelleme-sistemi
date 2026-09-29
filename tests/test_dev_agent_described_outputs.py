@@ -37,3 +37,11 @@ def test_single_data_line_is_not_header_only(tmp_path: Path):
     (tmp_path / "h.txt").write_text("Sıcaklık Özeti\n==========\n", encoding="utf-8")
     assert header_only_outputs(tmp_path, ["o.txt"]) == []
     assert len(header_only_outputs(tmp_path, ["h.txt"])) == 1
+
+
+def test_planner_translated_name_is_replaced_by_task_name():
+    """Canlı test 2026-09-29: görev tablo.html dedi, plan table.html bekledi → doğru program reddedildi."""
+    desc = "/home/m/urunler.json dosyasını okuyup HTML tabloyu çalışma klasöründeki tablo.html dosyasına yaz."
+    plan = {"expected_outputs": [{"path": "table.html"}, {"path": "log.txt"}]}
+    plan = da._ensure_described_outputs(plan, desc)
+    assert [o["path"] for o in plan["expected_outputs"]] == ["log.txt", "tablo.html"]

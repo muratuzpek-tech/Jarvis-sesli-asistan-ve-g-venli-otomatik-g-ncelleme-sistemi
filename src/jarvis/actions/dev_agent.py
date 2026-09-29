@@ -598,9 +598,25 @@ def _ensure_described_outputs(plan: dict, description: str) -> dict:
     outs = plan.get("expected_outputs")
     if not isinstance(outs, list):
         outs = []
+    described = described_output_names(description, str(plan.get("run_command") or ""))
+    if described:
+        # Planlayıcı görevdeki adı "çevirip" başka ad uydurduysa (tablo.html → table.html,
+        # canlı test 2026-09-29) o uydurma beklenti atılır: aynı uzantılı, görevde hiç
+        # geçmeyen bir ad, doğru çalışan programı 'oluşturulmadı' diye reddettiriyordu.
+        exts = {Path(n).suffix.lower() for n in described}
+        low_desc = (description or "").lower()
+        kept = []
+        for o in outs:
+            nm = Path(str(o.get("path", "") if isinstance(o, dict) else o)).name
+            if Path(nm).suffix.lower() in exts and nm.lower() not in low_desc:
+                print(f"[DevAgent] 🔧 Görevde geçmeyen beklenen çıktı atıldı: {nm} (görevin istediği: {described})")
+                continue
+            kept.append(o)
+        outs = kept
+        plan["expected_outputs"] = outs
     have = {Path(str(o.get("path", "") if isinstance(o, dict) else o)).name.lower() for o in outs}
     added = []
-    for name in described_output_names(description, str(plan.get("run_command") or "")):
+    for name in described:
         if name.lower() not in have:
             outs.append({"path": name, "description": "the task explicitly asks for this output file"})
             added.append(name)

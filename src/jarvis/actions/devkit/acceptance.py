@@ -60,7 +60,8 @@ Every token must be justified by the fixtures. Include at least one token per re
 Make the fixtures REALISTIC and include at least one tricky edge case that a naive implementation of
 THIS input format typically gets wrong (something that looks like the target but must be ignored, an
 empty or malformed line, a nested/sub-folder item, a duplicate), and make the expectations prove it
-is handled.
+is handled. The edge case must follow ONLY the rules written in the task — never invent an extra rule
+(e.g. words to ignore, a required output wording) that the task does not state.
 Never use a bare small number as a token ("7", "2"): write it WITH its label as the program would print it
 ("satir: 3", "line 4"), and count it yourself carefully from the fixture text.
 If the result depends on file DATES (modification time), give EVERY fixture an "mtime": "YYYY-MM-DD" —
