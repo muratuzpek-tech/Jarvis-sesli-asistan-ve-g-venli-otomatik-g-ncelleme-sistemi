@@ -1840,8 +1840,41 @@ def _is_web_app(file_codes: dict[str, str]) -> bool:
     return any(_WEB_APP.search(code or "") for code in file_codes.values())
 
 
+_COUNT_NOUN = (r"(?:kitab\w*|kitap\w*|ürün\w*|urun\w*|satır\w*|satir\w*|kayıt\w*|kayit\w*|"
+               r"haber\w*|film\w*|şehir\w*|sehir\w*|items?|books?|products?|rows?|records?)")
+_REQUESTED_COUNT = [
+    re.compile(r"\b(?:en\s+\w+|ilk|son|top|first|cheapest|best|latest)\s+(\d{1,3})\b"
+               r"(?!\s*(?:sayfa|page|sn\b|saniye|dakika|gün|gun|mb\b|gb\b|£|\$|€|tl\b|sterlin|pound|dolar|euro|%)"
+               r"|['’]?(?:den|dan|ten|tan)\b)", re.I),
+    re.compile(r"\b(\d{1,3})\s+(?:tane\s+|adet\s+)?(?:en\s+\w+\s+)?" + _COUNT_NOUN, re.I),
+]
+_HTTP_FAIL = re.compile(
+    r"[^\n]*(?:\b(?:403|404|410|429|5\d\d)\b[^\n]{0,60}(?:Client Error|Server Error|Not Found|Forbidden)"
+    r"|Failed to fetch|Sayfa alınamadı)[^\n]*", re.I)
+
+
+def _requested_count(description: str) -> "int | None":
+    """Görev kaç satır/kayıt istiyor? ('en ucuz 5 kitap' → 5, 'ilk 10 haber' → 10).
+    Emin değilse None — o zaman sayı denetlenmez (yanlış alarm yerine sessizlik)."""
+    for rx in _REQUESTED_COUNT:
+        m = rx.search(description or "")
+        if m:
+            n = int(m.group(1))
+            if 1 <= n <= 200:
+                return n
+    return None
+
+
+def _speakable(text: str) -> str:
+    """Sesli okumada 'http://127.0.0.1:5000/' parçalanıyordu ('… 0.0.1:5000');
+    yerel adresi okunur hâle getirir. Yazılı mesaj tam adresi korur."""
+    return re.sub(r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0)(?::(\d{2,5}))?/?",
+                  lambda m: f"yerel adres, {m.group(1)} numaralı port" if m.group(1) else "yerel adres", text)
+
+
 def _probe_web_app(run_command: str, project_dir: Path, file_codes: dict[str, str],
-                   wait_s: float = 25.0) -> "tuple[bool, str]":
+                   wait_s: float = 25.0, min_rows: "int | None" = None,
+                   prior_output: str = "") -> "tuple[bool, str]":
     """Sürekli çalışan bir WEB SUNUCUSUNU gerçekten doğrular (Murat@goxs 2026-09-30:
     'en ucuz 5 kitabı web sayfası tablosu olarak göster' → Flask sunucusu; JARVIS
     '90 sn'de tamamlanamadı, elle kontrol edin' dedi). Program kafeste yeniden
@@ -1862,9 +1895,16 @@ def _probe_web_app(run_command: str, project_dir: Path, file_codes: dict[str, st
     parts, run_env, sb_state = sandbox.wrap(parts, project_dir, log=lambda m: None)
     if sb_state.startswith("REFUSED"):
         return False, sb_state
+    # Sayfalardan biri alınamadıysa (404…) tablo EKSİK veriyle dolu olabilir (Murat@goxs
+    # 2026-09-30: '…/catalogue/catalogue/page-2.html' 404, 3 sayfa yerine 1 sayfa kazındı,
+    # tabloda 3 satır vardı ve başarı sayıldı).
+    failed = _HTTP_FAIL.search(prior_output or "")
+    if failed:
+        return False, f"programın çıktısında sayfa alınamadı hatası var: {failed.group(0).strip()[:200]}"
     tmp = tempfile.mkdtemp(prefix="jarvis-web-")
     out_path = Path(tmp) / "out.log"
     proc = None
+    last_note = ""
     try:
         with open(out_path, "w", encoding="utf-8") as out_f:
             proc = subprocess.Popen(parts, stdout=out_f, stderr=subprocess.STDOUT, cwd=str(project_dir),
@@ -1874,8 +1914,11 @@ def _probe_web_app(run_command: str, project_dir: Path, file_codes: dict[str, st
                 if proc.poll() is not None:
                     tail = out_path.read_text(encoding="utf-8", errors="replace")[-300:]
                     return False, f"sunucu hemen kapandı: {tail!r}"
-                printed = re.findall(r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d{2,5})",
-                                     out_path.read_text(encoding="utf-8", errors="replace"))
+                log_text = out_path.read_text(encoding="utf-8", errors="replace")
+                failed = _HTTP_FAIL.search(log_text)
+                if failed:
+                    return False, f"sayfa alınamadı hatası: {failed.group(0).strip()[:200]}"
+                printed = re.findall(r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d{2,5})", log_text)
                 for port in dict.fromkeys([*map(int, printed), *ports]):
                     url = f"http://127.0.0.1:{port}/"
                     try:
@@ -1884,13 +1927,20 @@ def _probe_web_app(run_command: str, project_dir: Path, file_codes: dict[str, st
                     except Exception:  # noqa: BLE001
                         continue
                     rows = len(re.findall(r"<tr[\s>]", html, re.I))
-                    if "<table" in html.lower() and rows > 1:
-                        return True, f"{url} çalışıyor; sayfadaki tabloda {rows - 1} veri satırı var"
+                    data_rows = rows - 1
+                    if "<table" in html.lower() and data_rows >= max(1, min_rows or 1):
+                        return True, f"{url} çalışıyor; sayfadaki tabloda {data_rows} veri satırı var"
+                    if "<table" in html.lower() and data_rows >= 1:
+                        # Arka planda veri hâlâ geliyor olabilir: süre dolana kadar tekrar bak.
+                        last_note = (f"{url} açıldı ama tabloda yalnız {data_rows} veri satırı var; "
+                                     f"görev {min_rows} istiyor (veri eksik toplanmış olabilir)")
+                        break
                     if "<table" in html.lower():
-                        return False, f"{url} açıldı ama tablo BOŞ (veri satırı yok)"
+                        last_note = f"{url} açıldı ama tablo BOŞ (veri satırı yok)"
+                        break
                     return True, f"{url} çalışıyor (sayfa {len(html)} karakter; tablo yok)"
                 time.sleep(1.0)
-        return False, f"{wait_s:.0f} sn içinde yerel adreste cevap veren bir sayfa bulunamadı"
+        return False, last_note or f"{wait_s:.0f} sn içinde yerel adreste cevap veren bir sayfa bulunamadı"
     finally:
         if proc is not None and proc.poll() is None:
             _kill_process_tree(proc)
@@ -4194,11 +4244,19 @@ def _build_project(
             web_ok, web_note = None, ""
             if is_timeout and _is_web_app(file_codes):
                 _clear_data_outputs(project_dir, expected_outputs)   # doğrulama çalıştırması çift kayıt yazmasın
-                web_ok, web_note = _probe_web_app(run_command, project_dir, file_codes)
+                web_ok, web_note = _probe_web_app(run_command, project_dir, file_codes,
+                                                  min_rows=_requested_count(description),
+                                                  prior_output=last_output)
             if web_ok is False and attempt < MAX_FIX_ATTEMPTS:
                 log(f"❌ Web sunucusu doğrulanamadı: {web_note} — düzeltiliyor...")
+                want = _requested_count(description)
                 last_output = (f"The program is a web server, but an automated check FAILED: {web_note}. "
-                               f"Make the page at '/' render an HTML <table> with the real data rows.\n\n"
+                               f"Make the page at '/' render an HTML <table> with the real data rows"
+                               + (f" (the task asks for {want} rows)" if want else "") + ". "
+                               f"If a page could not be fetched (404), the page URL was built wrongly: do NOT "
+                               f"append a fixed path like 'catalogue/page-2.html' to a start URL that may already "
+                               f"contain a path; follow the page's own 'next' link and resolve it with "
+                               f"urljoin(CURRENT_PAGE_URL, href). Never skip a failed page silently.\n\n"
                                f"Program output:\n{last_output}")
                 try:
                     file_codes.update(_fix_files(
@@ -4221,7 +4279,18 @@ def _build_project(
                     f"Açmak için proje klasöründe '{run_command}' çalıştırıp tarayıcıda bu adrese gidin. "
                     f"Dosyalar: {project_dir}"
                 )
-                if speak: speak(msg)
+                if speak: speak(_speakable(msg))
+                return f"{msg}\n\nOutput:\n{last_output}"
+            if web_ok is False:
+                # Son denemede de doğrulanamadı: 'beklenen çıktılar doğrulandı' gibi YALANCI
+                # bir başarı cümlesi kurulmaz, sorun olduğu gibi söylenir.
+                log(f"❌ Web sunucusu son denemede de doğrulanamadı: {web_note}")
+                msg = (
+                    f"'{proj_name}' projesini {MAX_FIX_ATTEMPTS} denemede düzgün çalıştıramadım, efendim. "
+                    f"Web sunucusu açılıyor ama kontrol başarısız: {web_note}. "
+                    f"Dosyalar {project_dir} içinde duruyor."
+                )
+                if speak: speak(_speakable(msg))
                 return f"{msg}\n\nOutput:\n{last_output}"
             if is_timeout:
                 if expected_outputs:

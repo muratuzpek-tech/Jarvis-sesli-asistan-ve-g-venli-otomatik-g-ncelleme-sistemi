@@ -99,10 +99,13 @@ def parse_price(text: str) -> float:
     return float(num)
 
 if __name__ == "__main__":
-    base = sys.argv[1]
+    # ÇOK SAYFA: sonraki sayfanın adresini ELLE KURMA (başlangıç adresi zaten bir alt klasör
+    # içeriyorsa sabit bir göreli yol eklemek klasörü İKİ KEZ yazar → 404).
+    # Sayfadaki "sonraki" bağlantısını izle ve O ANKİ sayfa adresine göre çöz.
+    # Bir sayfa alınamazsa (404 vb.) SESSİZCE ATLAMA: fetch() hatası programı durdursun.
+    url = sys.argv[1]
     rows = []
-    for page in range(1, 4):                                      # çok sayfa: sayfa adresini SİTEDEN al
-        url = base if page == 1 else urljoin(base, f"catalogue/page-{page}.html")   # ← siteye göre
+    for page in range(1, 4):                                      # görev kaç sayfa diyorsa
         soup = fetch(url)
         for card in soup.select("article.product_pod"):           # ← sayfaya göre değiştir
             link = card.select_one("h3 a")
@@ -110,6 +113,10 @@ if __name__ == "__main__":
             title = link.get("title") or link.get_text(strip=True)
             price = parse_price(card.select_one(".price_color").get_text())
             rows.append((title, price))
+        nxt = soup.select_one("li.next a")                        # ← sitenin "sonraki" bağlantısı
+        if nxt is None:
+            break                                                 # son sayfa
+        url = urljoin(url, nxt["href"])                           # O ANKİ sayfaya göre çöz
     if not rows:
         sys.exit("No items found - selector may be wrong")        # sessizce boş dosya yazma
     with open("news.csv", "w", newline="", encoding="utf-8") as fh:
@@ -195,12 +202,15 @@ SQLITE_STORE = '''
 import sqlite3
 
 def save(rows: list[tuple[str, float]], db_path: str = "database.db") -> int:
+    """YENİ eklenen kayıt sayısını döndürür. cursor.rowcount KULLANMA (-1 olabilir →
+    'veritabanına -1 kayıt eklendi' gibi saçma bir mesaj çıkar); total_changes farkı güvenilir."""
     con = sqlite3.connect(db_path)                             # göreli yol → çalışma klasörü
     try:
         con.execute("CREATE TABLE IF NOT EXISTS items (name TEXT NOT NULL UNIQUE, price REAL)")
+        before = con.total_changes
         con.executemany("INSERT OR IGNORE INTO items (name, price) VALUES (?, ?)", rows)   # ASLA f-string ile SQL
         con.commit()
-        return con.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        return con.total_changes - before
     finally:
         con.close()
 '''

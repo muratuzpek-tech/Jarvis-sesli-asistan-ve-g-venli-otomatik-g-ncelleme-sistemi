@@ -343,6 +343,33 @@ def _detect_default_browser() -> str:
     return "chrome"
 
 
+def _clear_stale_chromium_lock(profile: Path) -> bool:
+    """Chromium 'SingletonLock' kilidi 'makine-PID' adlı bir sembolik bağlantıdır. Kilidi
+    tutan süreç artık YOKSA (JARVIS çöktü, bilgisayar kapandı) kilit dosyaları silinir.
+    Süreç yaşıyorsa hiçbir şeye dokunulmaz. Yalnız JARVIS'in KENDİ profilinde çağrılır."""
+    lock = profile / "SingletonLock"
+    if not lock.is_symlink():
+        return False
+    try:
+        pid = int(os.readlink(lock).rsplit("-", 1)[-1])
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+        return False                      # süreç yaşıyor: profil gerçekten kullanımda
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        return False
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        try:
+            (profile / name).unlink()
+        except OSError:
+            pass
+    print(f"[Browser] 🔓 Stale profile lock removed (PID {pid} is gone): {profile}")
+    return True
+
+
 class _BrowserSession:
     """
     Bir tarayıcı örneği için tam oturum.
@@ -508,8 +535,32 @@ class _BrowserSession:
             await asyncio.sleep(0.5)
             self._page = await self._context.new_page()
             print(f"[Browser] ✅ Launched [{label}] with JARVIS profile")
+            return
         except Exception as e2:
-            raise RuntimeError(f"Could not launch {self.browser_name}: {e2}") from e2
+            print(f"[Browser] ⚠️  JARVIS profile failed for {label}: {e2}")
+            # Murat@goxs 2026-09-30: 'profile in use' — önceki JARVIS oturumundan kalan
+            # kilit (süreç ölmüş) ya da profil gerçekten başka pencerede açık.
+            if _clear_stale_chromium_lock(Path(jarvis_profile)):
+                try:
+                    self._context = await engine_obj.launch_persistent_context(jarvis_profile, **kwargs)
+                    await asyncio.sleep(0.5)
+                    self._page = await self._context.new_page()
+                    print(f"[Browser] ✅ Launched [{label}] after clearing a stale profile lock")
+                    return
+                except Exception as e3:
+                    print(f"[Browser] ⚠️  Still failing after clearing lock: {e3}")
+
+        # Son çare: geçici, boş profil (oturum açık gelmez ama sayfa açılır).
+        import tempfile
+        temp_profile = tempfile.mkdtemp(prefix=f"jarvis-{self.browser_name}-")
+        print(f"[Browser] Retrying with a temporary profile: {temp_profile}")
+        try:
+            self._context = await engine_obj.launch_persistent_context(temp_profile, **kwargs)
+            await asyncio.sleep(0.5)
+            self._page = await self._context.new_page()
+            print(f"[Browser] ✅ Launched [{label}] with a temporary profile")
+        except Exception as e4:
+            raise RuntimeError(f"Could not launch {self.browser_name}: {e4}") from e4
 
 
     async def _get_page(self) -> Page:
