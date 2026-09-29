@@ -263,6 +263,42 @@ def analyze_sources(file_codes: dict[str, str]) -> dict[str, list[dict]]:
     return result
 
 
+def empty_data_outputs(project_dir: Path, expected_outputs: list) -> list[str]:
+    """JSON/CSV çıktısı geçerli ama VERİSİZ mi ([] / {} / yalnız başlık satırı)?
+    (Canlı test 2026-09-29: js_kazima 'Invalid quote ID' yazıp quotes.json'a
+    [] kaydetti; dosya var ve boş değil diye 'çalışıyor' denildi.)"""
+    import json as _json
+    problems = []
+    for item in expected_outputs or []:
+        rel = item.get("path") if isinstance(item, dict) else str(item)
+        if not rel:
+            continue
+        target = project_dir / rel
+        suffix = target.suffix.lower()
+        if suffix not in {".json", ".csv"}:
+            continue
+        try:
+            target.resolve().relative_to(project_dir.resolve())
+            if not target.is_file() or target.stat().st_size > 5_000_000:
+                continue
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            continue
+        if suffix == ".json":
+            try:
+                data = _json.loads(text)
+            except ValueError:
+                continue
+            if data in ([], {}) or (isinstance(data, dict) and data and all(v in ([], {}) for v in data.values())):
+                problems.append(f"'{rel}' geçerli JSON ama İÇİNDE HİÇ VERİ YOK ({text.strip()[:60]!r}). "
+                                f"Program gerçek sonuç toplamadı; seçicileri/ayrıştırmayı düzelt, boş sonucu başarı sayma.")
+        else:
+            rows = [ln for ln in text.splitlines() if ln.strip()]
+            if len(rows) == 1:
+                problems.append(f"'{rel}' yalnızca başlık satırı içeriyor, veri satırı yok.")
+    return problems
+
+
 def header_only_outputs(project_dir: Path, expected_outputs: list) -> list[str]:
     """Metin çıktısı yalnızca başlık/ayraçtan oluşuyorsa sorun döndürür.
 
@@ -282,7 +318,10 @@ def header_only_outputs(project_dir: Path, expected_outputs: list) -> list[str]:
         except (ValueError, OSError):
             continue
         meaningful = [ln for ln in text.splitlines() if ln.strip() and not re.fullmatch(r"[\s=\-_*#~.]+", ln)]
-        if len(meaningful) < MIN_CONTENT_LINES:
+        # Tek satırda "etiket: sayı" biçiminde gerçek veri varsa başlık değildir
+        # (canlı test 2026-09-29: 'en düşük: 26.75, en yüksek: 35.25' reddedildi).
+        has_data = any(re.search(r"[:=,;|]\s*-?\d", ln) for ln in meaningful)
+        if len(meaningful) < MIN_CONTENT_LINES and not has_data:
             problems.append(
                 f"'{rel}' yalnızca {len(meaningful)} anlamlı satır içeriyor (başlıktan ibaret). "
                 f"Program gerçek sonuçları yazmalı; hiç bulgu yoksa bunu açıkça belirten bir satır yazmalı."

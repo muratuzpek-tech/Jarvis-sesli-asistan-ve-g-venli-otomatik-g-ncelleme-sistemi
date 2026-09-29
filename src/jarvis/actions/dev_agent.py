@@ -535,7 +535,7 @@ JSON:"""
                     "görev JavaScript ile yüklenen içerik istiyor (kaydırma/'daha fazla yükle') ama planlayıcı "
                     "iki denemede de tarayıcı (Playwright) kullanmadı; requests ile bu içerik alınamaz."
                 )
-        return _ensure_url_in_run_command(plan, description)
+        return _ensure_described_outputs(_ensure_url_in_run_command(plan, description), description)
     except json.JSONDecodeError as e:
         raise ValueError(f"Planner returned invalid JSON: {e}\nRaw: {response.text[:300]}") from e
     except Exception as e:
@@ -558,6 +558,55 @@ def _ensure_url_in_run_command(plan: dict, description: str) -> dict:
         url = urls[0].rstrip(".,;:!?")
         plan["run_command"] = f"{cmd} {url}"
         print(f"[DevAgent] 🔧 run_command'a görevdeki URL eklendi: {plan['run_command']}")
+    return plan
+
+
+_OUTPUT_NAME = re.compile(
+    r"(?<![/\\\w.-])([\w-]+\.(?:txt|csv|json|md|html|db|sqlite|png|jpg|zip|log|xlsx|pptx|pdf))\b", re.IGNORECASE)
+
+
+def described_output_names(description: str, run_command: str = "") -> list[str]:
+    """Görev metninde AÇIKÇA adı verilen çıktı dosyaları. Girdi yolları
+    ('/.../satislar.csv' gibi eğik çizgiyle başlayanlar), URL'ler ve
+    run_command'daki argümanlar hariç."""
+    text = _URL_IN_TEXT.sub(" ", description or "")
+    names = []
+    for m in _OUTPUT_NAME.finditer(text):
+        name = m.group(1)
+        if name.lower() in {"main.py"} or name in (run_command or "") or name in names:
+            continue
+        # Yalnızca YAZILACAK dosyalar: adın hemen ardından bir yazma fiili gelmeli
+        # ("linkler.txt dosyasına yaz", "rapor.zip içine koy"); "notlar.txt'yi oku" sayılmaz.
+        after = re.split(r"[;.\n]|\b(?:oku|okuyup|read)\b", text[m.end():m.end() + 45].lower(), maxsplit=1)[0]
+        nxt = _OUTPUT_NAME.search(after)
+        after = after[:nxt.start()] if nxt else after
+        before = text[max(0, m.start() - 30):m.start()].lower()
+        if _WRITE_VERB.search(after) or re.search(r"(çalışma|calisma|working)\s+(klasör|klasor|folder)", before):
+            names.append(name)
+    return names
+
+
+_WRITE_VERB = re.compile(r"\b(yaz|kaydet|oluştur|olustur|çiz|ciz|koy|üret|uret|write|save|export|create|dump)",
+                         re.IGNORECASE)
+
+
+def _ensure_described_outputs(plan: dict, description: str) -> dict:
+    """Görevin adını verdiği çıktı dosyası plandaki expected_outputs'ta yoksa
+    ekler. (Canlı test 2026-09-29: link_kontrol'de plan linkler.txt'yi
+    listelemedi; dosya hiç yazılmadığı hâlde 'çalışıyor' denildi → YALANCI
+    BAŞARI. Dış analiz raporu da bu çapraz kontrolü önermişti.)"""
+    outs = plan.get("expected_outputs")
+    if not isinstance(outs, list):
+        outs = []
+    have = {Path(str(o.get("path", "") if isinstance(o, dict) else o)).name.lower() for o in outs}
+    added = []
+    for name in described_output_names(description, str(plan.get("run_command") or "")):
+        if name.lower() not in have:
+            outs.append({"path": name, "description": "the task explicitly asks for this output file"})
+            added.append(name)
+    if added:
+        plan["expected_outputs"] = outs
+        print(f"[DevAgent] 🔧 Görevde adı geçen çıktı dosyaları beklenenlere eklendi: {added}")
     return plan
 
 
@@ -3397,11 +3446,16 @@ def _build_project(
             # olusan rapor varsa proje BASARILI SAYILMAZ; duzeltme turuna girer.
             quality = _python_quality_issues(file_codes)
             from jarvis.actions.devkit.python_quality import (
+                empty_data_outputs,
                 header_only_outputs,
                 placeholder_data_outputs,
                 truncated_value_outputs,
             )
             header_problems = header_only_outputs(project_dir, expected_outputs)
+            for _p in empty_data_outputs(project_dir, expected_outputs):
+                quality.setdefault(entry_point, []).append(
+                    {"code": "OUTPUT-EMPTY-DATA", "message": _p, "line": 0, "col": 0}
+                )
             for _p in truncated_value_outputs(project_dir, expected_outputs):
                 quality.setdefault(entry_point, []).append(
                     {"code": "OUTPUT-TRUNCATED", "message": _p, "line": 0, "col": 0}
