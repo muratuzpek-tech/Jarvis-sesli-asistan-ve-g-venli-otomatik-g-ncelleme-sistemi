@@ -327,6 +327,10 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
         own_path = ex["output"].lower()
         missing = [t for t in ex["contains"] if not (_token_found(t, low) or t.lower() in own_path)]
         if missing:
+            missing = _drop_miscounted(missing, text, spec["fixtures"])
+        if missing and not _is_structured(ex["output"], text):
+            missing = _drop_invented_labels(missing, text, spec["fixtures"])
+        if missing:
             problems.append(f"{label} şu beklenen ifadeleri İÇERMİYOR: {missing}. İçerik (ilk 800 karakter): {text[:800]!r}"
                             + _json_shape_hint(text, missing))
     return problems, output[:2000]
@@ -437,6 +441,76 @@ def _token_found(token: str, low_text: str) -> bool:
     lt = _loose(t)
     return bool(lt) and re.search(rf"(?<![\w.]){re.escape(lt)}(?![\w.])"
                                   if lt[0].isalnum() and lt[-1].isalnum() else re.escape(lt), _loose(low_text)) is not None
+
+
+_KEYED_COUNT = re.compile(r'^"?([\w.\-/]{1,40})"?\s*[:=]\s*(\d{1,6})$')
+_LABEL_VALUE = re.compile(r"^([^\W\d_][^\W\d_ ]*(?: [^\W\d_]+){0,3})\s*[:=]\s*(\d{1,6})$")
+
+
+def _fold(text: str) -> str:
+    return text.casefold().translate(str.maketrans("ıİşğüöç", "iisguoc"))
+
+
+def _drop_miscounted(missing: list[str], output_text: str, fixtures: list[dict]) -> list[str]:
+    """'"200": 4' bekleniyor, program 7 diyor: örnek dosyalarda '200' geçen satırları
+    KODLA sayarız. Program sayısı bu gerçek sayımla birebir aynıysa yanlış olan
+    beklentidir (canlı test 2026-09-29 log_analizi: örnek logda 7 tane 200 vardı,
+    kabul testi 4 bekledi, yerel hakem de beklentiyi haklı buldu → doğru program
+    5 tur reddedildi). Yalnızca programla bağımsız sayım UYUŞURSA düşürülür."""
+    lines = [ln for fx in fixtures for ln in fx["content"].splitlines()]
+    keep: list[str] = []
+    for tok in missing:
+        m = _KEYED_COUNT.match(tok.strip())
+        if m:
+            key, expected = m.group(1), int(m.group(2))
+            pat = re.compile(rf"(?<![\w.]){re.escape(key)}(?![\w.])", re.I)
+            real = sum(1 for ln in lines if pat.search(ln))
+            got = re.search(rf'(?<![\w.])"?{re.escape(key)}"?\s*[:=,]\s*(\d+)(?:\.0+)?(?![\d.])', output_text, re.I)
+            if real and real != expected and got and int(got.group(1)) == real:
+                print(f"[DevAgent] 🔧 Kabul testi yanlış saymış: {tok!r} — örnekte gerçekte {real} satır var, "
+                      f"program da {real} buldu; bu beklenti düşürüldü.")
+                continue
+        keep.append(tok)
+    return keep
+
+
+def _is_structured(output_name: str, text: str) -> bool:
+    if output_name.lower().endswith((".json", ".csv", ".tsv")):
+        return True
+    try:
+        json.loads(text)
+        return True
+    except ValueError:
+        return False
+
+
+def _drop_invented_labels(missing: list[str], output_text: str, fixtures: list[dict]) -> list[str]:
+    """'satir: 4', 'toplam not sayisi: 8' gibi beklentilerde ETİKET görevin değil,
+    testi yazan modelin uydurduğu biçimdir (canlı test 2026-09-29 yapilacaklar_raporu:
+    görev biçim belirtmiyordu; program 'ana.py:4' yazdığı için 5 tur reddedildi ve
+    biçime uymaya çalışırken satır içi TODO'ları bulamaz hale geldi). Etiket örnek
+    girdilerde HİÇ geçmiyorsa (yani veri değil biçimse) yalnızca SAYI aranır: çıktıda
+    o sayı, beklendiği kadar kez tek başına geçmeli. Metin/Markdown çıktılar içindir."""
+    corpus = _fold("\n".join(fx["content"] for fx in fixtures))
+    numbers = re.findall(r"(?<![\w.])(\d+)(?![\w.])", output_text)
+    need: dict[str, int] = {}
+    relaxed: list[str] = []
+    keep: list[str] = []
+    for tok in missing:
+        m = _LABEL_VALUE.match(tok.strip())
+        if m and _fold(m.group(1)) not in corpus:
+            need[m.group(2)] = need.get(m.group(2), 0) + 1
+            relaxed.append(tok)
+        else:
+            keep.append(tok)
+    for tok in relaxed:
+        value = _LABEL_VALUE.match(tok.strip()).group(2)
+        if numbers.count(value) < need[value]:
+            keep.append(tok)
+    if len(keep) < len(missing):
+        print(f"[DevAgent] ℹ️ Kabul testindeki uydurma etiketler yok sayıldı (yalnız sayılar arandı): "
+              f"{[t for t in missing if t not in keep]}")
+    return keep
 
 
 def _loose(text: str) -> str:

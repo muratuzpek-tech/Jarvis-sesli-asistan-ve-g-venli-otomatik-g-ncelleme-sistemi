@@ -308,3 +308,46 @@ def test_parse_dispute_boolean_schema():
     assert parse_dispute('{"program_output_is_correct": true, "expectation_is_correct": true}')[0] is False
     assert parse_dispute('{"program_output_is_correct": false, "expectation_is_correct": false}')[0] is False
     assert parse_dispute('{"correct": "program"}')[0] is True   # eski biçim
+
+
+# ── Canlı test 2026-09-29 (7f885df): yanlış sayım ve uydurma biçim etiketleri ──
+from jarvis.actions.devkit.acceptance import _drop_invented_labels, _drop_miscounted  # noqa: E402
+
+_LOG_FX = [{"path": "access.log", "content": "\n".join(
+    [f'1.1.1.{i} - - [x] "GET / HTTP/1.1" 200 51{i}' for i in range(7)]
+    + ['1.1.1.9 - - [x] "GET /a HTTP/1.1" 404 12']) + "\n"}]
+
+
+def test_miscounted_expectation_is_dropped_when_program_matches_real_count():
+    out = '{"200": 7, "404": 1}'
+    assert _drop_miscounted(['"200": 4'], out, _LOG_FX) == []
+
+
+def test_miscount_is_kept_when_program_disagrees_with_real_count():
+    """Program da yanlışsa (ör. 5) beklenti düşürülmez: yalancı başarıya kapı açılmaz."""
+    assert _drop_miscounted(['"200": 4'], '{"200": 5}', _LOG_FX) == ['"200": 4']
+    assert _drop_miscounted(['"404": 3'], '{"404": 3}', _LOG_FX) == ['"404": 3']
+
+
+def test_invented_format_label_only_requires_the_number():
+    fx = [{"path": "a.py", "content": "x = 1\n# TODO: bir\n"}]
+    md = "## a.py\n- a.py:2 → TODO: bir\n\nToplam: 1 not\n"
+    assert _drop_invented_labels(["satir: 2", "toplam not sayisi: 1"], md, fx) == []
+    assert _drop_invented_labels(["satir: 5"], md, fx) == ["satir: 5"]
+
+
+def test_data_label_is_never_relaxed():
+    """'hello: 5' etiketi örnek girdide geçen VERİDİR: sayı tek başına yetmez."""
+    fx = [{"path": "a.txt", "content": "hello world hello"}]
+    assert _drop_invented_labels(["hello: 2"], "world: 2\n", fx) == ["hello: 2"]
+
+
+def test_run_acceptance_accepts_correct_log_counter_despite_wrong_spec(tmp_path):
+    (tmp_path / "main.py").write_text(
+        "import sys, json, collections\n"
+        "c = collections.Counter(l.split()[-2] for l in open(sys.argv[1]) if l.strip())\n"
+        "json.dump(c, open('durum.json', 'w'))\n", encoding="utf-8")
+    spec = {"fixtures": _LOG_FX, "args": ["{FIXTURE}/access.log"],
+            "expect": [{"output": "durum.json", "contains": ['"200": 4', '"404": 1']}]}
+    problems, _ = run_acceptance(tmp_path, "main.py", spec)
+    assert problems == []

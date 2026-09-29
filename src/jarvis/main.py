@@ -16,6 +16,7 @@ if _platform.system() == "Windows":
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
+from jarvis.core.bg_tasks import keep as keep_task
 import os
 import re
 import threading
@@ -1938,11 +1939,11 @@ class JarvisLive:
                                 except Exception as e:
                                     print(f"[JARVIS] ⚠️ conversation_log (voice in): {e}")
                                 if self._dashboard:
-                                    asyncio.create_task(self._dashboard.broadcast({
+                                    keep_task(asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "user",
                                         "text": full_in,
                                         "ts": datetime.now().isoformat(),
-                                    }))
+                                    })))
                             # Sesli komutlardan dosya islemlerini deterministik router'a aktar.
                             try:
                                 _voice_file_mod = match_file_modification(full_in)
@@ -1969,11 +1970,11 @@ class JarvisLive:
                                 except Exception as e:
                                     print(f"[JARVIS] ⚠️ conversation_log (jarvis out): {e}")
                                 if self._dashboard:
-                                    asyncio.create_task(self._dashboard.broadcast({
+                                    keep_task(asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "jarvis",
                                         "text": full_out,
                                         "ts": datetime.now().isoformat(),
-                                    }))
+                                    })))
                             out_buf = []
 
                             # Vision injection: model finished tool-response turn → now send the image
@@ -2005,7 +2006,7 @@ class JarvisLive:
                                 async def _cam_close():
                                     await asyncio.sleep(2.0)
                                     self.ui.stop_camera_stream()
-                                asyncio.create_task(_cam_close())
+                                keep_task(asyncio.create_task(_cam_close()))
 
                     if response.tool_call:
                         fn_responses = []
@@ -2220,7 +2221,7 @@ class JarvisLive:
             except Exception as e:
                 print(f"[Briefing] Phase 2 error: {e}")
                 self.ui.write_log(f"SYS: Briefing news phase failed: {e}")
-        asyncio.create_task(_guarded_news())
+        keep_task(asyncio.create_task(_guarded_news()))
 
         # ── Phase 3: mention a repeated-request pattern, if one was found ─────
         async def _guarded_pattern():
@@ -2228,7 +2229,7 @@ class JarvisLive:
                 await self._briefing_pattern_phase(lang)
             except Exception as e:
                 print(f"[Briefing] Phase 3 error: {e}")
-        asyncio.create_task(_guarded_pattern())
+        keep_task(asyncio.create_task(_guarded_pattern()))
 
     async def _briefing_news_phase(self, lang: str) -> None:
         """
@@ -2443,8 +2444,8 @@ class JarvisLive:
                 from jarvis.dashboard.server import DashboardServer
                 self._dashboard = DashboardServer()
                 self._dashboard.set_connect_callback(self._on_phone_connected)
-                asyncio.create_task(self._dashboard.serve())
-                asyncio.create_task(self._process_dashboard_commands())
+                keep_task(asyncio.create_task(self._dashboard.serve()))
+                keep_task(asyncio.create_task(self._process_dashboard_commands()))
             except Exception as e:
                 print(f"[Dashboard] Disabled: {type(e).__name__}")
                 self._dashboard = None

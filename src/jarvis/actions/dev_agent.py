@@ -456,6 +456,49 @@ def _classify_error(output: str, project_dir: Path | None = None) -> str:
     return "none"
 
 
+def _input_sample_hint(run_command: str, project_dir: Path, max_files: int = 3, max_lines: int = 3) -> str:
+    """Çıktı BOŞ çıktığında modele girdinin gerçek satırlarını, boşlukla bölünmüş
+    alan numaralarıyla gösterir (canlı test 2026-09-29 hata_saatleri: satır
+    '2026-09-01 09:15:00 ERROR ...' iken program parts[3] == 'ERROR' diye baktı;
+    model yalnızca 'çıktı boş' duyduğu için 5 denemede de hatayı görmedi)."""
+    try:
+        args = shlex.split(run_command or "", posix=os.name != "nt")[1:]
+    except ValueError:
+        return ""
+    files: list[Path] = []
+    for a in args:
+        p = Path(a) if os.path.isabs(a) else project_dir / a
+        try:
+            if p.is_file():
+                files.append(p)
+            elif p.is_dir():
+                files.extend(sorted(q for q in p.rglob("*") if q.is_file())[:20])
+        except OSError:
+            continue
+    blocks: list[str] = []
+    for f in files:
+        if len(blocks) >= max_files:
+            break
+        try:
+            raw = f.read_bytes()[:4000]
+        except OSError:
+            continue
+        if b"\0" in raw:
+            continue
+        lines = [ln for ln in raw.decode("utf-8", "replace").splitlines() if ln.strip()][:max_lines]
+        if not lines:
+            continue
+        shown = "\n".join(
+            f"    {ln[:160]!r}\n      split() → " + " ".join(f"[{i}]{w!r}" for i, w in enumerate(ln.split()[:8]))
+            for ln in lines)
+        blocks.append(f"  {f.name}:\n{shown}")
+    if not blocks:
+        return ""
+    return ("\n\nThe output has NO data rows, so your filter/parse condition never matched. REAL input lines "
+            "(with the index of each whitespace-separated field) — check every index and string you compare "
+            "against:\n" + "\n".join(blocks))
+
+
 def _has_error(output: str, run_command: str) -> bool:
     
     low = output.lower()
@@ -3504,6 +3547,17 @@ def _build_project(
                 quality.setdefault(entry_point, []).extend(
                     {"code": "OUTPUT-HEADER-ONLY", "message": p, "line": 0, "col": 0} for p in header_problems
                 )
+            _empty = [i for i in quality.get(entry_point, []) if i["code"] in ("OUTPUT-EMPTY-DATA", "OUTPUT-HEADER-ONLY")]
+            if _empty:
+                _hint = _input_sample_hint(run_command, project_dir)
+                if _hint:
+                    _empty[0]["message"] += _hint
+                # Boş çıktının nedeni çoğu zaman ayrıştırmayı yapan YARDIMCI dosyadadır
+                # (hata_saatleri: parts[3] utils/helpers.py'deydi, ama yalnız main.py
+                # düzeltmeye gönderildiği için 5 denemede de dokunulmadı).
+                for _fp in file_codes:
+                    if _fp != entry_point and _fp.endswith(".py"):
+                        quality.setdefault(_fp, []).extend(dict(i) for i in _empty)
             if quality and all(i["code"] in SOFT_QUALITY_CODES for iss in quality.values() for i in iss):
                 # Canlı test 2026-09-29 (kitap_raporu): çıktısı doğru program yalnızca
                 # "kullanılmayan fonksiyon" yüzünden 3 tur reddedildi. Tek başına
