@@ -121,10 +121,21 @@ def _python_runtime_paths() -> list[Path]:
     paths = {Path(sys.prefix), Path(sys.base_prefix)}
     for hop in _symlink_hops(sys.executable):
         paths.add(hop.parent.parent)
-        # Kökün kendisi de bir takma ad olabilir (uv: cpython-3.12-… → cpython-3.12.14-…).
-        for root_hop in _symlink_hops(str(hop.parent.parent)):
-            paths.add(root_hop)
-    return sorted(p for p in paths if p.exists() and not str(p).startswith("/usr"))
+    roots: set[Path] = set()
+    home = Path.home()
+    for p in paths:
+        # Kök bir takma adsa (uv: cpython-3.12-… → cpython-3.12.14-…) takma ada
+        # bağlama YAPILMAZ; takma adı ve hedefini içeren klasörün tamamı bağlanır,
+        # takma ad kafeste kendiliğinden çözülür. (murat@goxs, bwrap 0.11.1:
+        # "Can't bind mount … on …/cpython-3.12-linux…: No such file or directory")
+        while p.is_symlink() and len(p.parent.parts) > 3 and p.parent != home:
+            p = p.parent
+        roots.add(p)
+    # /usr ve /etc zaten salt okunur bağlı; kök dizin ya da ev klasörünün TAMAMI asla bağlanmaz.
+    roots = {p for p in roots if p.exists() and p not in (Path("/"), home)
+             and not any(str(p) == s or str(p).startswith(s + "/") for s in ("/usr", "/etc"))}
+    # İç içe bağlamalardan kaçın: bir kök başka bir kökün içindeyse yalnız dıştaki kalır.
+    return sorted(p for p in roots if not any(o != p and o in p.parents for o in roots))
 
 
 def _playwright_browsers() -> Path | None:

@@ -205,4 +205,13 @@ def test_interpreter_symlink_chain_roots_are_bound(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox.sys, "prefix", str(venv))
     monkeypatch.setattr(sandbox.sys, "base_prefix", str(real))
     roots = {str(p) for p in sandbox._python_runtime_paths()}
-    assert {str(venv), str(alias), str(real)} <= roots
+    # Takma adın kendisine bağlama yapılmaz; takma adla hedefi içeren klasör bağlanır.
+    assert roots == {str(venv), str(tmp_path / "uv")}
+
+
+def test_system_and_home_roots_are_never_bound_from_the_chain(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox.sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr(sandbox.sys, "prefix", str(sandbox.Path.home()))
+    monkeypatch.setattr(sandbox.sys, "base_prefix", "/usr")
+    roots = [str(p) for p in sandbox._python_runtime_paths()]
+    assert "/etc" not in roots and "/" not in roots and str(sandbox.Path.home()) not in roots
