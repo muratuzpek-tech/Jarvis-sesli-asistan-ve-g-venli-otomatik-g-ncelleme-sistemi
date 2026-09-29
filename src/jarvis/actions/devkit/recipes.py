@@ -190,14 +190,15 @@ if __name__ == "__main__":
 '''
 
 SQLITE_STORE = '''
-# SQLITE KALIBI — tablo oluştur, parametreli ekle, kapatmayı unutma
+# SQLITE KALIBI — tablo oluştur, parametreli ekle, TEKRAR ÇALIŞINCA ÇİFT KAYIT YOK
+# Program birden çok kez çalışabilir: aynı kayıt ikinci kez EKLENMEMELİ (UNIQUE + INSERT OR IGNORE).
 import sqlite3
 
 def save(rows: list[tuple[str, float]], db_path: str = "database.db") -> int:
     con = sqlite3.connect(db_path)                             # göreli yol → çalışma klasörü
     try:
-        con.execute("CREATE TABLE IF NOT EXISTS items (name TEXT NOT NULL, price REAL)")
-        con.executemany("INSERT INTO items (name, price) VALUES (?, ?)", rows)   # ASLA f-string ile SQL
+        con.execute("CREATE TABLE IF NOT EXISTS items (name TEXT NOT NULL UNIQUE, price REAL)")
+        con.executemany("INSERT OR IGNORE INTO items (name, price) VALUES (?, ?)", rows)   # ASLA f-string ile SQL
         con.commit()
         return con.execute("SELECT COUNT(*) FROM items").fetchone()[0]
     finally:

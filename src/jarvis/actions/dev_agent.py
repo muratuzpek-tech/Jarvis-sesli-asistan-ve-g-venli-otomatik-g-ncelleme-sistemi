@@ -1816,6 +1816,87 @@ def _read_partial_timeout_output(out_path: Path, err_path: Path, max_chars: int 
     )
 
 
+_DATA_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".csv", ".json")
+
+
+def _clear_data_outputs(project_dir: Path, expected_outputs: list) -> None:
+    """Her yeni denemeden önce beklenen VERİ çıktıları (db/csv/json) silinir: bir
+    önceki denemenin kayıtları yenisine eklenip çift kayıt oluşmasın (Murat@goxs
+    2026-09-30: iki deneme sonrası veritabanında her kitap iki kez vardı)."""
+    for output in expected_outputs or []:
+        rel = output.get("path") if isinstance(output, dict) else str(output)
+        target = _safe_project_path(project_dir, rel)
+        if target and target.is_file() and target.suffix.lower() in _DATA_SUFFIXES:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+
+
+_WEB_APP = re.compile(r"\bFlask\s*\(|\bapp\.run\s*\(|http\.server|HTTPServer\s*\(|\buvicorn\.run\s*\(|\bFastAPI\s*\(")
+
+
+def _is_web_app(file_codes: dict[str, str]) -> bool:
+    return any(_WEB_APP.search(code or "") for code in file_codes.values())
+
+
+def _probe_web_app(run_command: str, project_dir: Path, file_codes: dict[str, str],
+                   wait_s: float = 25.0) -> "tuple[bool, str]":
+    """Sürekli çalışan bir WEB SUNUCUSUNU gerçekten doğrular (Murat@goxs 2026-09-30:
+    'en ucuz 5 kitabı web sayfası tablosu olarak göster' → Flask sunucusu; JARVIS
+    '90 sn'de tamamlanamadı, elle kontrol edin' dedi). Program kafeste yeniden
+    başlatılır, yerel adresi bulunana kadar denenir, sayfa indirilir, içinde tablo
+    satırı aranır, sonra süreç ağacı öldürülür. (başarılı mı, açıklama)."""
+    import tempfile
+    import urllib.request
+    code = "\n".join(file_codes.values())
+    ports = [int(p) for p in re.findall(r"port\s*=\s*(\d{2,5})", code)]
+    ports += [5000, 8000, 8080]
+    try:
+        parts = shlex.split(run_command, posix=(os.name != "nt"))
+    except ValueError:
+        return False, "komut ayrıştırılamadı"
+    if parts and parts[0].lower() == "python":
+        parts[0] = sys.executable
+    from jarvis.actions.devkit import sandbox
+    parts, run_env, sb_state = sandbox.wrap(parts, project_dir, log=lambda m: None)
+    if sb_state.startswith("REFUSED"):
+        return False, sb_state
+    tmp = tempfile.mkdtemp(prefix="jarvis-web-")
+    out_path = Path(tmp) / "out.log"
+    proc = None
+    try:
+        with open(out_path, "w", encoding="utf-8") as out_f:
+            proc = subprocess.Popen(parts, stdout=out_f, stderr=subprocess.STDOUT, cwd=str(project_dir),
+                                    env=run_env, start_new_session=(os.name != "nt"))
+            deadline = time.time() + wait_s
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    tail = out_path.read_text(encoding="utf-8", errors="replace")[-300:]
+                    return False, f"sunucu hemen kapandı: {tail!r}"
+                printed = re.findall(r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d{2,5})",
+                                     out_path.read_text(encoding="utf-8", errors="replace"))
+                for port in dict.fromkeys([*map(int, printed), *ports]):
+                    url = f"http://127.0.0.1:{port}/"
+                    try:
+                        with urllib.request.urlopen(url, timeout=3) as resp:  # nosec B310: sabit yerel adres
+                            html = resp.read(500_000).decode("utf-8", "replace")
+                    except Exception:  # noqa: BLE001
+                        continue
+                    rows = len(re.findall(r"<tr[\s>]", html, re.I))
+                    if "<table" in html.lower() and rows > 1:
+                        return True, f"{url} çalışıyor; sayfadaki tabloda {rows - 1} veri satırı var"
+                    if "<table" in html.lower():
+                        return False, f"{url} açıldı ama tablo BOŞ (veri satırı yok)"
+                    return True, f"{url} çalışıyor (sayfa {len(html)} karakter; tablo yok)"
+                time.sleep(1.0)
+        return False, f"{wait_s:.0f} sn içinde yerel adreste cevap veren bir sayfa bulunamadı"
+    finally:
+        if proc is not None and proc.poll() is None:
+            _kill_process_tree(proc)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
     print(f"[DevAgent] 🚀 Running: {run_command}")
 
@@ -3839,6 +3920,8 @@ def _build_project(
     revert_note = ""
 
     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
+        if attempt > 1:
+            _clear_data_outputs(project_dir, expected_outputs)
         log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
         run_started_at = time.time()
         last_output = _run_project(run_command, project_dir, current_timeout)
@@ -3858,7 +3941,7 @@ def _build_project(
 
         is_timeout = last_output.startswith("Timed out")
 
-        if is_timeout and not timeout_extended and attempt < MAX_FIX_ATTEMPTS:
+        if is_timeout and not timeout_extended and attempt < MAX_FIX_ATTEMPTS and not _is_web_app(file_codes):
             # _has_error() timeout'u kasitli olarak hata SAYMIYOR (bir sunucu/
             # GUI kasitli olarak surekli calisabilir), AMA bu hicbir sey
             # DOGRULANMADI demektir - antivirus/soguk-import gecikmesi ya da
@@ -4108,6 +4191,38 @@ def _build_project(
                     continue
                 if not acceptance_disputed:
                     log("✅ Kabul testi geçti (örnek girdide beklenen sonuçlar üretildi).")
+            web_ok, web_note = None, ""
+            if is_timeout and _is_web_app(file_codes):
+                _clear_data_outputs(project_dir, expected_outputs)   # doğrulama çalıştırması çift kayıt yazmasın
+                web_ok, web_note = _probe_web_app(run_command, project_dir, file_codes)
+            if web_ok is False and attempt < MAX_FIX_ATTEMPTS:
+                log(f"❌ Web sunucusu doğrulanamadı: {web_note} — düzeltiliyor...")
+                last_output = (f"The program is a web server, but an automated check FAILED: {web_note}. "
+                               f"Make the page at '/' render an HTML <table> with the real data rows.\n\n"
+                               f"Program output:\n{last_output}")
+                try:
+                    file_codes.update(_fix_files(
+                        error_output=last_output + revert_note, project_description=description,
+                        all_files=files, file_codes=file_codes, language=language, project_dir=project_dir,
+                        entry_point=entry_point, shared_contracts=shared_contracts_text,
+                        expected_outputs=expected_outputs_text, known_error_type="output_missing",
+                        repeat_of_previous=(previous_fix_error_output == last_output),
+                    ))
+                    previous_fix_error_output = last_output
+                except RateLimitError:
+                    msg = "Rate limit reached during fix. Project saved, check it manually in VSCode."
+                    if speak: speak(msg)
+                    return msg
+                continue
+            if web_ok:
+                log(f"🌐 Web sunucusu doğrulandı: {web_note}")
+                msg = (
+                    f"'{proj_name}' projesi çalışıyor, efendim. Bu bir web sunucusu: {web_note}. "
+                    f"Açmak için proje klasöründe '{run_command}' çalıştırıp tarayıcıda bu adrese gidin. "
+                    f"Dosyalar: {project_dir}"
+                )
+                if speak: speak(msg)
+                return f"{msg}\n\nOutput:\n{last_output}"
             if is_timeout:
                 if expected_outputs:
                     verified_note = f" Beklenen çıktılar gerçekten doğrulandı ({', '.join(str(o.get('path', o)) if isinstance(o, dict) else str(o) for o in expected_outputs)})."

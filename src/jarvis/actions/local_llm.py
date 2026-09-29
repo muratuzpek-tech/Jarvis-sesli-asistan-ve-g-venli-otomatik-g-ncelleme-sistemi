@@ -91,6 +91,27 @@ def ollama_generate(prompt: str, timeout: float = 120.0) -> str | None:
         return None
 
 
+# Canlı log 2026-09-30: Gemini ücretsiz API kotası (günde 20) dolunca arka plan
+# işleri (keşif, agent_loop…) her çağrıda 30-40 sn yeniden deniyor ve logu kırmızı
+# hatalarla dolduruyordu. Kota dolunca 6 saat Gemini hiç denenmez; önce Groq
+# (anahtar kayıtlıysa), sonra yerel Ollama kullanılır.
+_GEMINI_QUOTA_UNTIL = 0.0
+
+
+def cloud_generate(prompt: str) -> str | None:
+    """Kayıtlı ücretsiz bulut modeli (Groq) ile metin; yoksa/başarısızsa None."""
+    try:
+        from jarvis.actions.dev_agent import _CloudLLM, _cloud_llm
+        cfg = _cloud_llm()
+        if not cfg:
+            return None
+        text = _CloudLLM(*cfg, fallback=None, timeout=90).generate_content(prompt).text
+        return (text or "").strip() or None
+    except Exception as e:  # noqa: BLE001
+        print(f"[LocalLLM] ⚠️ Bulut modeli denemesi başarısız: {type(e).__name__}")
+        return None
+
+
 def generate_with_fallback(
     gemini_call,
     prompt_for_ollama: str,
@@ -107,12 +128,28 @@ def generate_with_fallback(
     Gemini hatası hiçbir şey değiştirilmeden tekrar fırlatılır — böylece
     hem bu fonksiyonu hiç bilmeyen eski çağıranlar hem de loglar gerçek
     hatayı görmeye devam eder."""
-    try:
-        response = gemini_call()
-        return (getattr(response, "text", None) or "").strip()
-    except Exception as gemini_error:
-        text = ollama_generate(prompt_for_ollama, timeout=ollama_timeout)
-        if text is not None:
-            print(f"[LocalLLM] ℹ️ '{source}': Gemini kullanılamadı, yerel Ollama'ya düşüldü.")
-            return text
-        raise gemini_error
+    global _GEMINI_QUOTA_UNTIL
+    import time as _time
+    if _time.time() < _GEMINI_QUOTA_UNTIL:
+        # Günlük kota zaten doldu: 30-40 sn'lik yeniden denemeleri hiç başlatma.
+        gemini_error: Exception = RuntimeError("Gemini günlük kotası dolu (önceki denemeden biliniyor)")
+    else:
+        try:
+            response = gemini_call()
+            return (getattr(response, "text", None) or "").strip()
+        except Exception as e:  # noqa: BLE001
+            gemini_error = e
+            msg = str(e)
+            if any(k in msg for k in ("RESOURCE_EXHAUSTED", "429", "quota")):
+                _GEMINI_QUOTA_UNTIL = _time.time() + 6 * 3600
+                print(f"[LocalLLM] ℹ️ Gemini günlük kotası doldu; arka plan işleri 6 saat Groq/yerel modelle "
+                      f"yapılacak ('{source}').")
+    text = cloud_generate(prompt_for_ollama)
+    if text:
+        print(f"[LocalLLM] ☁️ '{source}': Gemini yerine ücretsiz bulut modeli (Groq) kullanıldı.")
+        return text
+    text = ollama_generate(prompt_for_ollama, timeout=ollama_timeout)
+    if text is not None:
+        print(f"[LocalLLM] ℹ️ '{source}': Gemini kullanılamadı, yerel Ollama'ya düşüldü.")
+        return text
+    raise gemini_error
