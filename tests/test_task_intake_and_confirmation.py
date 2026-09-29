@@ -63,6 +63,7 @@ def test_needs_browser():
 def gate(monkeypatch):
     monkeypatch.setattr(da, "_pending_dev_agent", {})
     monkeypatch.setattr(da, "_last_user_turn_at", None)
+    monkeypatch.setattr(da, "_user_texts", [])
     built = []
     monkeypatch.setattr(da, "_build_project", lambda **kw: built.append(kw) or "Project 'x' is working")
     return built
@@ -315,3 +316,32 @@ def test_surprise_101_wording_selects_file_organize():
     d = ("{K}/fotograflar klasöründeki dosyaları değiştirilme tarihlerine göre, çalışma klasöründe "
          "'sirali/YYYY-AA/' alt klasörlerine KOPYALAYAN bir program yaz")
     assert "file_organize" in [n for n, _ in select_recipes(d)]
+
+
+# Murat@goxs 2026-09-29: bir listeden kopyalanan "Program yazma, onay adımı,
+# güvenlik kafesi, kabul testi" satırı ONAY sayılıp proje başlatıldı.
+def test_non_confirmation_text_does_not_start_project(gate):
+    code = _code(da.dev_agent({"description": GOOD_REQUEST}))
+    da.note_user_turn(time.monotonic() + 5, text="Program yazma, onay adımı, güvenlik kafesi, kabul testi")
+    assert da.dev_agent({"description": GOOD_REQUEST, "confirm_code": code}).startswith("ONAY HENÜZ")
+    assert gate == [] and code in da._pending_dev_agent
+    da.note_user_turn(time.monotonic() + 30, text="Evet, başla.")
+    assert "is working" in da.dev_agent({"description": GOOD_REQUEST, "confirm_code": code})
+
+
+@pytest.mark.parametrize("text,ok", [
+    ("evet", True), ("Evet onaylıyorum", True), ("Tamam yap", True), ("onaylıyorum", True),
+    ("İyi olur, başla", True), ("hayır", False), ("evet ama dur", False), ("onaylamıyorum", False),
+    ("şimdilik bekle", False), ("peki", True), ("OK", True), ("neden bu kadar uzun sürüyor", False),
+    ("Program yazma, onay adımı, güvenlik kafesi, kabul testi", False),
+])
+def test_is_affirmative(text, ok):
+    assert da.is_affirmative(text) is ok
+
+
+def test_voice_fragments_split_inside_word(gate):
+    code = _code(da.dev_agent({"description": GOOD_REQUEST}))
+    t = time.monotonic() + 5
+    da.note_user_turn(t, text="Ev")
+    da.note_user_turn(t + 0.4, text="et.")
+    assert "is working" in da.dev_agent({"description": GOOD_REQUEST, "confirm_code": code})

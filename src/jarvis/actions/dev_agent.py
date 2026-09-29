@@ -46,16 +46,55 @@ _last_user_turn_at: float | None = None
 USER_TURN_GRACE_S = 1.5
 
 
-def note_user_turn(now: float | None = None) -> None:
+# Onay kodundan SONRA gelen kullanici metni (ses parcalari dahil). Murat@goxs
+# 2026-09-29: kullanici "Program yazma, onay adımı, güvenlik kafesi, kabul testi"
+# yazdi (bir listeden kopyaladigi satir) — onay DEGILDI, ama "bir kullanici turu
+# geldi" sayildigi icin proje basladi. Artik metin de bakilir.
+_user_texts: list[tuple[float, str]] = []
+_AFFIRM = re.compile(r"^(evet|evt|onay\w*|tamam\w*|olur|peki|ba[sş]la\w*|devam|yap|yaz|kabul\w*|yes|ok|okay|sure)$")
+_NEGATE = re.compile(r"\b(hay[iı]r|iptal\w*|dur|durdur\w*|vazge[cç]\w*|istemiyorum|yapma|yazma|onaylam\w*|"
+                     r"ba[sş]lama|bekle|no|cancel|stop)\b")
+
+
+def note_user_turn(now: float | None = None, text: str = "") -> None:
     """Kullanicidan gercek bir girdi (ses veya yazi) geldigini kaydeder."""
     global _last_user_turn_at
     _last_user_turn_at = time.monotonic() if now is None else now
+    if text and text.strip():
+        _user_texts.append((_last_user_turn_at, text.strip()))
+        del _user_texts[:-50]
+
+
+def is_affirmative(text: str) -> bool:
+    """Açık bir 'evet' mi? İlk kelime onay olmalı (ya da çok kısa bir cevapta
+    onay kelimesi geçmeli) ve hiçbir olumsuzluk olmamalı."""
+    t = text.casefold().replace("i\u0307", "i")
+    if _NEGATE.search(t):
+        return False
+    words = re.findall(r"\w+", t)
+    if not words:
+        return False
+    return bool(_AFFIRM.match(words[0])) or (len(words) <= 3 and any(_AFFIRM.match(w) for w in words))
 
 
 def _user_confirmed_after(issued_at: float) -> bool:
     if _last_user_turn_at is None:
         return True
-    return _last_user_turn_at >= issued_at + USER_TURN_GRACE_S
+    if _last_user_turn_at < issued_at + USER_TURN_GRACE_S:
+        return False
+    after = [(ts, t) for ts, t in _user_texts if ts >= issued_at + USER_TURN_GRACE_S]
+    # Metin kaydı olmayan arayüzler (eski çağıranlar) için eski davranış.
+    if not after:
+        return True
+    # Yalnız SON söz (ses parçaları 3 sn içinde birleşir) değerlendirilir: önce
+    # "hayır, şunu da ekle" deyip sonra "evet" diyen kullanıcı onaylamış olur.
+    last = [after[-1]]
+    for ts, t in reversed(after[:-1]):
+        if last[0][0] - ts > 3.0:
+            break
+        last.insert(0, (ts, t))
+    # Ses-yazı parçaları kelimeyi bölebilir ("Ev" + "et"): iki birleştirme de denenir.
+    return is_affirmative(" ".join(t for _, t in last)) or is_affirmative("".join(t for _, t in last))
 
 
 def confirmation_problem(confirm_code: str) -> str | None:
@@ -68,7 +107,8 @@ def confirmation_problem(confirm_code: str) -> str | None:
         print("[DevAgent] ⛔ confirm_code kullanıcı cevap vermeden kullanıldı — reddedildi.")
         return (
             "ONAY HENÜZ ALINMADI — proje BAŞLATILMADI. Onay kodu verildikten sonra kullanıcıdan "
-            "hiç cevap gelmedi. Kullanıcıya ne yapılacağını anlat ve SUS; kullanıcı açıkça "
+            "açık bir 'evet' gelmedi (cevap yok ya da cevap onay değil). Kullanıcıya ne yapılacağını "
+            "kısaca anlat, 'Onaylıyor musunuz?' diye sor ve SUS; kullanıcı açıkça "
             "'evet/onaylıyorum' dedikten SONRA aynı confirm_code ile tekrar çağır."
         )
     return None
@@ -251,6 +291,46 @@ def _acceptance_expectation_wrong(description: str, spec: dict, problems: list[s
         return (True, reason) if ok else (False, f"hakem kararı reddedildi: {why}")
     except Exception as e:  # noqa: BLE001
         return False, f"hakem çalışmadı: {type(e).__name__}"
+
+
+SAMPLE_INPUT_DIR = "ornek_girdi"
+
+
+def _with_sample_input(run_command: str, project_dir: Path, spec: dict, log=print) -> str:
+    """Görevde girdi klasörü/dosyası VERİLMEMİŞSE (ör. "bir klasördeki resimleri
+    aylara ayıran program yaz") program argümansız çalıştırılıyor, 'Kullanım:
+    python main.py <girdi_klasörü>' deyip çıkıyor ve 5 deneme boşa gidiyordu
+    (Murat@goxs 2026-09-29, image_sorter). Kabul testinin örnek dosyaları proje
+    içindeki ornek_girdi/ klasörüne yazılır ve program onunla çalıştırılır;
+    kullanıcı da programın nasıl çalıştığını bu örnekle görür."""
+    from jarvis.actions.devkit.acceptance import PLACEHOLDER, URL_PLACEHOLDER
+    try:
+        parts = shlex.split(run_command or "", posix=os.name != "nt")
+    except ValueError:
+        return run_command
+    args = spec.get("args") or []
+    if len(parts) > 2 or not args or any(URL_PLACEHOLDER in a for a in args):
+        return run_command
+    if not any(PLACEHOLDER in a for a in args):
+        return run_command
+    sample = project_dir / SAMPLE_INPUT_DIR
+    try:
+        for fx in spec["fixtures"]:
+            target = (sample / fx["path"]).resolve()
+            target.relative_to(sample.resolve())
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(fx["content"], encoding="utf-8")
+            if fx.get("mtime"):
+                from datetime import datetime
+                ts = datetime.fromisoformat(fx["mtime"].replace(" ", "T")).timestamp()
+                os.utime(target, (ts, ts))
+    except (OSError, ValueError) as exc:
+        log(f"ℹ️ Örnek girdi hazırlanamadı ({exc}); program argümansız çalıştırılacak.")
+        return run_command
+    new_args = [a.replace(PLACEHOLDER, str(sample), 1) for a in args]
+    new_cmd = " ".join([run_command.strip(), *(shlex.quote(a) for a in new_args)])
+    log(f"ℹ️ Görevde girdi klasörü verilmedi; program örnek girdiyle denenecek: {new_cmd}")
+    return new_cmd
 
 
 def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
@@ -3215,6 +3295,7 @@ def _build_project(
     if acceptance_spec:
         from jarvis.actions.devkit.acceptance import contract_text
         shared_contracts_text = (shared_contracts_text + "\n- " + contract_text(acceptance_spec)).strip()
+        run_command = _with_sample_input(run_command, project_dir, acceptance_spec, log)
 
     # Aynı proje adıyla yapılan tekrar denemelerde eski database.db/report
     # dosyası yeni çalışmanın sonucu gibi görünmemeli. Yalnızca planner'ın

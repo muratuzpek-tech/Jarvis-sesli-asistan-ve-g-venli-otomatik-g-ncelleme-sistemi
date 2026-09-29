@@ -521,10 +521,15 @@ def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
         items: list[str] = []
         total_count = 0
         truncated_by_count = False
+        # Türlere göre sayım KODLA yapılır (Murat@goxs 2026-09-29: 11 .py dosyasını
+        # sesli model "10" diye saydı, .sh dosyasını unuttu, toplamı "7" dedi).
+        kinds: dict[str, int] = {}
         for item in entries:
             if not show_hidden and item.name.startswith("."):
                 continue
             total_count += 1
+            kind = "klasör" if item.is_dir() else (item.suffix.lower() or "(uzantısız)")
+            kinds[kind] = kinds.get(kind, 0) + 1
             if len(items) >= _LIST_MAX_ITEMS:
                 truncated_by_count = True
                 continue
@@ -548,7 +553,9 @@ def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
         if truncated_by_count:
             header += f", ilk {_LIST_MAX_ITEMS} tanesi gösteriliyor"
         header += "):"
-        return header + "\n" + body
+        summary = ", ".join(f"{k}: {n}" for k, n in sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0])))
+        return (header + "\n" + body + f"\n\nTÜRLERE GÖRE SAYIM (kesin, kodla sayıldı — "
+                f"kullanıcıya bu sayıları aynen söyle): {summary}. Toplam: {total_count}.")
 
     except PermissionError:
         return f"Permission denied: {path}"

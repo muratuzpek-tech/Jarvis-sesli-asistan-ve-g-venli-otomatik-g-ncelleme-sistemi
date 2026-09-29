@@ -44,3 +44,14 @@ def test_turkish_shortcut_names_are_recognised():
     for word in ("İndirilenler", "indirilenler", "İNDİRİLENLER"):
         assert fc._normalize_shortcut(word) == "downloads", word
     assert fc._normalize_shortcut("Masaüstü") == "desktop"
+
+
+def test_list_files_reports_exact_counts_by_type(tmp_path, monkeypatch):
+    """Sesli model 25 dosyayı yanlış saymıştı; sayım artık listede hazır verilir."""
+    monkeypatch.setattr(fc, "_SAFE_ROOTS", [tmp_path])
+    for name in ("a.py", "b.py", "c (1).py", "x.zip", "y.ZIP", "kur.sh", "BENIOKU"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "alt").mkdir()
+    out = fc.list_files(str(tmp_path))
+    assert ".py: 3, .zip: 2" in out and ".sh: 1" in out and "(uzantısız): 1" in out
+    assert "klasör: 1" in out and "Toplam: 8." in out

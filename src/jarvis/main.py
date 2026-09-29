@@ -952,7 +952,7 @@ class JarvisLive:
         aninda isaretlenir; _on_text_command ic yonlendirmelerde (ses → dosya
         router'i, tur sonunda) da cagrildigi icin isaret burada konur — aksi halde
         istegin kendisi gecikmeli olarak "onay" sayilabilirdi."""
-        note_user_turn()  # dev_agent onay kapisi: gercek kullanici girdisi
+        note_user_turn(text=text)  # dev_agent onay kapisi: gercek kullanici girdisi
         self._on_text_command(text)
 
     def _on_text_command(self, text: str):
@@ -1889,7 +1889,7 @@ class JarvisLive:
                                     pass
 
                                 self._last_user_speech = time.monotonic()
-                                note_user_turn()  # dev_agent onay kapisi: gercek kullanici girdisi
+                                note_user_turn(text=txt)  # dev_agent onay kapisi: gercek kullanici girdisi
 
                                 # Turn complete gelmese bile dosya komutunu yakala.
 
