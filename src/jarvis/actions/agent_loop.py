@@ -611,7 +611,7 @@ def start_background_loop(interval_seconds: float = DEFAULT_INTERVAL_S) -> None:
 
 # --- main.py'nin cagirdigi tool entrypoint'i --------------------------------
 
-def agent_loop_tool(parameters: dict = None, player=None) -> str:
+def agent_loop_tool(parameters: dict | None = None, player=None) -> str:
     params = parameters or {}
     action = str(params.get("action", "list")).lower().strip()
 
