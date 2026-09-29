@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import platform
 import secrets
@@ -114,65 +115,87 @@ def _is_safe_path(target: Path) -> bool:
     except Exception:
         return False
 
-def _get_desktop() -> Path:
+# Linux'ta "İndirilenler", "Masaüstü" gibi YERELLEŞTİRİLMİŞ klasör adları
+# ~/.config/user-dirs.dirs dosyasında durur; XDG_*_DIR ortam değişkenleri
+# normalde TANIMLI DEĞİLDİR. Murat@goxs 2026-09-29: "İndirilenler klasörümde
+# ne var" → Jarvis /home/murat/Downloads'a baktı, "klasör bulunamadı" dedi.
+_XDG_KEYS = {
+    "desktop": "XDG_DESKTOP_DIR", "downloads": "XDG_DOWNLOAD_DIR",
+    "documents": "XDG_DOCUMENTS_DIR", "pictures": "XDG_PICTURES_DIR",
+    "music": "XDG_MUSIC_DIR", "videos": "XDG_VIDEOS_DIR",
+}
+_ENGLISH_NAMES = {
+    "desktop": "Desktop", "downloads": "Downloads", "documents": "Documents",
+    "pictures": "Pictures", "music": "Music", "videos": "Videos",
+}
+# user-dirs.dirs yoksa denenecek yaygın yerel adlar (önce Türkçe).
+_LOCAL_NAMES = {
+    "desktop": ("Masaüstü",), "downloads": ("İndirilenler",), "documents": ("Belgeler",),
+    "pictures": ("Resimler",), "music": ("Müzik",), "videos": ("Videolar",),
+}
+
+
+def _xdg_user_dir(key: str, home: "Path | None" = None) -> "Path | None":
+    home = home or Path.home()
+    var = _XDG_KEYS[key]
+    env = os.environ.get(var, "")
+    if env and Path(env).is_dir():
+        return Path(env)
+    cfg = Path(os.environ.get("XDG_CONFIG_HOME", "") or home / ".config") / "user-dirs.dirs"
+    try:
+        for line in cfg.read_text(encoding="utf-8").splitlines():
+            m = re.match(rf'\s*{var}\s*=\s*"([^"]*)"', line)
+            if m:
+                value = m.group(1).replace("$HOME", str(home))
+                p = Path(value).expanduser()
+                # Ev klasörünün kendisine işaret ediyorsa (kullanıcı klasörü kapatmış) yok say.
+                if p.is_dir() and p != home:
+                    return p
+    except OSError:
+        pass
+    return None
+
+
+def _user_folder(key: str, home: "Path | None" = None) -> Path:
+    home = home or Path.home()
     if _OS == "Linux":
-        xdg = os.environ.get("XDG_DESKTOP_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    kf = _known_folder_path("desktop")
-    if kf:
-        return kf
-    return Path.home() / "Desktop"
+        p = _xdg_user_dir(key, home)
+        if p:
+            return p
+    else:
+        kf = _known_folder_path(key)
+        if kf:
+            return kf
+    english = home / _ENGLISH_NAMES[key]
+    if not english.is_dir():
+        for name in _LOCAL_NAMES[key]:
+            if (home / name).is_dir():
+                return home / name
+    return english
+
+
+def _get_desktop() -> Path:
+    return _user_folder("desktop")
+
 
 def _get_downloads() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DOWNLOAD_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    kf = _known_folder_path("downloads")
-    if kf:
-        return kf
-    return Path.home() / "Downloads"
+    return _user_folder("downloads")
+
 
 def _get_documents() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DOCUMENTS_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    kf = _known_folder_path("documents")
-    if kf:
-        return kf
-    return Path.home() / "Documents"
+    return _user_folder("documents")
+
 
 def _get_pictures() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_PICTURES_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    kf = _known_folder_path("pictures")
-    if kf:
-        return kf
-    return Path.home() / "Pictures"
+    return _user_folder("pictures")
+
 
 def _get_music() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_MUSIC_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    kf = _known_folder_path("music")
-    if kf:
-        return kf
-    return Path.home() / "Music"
+    return _user_folder("music")
+
 
 def _get_videos() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_VIDEOS_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    kf = _known_folder_path("videos")
-    if kf:
-        return kf
-    return Path.home() / "Videos"
+    return _user_folder("videos")
 
 
 _SHORTCUT_DIRS: tuple[str, ...] = (
@@ -192,7 +215,8 @@ _SHORTCUT_TR_ALIASES: dict[str, str] = {
 
 
 def _normalize_shortcut(word: str) -> str:
-    w = word.strip().lower()
+    # 'İndirilenler'.lower() → 'i̇ndirilenler' (i + birleşik nokta): eşleşmiyordu.
+    w = word.strip().lower().replace("i\u0307", "i")
     return _SHORTCUT_TR_ALIASES.get(w, w)
 
 
