@@ -250,3 +250,51 @@ def test_no_broad_home_folder_is_bound(tmp_path):
     forbidden = {str(home), str(home / ".local"), str(home / ".local" / "share"), str(home / ".config"), "/"}
     dests = [cmd[i + 2] for i, a in enumerate(cmd) if a in ("--ro-bind", "--bind")]
     assert not forbidden & set(dests), dests
+
+
+@needs_bwrap
+def test_symlinked_project_is_reachable_by_real_path_too(tmp_path):
+    """murat@goxs 2026-09-29: ~/Desktop/JarvisProjects → /data/JarvisProjects bağlantısı.
+    Kabul testi giriş dosyasını ve örnek veriyi gerçek yoluyla (/data/...) veriyordu;
+    kafeste o yol yoktu → her kabul testi 'can't open file' ile çıkış 2."""
+    real = tmp_path / "data" / "proje"
+    (real / ".jarvis_accept" / "fixture").mkdir(parents=True)
+    (real / ".jarvis_accept" / "run").mkdir()
+    (real / ".jarvis_accept" / "fixture" / "veri.txt").write_text("merhaba", encoding="utf-8")
+    (real / "main.py").write_text(textwrap.dedent("""
+        import sys
+        from pathlib import Path
+        Path("sonuc.txt").write_text(Path(sys.argv[1], "veri.txt").read_text().upper())
+        print("TAMAM")
+    """), encoding="utf-8")
+    link = tmp_path / "Desktop" / "proje"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    run_dir = link / ".jarvis_accept" / "run"
+    fixture_real = (link / ".jarvis_accept" / "fixture").resolve()
+    cmd, env, state = sandbox.wrap([sys.executable, str((link / "main.py").resolve()), str(fixture_real)],
+                                   link, cwd=run_dir, log=lambda m: None)
+    assert state == "kafes"
+    r = subprocess.run(cmd, cwd=run_dir, env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert (real / ".jarvis_accept" / "run" / "sonuc.txt").read_text() == "MERHABA"
+
+
+@needs_bwrap
+def test_acceptance_runs_in_symlinked_project(tmp_path, monkeypatch):
+    """Uçtan uca: run_acceptance, bağlantı yoluyla verilen projede kafeste çalışır."""
+    from jarvis.actions.devkit import acceptance as acc
+    real = tmp_path / "data" / "proje"
+    real.mkdir(parents=True)
+    (real / "main.py").write_text(textwrap.dedent("""
+        import sys
+        from pathlib import Path
+        print(Path(sys.argv[1], "a.txt").read_text().strip().upper())
+    """), encoding="utf-8")
+    link = tmp_path / "Desktop" / "proje"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    spec = {"fixtures": [{"path": "a.txt", "content": "selam\n"}], "args": [acc.PLACEHOLDER],
+            "expect": [{"output": "STDOUT", "contains": ["SELAM"]}]}
+    problems, out = acc.run_acceptance(link, "main.py", spec)
+    assert problems == [], (problems, out)

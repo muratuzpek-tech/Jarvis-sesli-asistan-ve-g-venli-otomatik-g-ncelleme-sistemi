@@ -264,7 +264,7 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
     fixture_url = f"http://127.0.0.1:{server.server_address[1]}" if server else ""
     args = [a.replace(URL_PLACEHOLDER, fixture_url, 1).replace(PLACEHOLDER, str(fixture.resolve()), 1)
             for a in spec["args"]]
-    entry = (project_dir / entry_point).resolve()
+    entry = project_dir / entry_point  # .resolve() yok: kafes projeyi verilen yolla bağlar
     before = _output_snapshot(project_dir, spec)
     try:
         from jarvis.actions.devkit import sandbox

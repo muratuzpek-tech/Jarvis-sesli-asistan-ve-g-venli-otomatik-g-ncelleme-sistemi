@@ -198,7 +198,15 @@ def build(argv: list[str], project_dir: Path, *, network: bool = True, gui: bool
     for a in [*(extra_ro or []), *input_paths(argv, project_dir)]:
         args += _ro(Path(os.path.realpath(a)), a)
     # Proje klasörü verilen yolla (ör. ~/Desktop/JarvisProjects → /data bağlantısı) bağlanır.
-    args += ["--bind", os.path.realpath(project), project, "--chdir", str(cwd or project)]
+    real_project = os.path.realpath(project)
+    args += ["--bind", real_project, project]
+    if real_project != project:
+        # Canlı test 2026-09-29 (murat@goxs): kabul testi giriş dosyasını ve örnek
+        # verileri .resolve() ile (/data/...) veriyordu; proje yalnız bağlantı
+        # yoluyla bağlandığı için "can't open file" (çıkış 2) alınıyordu. Aynı
+        # klasör gerçek yoluyla da bağlanır; kafese başka hiçbir şey açılmaz.
+        args += ["--bind", real_project, real_project]
+    args += ["--chdir", str(cwd or project)]
 
     env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
     venv_bin = str(Path(sys.executable).parent)
