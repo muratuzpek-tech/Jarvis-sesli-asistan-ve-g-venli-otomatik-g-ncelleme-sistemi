@@ -337,7 +337,8 @@ WHAT THE PROGRAM ACTUALLY PRODUCED / PROBLEMS:
 
 Work it out yourself from the SAMPLE INPUT FILES, step by step (count every line/item carefully and
 follow every rule in the task). Then decide which is correct.
-Return ONLY JSON: {{"correct": "program" | "expectation", "reason": "short explanation with your own count"}}
+Return ONLY JSON: {{"correct": "program" | "expectation", "reason": "short explanation with your own count",
+ "correct_values": ["2-5 short exact lines/values the CORRECT output must contain, by your own count"]}}
 JSON:"""
 
 
@@ -347,13 +348,37 @@ def build_dispute_prompt(description: str, spec: dict, problems: list[str], outp
                                  expected=expected, problems=("\n".join(problems) + "\n" + output)[:3000])
 
 
-def parse_dispute(text: str) -> tuple[bool, str]:
-    """(beklenti_yanlış_mı, gerekçe). Anlaşılamayan cevap = beklenti doğru sayılır."""
+def parse_dispute(text: str) -> tuple[bool, str, list[str]]:
+    """(beklenti_yanlış_mı, gerekçe, hakemin_doğru_değerleri). Anlaşılamayan
+    cevap = beklenti doğru sayılır."""
     data = parse_spec(text)
     if not isinstance(data, dict):
-        return False, "hakem cevabı anlaşılamadı"
+        return False, "hakem cevabı anlaşılamadı", []
     reason = str(data.get("reason", ""))[:300]
-    return str(data.get("correct", "")).strip().lower() == "program", reason
+    values = [str(v).strip() for v in (data.get("correct_values") or []) if str(v).strip()][:5]
+    return str(data.get("correct", "")).strip().lower() == "program", reason, values
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[\s\"'`]+", "", text.lower())
+
+
+def dispute_is_consistent(values: list[str], program_text: str, missing_tokens: list[str]) -> tuple[bool, str]:
+    """Hakemin "program doğru" kararı KENDİ hesabıyla tutarlı mı? (canlı test
+    2026-09-29: hakem 'hello: 6 doğru' deyip programın 'hello: 3' çıktısını
+    onayladı → yalancı başarı.) Hakemin doğru dediği her değer programın
+    çıktısında GERÇEKTEN olmalı ve hakem, eksik beklentilerden en az biriyle
+    aynı fikirde olmamalı."""
+    if not values:
+        return False, "hakem doğru değerleri vermedi"
+    prog = _norm(program_text)
+    absent = [v for v in values if _norm(v) not in prog]
+    if absent:
+        return False, f"hakemin doğru dediği değerler programın çıktısında yok: {absent}"
+    judged = " ".join(_norm(v) for v in values)
+    if all(_norm(t) in judged for t in missing_tokens):
+        return False, "hakem eksik beklentileri de doğru sayıyor (çelişki)"
+    return True, "tutarlı"
 
 
 def _tree_text(folder: Path, limit: int = 500) -> str:

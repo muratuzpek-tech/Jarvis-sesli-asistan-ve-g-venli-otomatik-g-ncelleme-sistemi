@@ -275,3 +275,12 @@ def test_bare_small_numbers_are_dropped_from_expectations():
     spec, _ = validate_spec({**SPEC, "expect": [{"output": "r.txt", "contains": ["7", "elma: 3"]}]})
     assert spec["expect"][0]["contains"] == ["elma: 3"]
     assert validate_spec({**SPEC, "expect": [{"output": "r.txt", "contains": ["1", "2", "2"]}]})[0] is None
+
+
+def test_dispute_consistency_check():
+    from jarvis.actions.devkit.acceptance import dispute_is_consistent
+    prog = '{\n  "satir": 3,\n  "kelime": 10\n}'
+    assert dispute_is_consistent(["satir: 3", "kelime: 10"], prog, ["kelime: 11"])[0]
+    assert not dispute_is_consistent(["hello: 6"], "hello: 3\nworld: 2", ["hello: 6"])[0]
+    assert not dispute_is_consistent([], prog, ["x"])[0]
+    assert not dispute_is_consistent(["satir: 3"], prog, ["satir: 3"])[0]

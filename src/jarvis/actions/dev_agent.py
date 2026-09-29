@@ -202,14 +202,21 @@ SOFT_QUALITY_CODES = frozenset({"UNUSED-DEFINITION"})
 SOFT_QUALITY_ROUNDS = 1
 
 
-def _acceptance_expectation_wrong(description: str, spec: dict, problems: list[str], output: str) -> tuple[bool, str]:
-    """Hakem: kabul testindeki beklenti mi yanlış, program mı? Her hatada
-    (False, ...) — şüphede program suçlu sayılır."""
+def _acceptance_expectation_wrong(description: str, spec: dict, problems: list[str], output: str,
+                                  program_text: str = "") -> tuple[bool, str]:
+    """Hakem: kabul testindeki beklenti mi yanlış, program mı? Her hatada ve
+    hakem kendi hesabıyla çelişkiliyse (False, ...) — şüphede program suçlu."""
     try:
-        from jarvis.actions.devkit.acceptance import build_dispute_prompt, parse_dispute
+        from jarvis.actions.devkit.acceptance import build_dispute_prompt, dispute_is_consistent, parse_dispute
         response = _get_model(MODEL_PLANNER).generate_content(
             build_dispute_prompt(description, spec, problems, output))
-        return parse_dispute(response.text)
+        wrong, reason, values = parse_dispute(response.text)
+        if not wrong:
+            return False, reason
+        missing = [t for m in re.finditer(r"İÇERMİYOR: (\[.*?\])\.", "\n".join(problems))
+                   for t in re.findall(r"'([^']*)'", m.group(1))]
+        ok, why = dispute_is_consistent(values, program_text or output, missing)
+        return (True, reason) if ok else (False, f"hakem kararı reddedildi: {why}")
     except Exception as e:  # noqa: BLE001
         return False, f"hakem çalışmadı: {type(e).__name__}"
 
@@ -3485,7 +3492,16 @@ def _build_project(
                     if (acc_last and acc_last[0] == acc_sig and not acc_judged
                             and not any("oluşturulmadı" in pr or "hata koduyla" in pr for pr in acc_problems)):
                         acc_judged = True
-                        wrong, why = _acceptance_expectation_wrong(description, acceptance_spec, acc_problems, acc_output)
+                        run_dir = project_dir / ".jarvis" / "acceptance" / "run"
+                        prog_text = acc_output + "\n" + "\n".join(
+                            (run_dir / e["output"]).read_text(encoding="utf-8", errors="replace")
+                            for e in acceptance_spec["expect"]
+                            if e["output"] != "STDOUT" and (run_dir / e["output"]).is_file()
+                            and (run_dir / e["output"]).stat().st_size < 200_000)
+                        wrong, why = _acceptance_expectation_wrong(
+                            description, acceptance_spec, acc_problems, acc_output, prog_text)
+                        if not wrong:
+                            log(f"⚖️ Hakem: beklenti geçerli sayıldı ({why[:160]})")
                         if wrong:
                             log(f"⚖️ Kabul testi beklentisinin kendisi hatalı bulundu (farklı kod aynı sonucu verdi): {why[:200]}")
                             acceptance_disputed = why[:300]
