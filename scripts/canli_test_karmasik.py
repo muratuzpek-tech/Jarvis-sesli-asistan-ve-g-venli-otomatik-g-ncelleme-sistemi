@@ -47,7 +47,7 @@ def _d_kitap_raporu(p: Path) -> None:
         tablo_adi = tablolar[0]
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tablo_adi):
             raise AssertionError(f"Geçersiz tablo adı: {tablo_adi!r}")
-        rows = con.execute(f'SELECT * FROM "{tablo_adi}"').fetchall()
+        rows = con.execute(f'SELECT * FROM "{tablo_adi}"').fetchall()  # nosec B608 - tablo_adi yukarida regex ile [A-Za-z_][A-Za-z0-9_]* olarak dogrulandi; SQL identifier parametrize edilemez
     finally:
         con.close()
     assert len(rows) >= 3, f"ilk 3 sayfada 20£ altı birçok kitap var, veritabanında {len(rows)} kayıt"
