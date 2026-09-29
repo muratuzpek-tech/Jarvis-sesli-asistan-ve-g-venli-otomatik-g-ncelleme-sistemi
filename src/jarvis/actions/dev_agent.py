@@ -196,6 +196,12 @@ def _is_live_scrape(description: str) -> bool:
     return has_url(description) and needs_browser_or_web(description)
 
 
+# Tek başına başarıyı süresiz engellememesi gereken kalite bulguları
+# (Go'daki LINT_BLOCKING_ROUNDS ile aynı fikir).
+SOFT_QUALITY_CODES = frozenset({"UNUSED-DEFINITION"})
+SOFT_QUALITY_ROUNDS = 1
+
+
 def _acceptance_expectation_wrong(description: str, spec: dict, problems: list[str], output: str) -> tuple[bool, str]:
     """Hakem: kabul testindeki beklenti mi yanlış, program mı? Her hatada
     (False, ...) — şüphede program suçlu sayılır."""
@@ -324,6 +330,34 @@ def _parse_traceback(output: str, project_files: list[str]) -> tuple[str | None,
                 return pf, int(line_str)
 
     return None, None
+
+
+def _undefined_name_note(output: str, file_codes: dict[str, str]) -> tuple[str, list[str]] | None:
+    """'name X is not defined' hatasında X'in kullanıldığı yerleri bulur."""
+    import ast as _ast
+    names = sorted(set(re.findall(r"name '(\w+)' is not defined", output or "")))
+    if not names:
+        return None
+    lines, files = [], []
+    for name in names[:3]:
+        for fp, code in file_codes.items():
+            if not fp.endswith(".py"):
+                continue
+            try:
+                tree = _ast.parse(code)
+            except SyntaxError:
+                continue
+            used = sorted({n.lineno for n in _ast.walk(tree)
+                           if isinstance(n, _ast.Name) and n.id == name and isinstance(n.ctx, _ast.Load)})
+            if used:
+                files.append(fp)
+                lines.append(f"'{name}' is USED in {fp} at line(s) {used[:8]}")
+    if not lines:
+        return None
+    return ("UNDEFINED NAME LOCATED (deterministic): " + "; ".join(lines) + ". At each of these places the "
+            "name does not exist in that scope: define it there, pass it in as a parameter, or use the variable "
+            "that actually holds that value. Do not hide errors with a broad try/except that only prints them.",
+            files)
 
 
 def _traceback_project_files(output: str, project_files: list[str]) -> list[str]:
@@ -2681,6 +2715,16 @@ def _fix_files(
     else:
         files_to_fix.append(entry_point)
 
+    undefined_note = _undefined_name_note(error_output, file_codes)
+    if undefined_note:
+        # Canlı test 2026-09-29 (tarihe_gore_ayir): "Hata: name 'src' is not
+        # defined" yakalanıp yazdırıldığı için traceback yoktu; model 5 tur
+        # yalnız main.py'yi düzeltti. Adın geçtiği dosyalar da düzeltilir.
+        for fp in undefined_note[1]:
+            if fp not in files_to_fix:
+                files_to_fix.append(fp)
+        error_output = error_output + "\n\n" + undefined_note[0]
+
     if repeat_of_previous:
         # Canlı test 2026-09-29 (js_kazima): hata main.py:29'da görünüyordu ama
         # traceback'in en derin proje dosyası helpers.py olduğu için 4 tur
@@ -2975,6 +3019,8 @@ def _build_project(
     acc_last: tuple[str, int] | None = None   # (son kabul hatası, o anki kodun imzası)
     acc_judged = False
     acceptance_disputed = ""
+    soft_quality_rounds = 0
+    quality_warnings = ""
     if acceptance_spec:
         from jarvis.actions.devkit.acceptance import contract_text
         shared_contracts_text = (shared_contracts_text + "\n- " + contract_text(acceptance_spec)).strip()
@@ -3336,6 +3382,16 @@ def _build_project(
                 quality.setdefault(entry_point, []).extend(
                     {"code": "OUTPUT-HEADER-ONLY", "message": p, "line": 0, "col": 0} for p in header_problems
                 )
+            if quality and all(i["code"] in SOFT_QUALITY_CODES for iss in quality.values() for i in iss):
+                # Canlı test 2026-09-29 (kitap_raporu): çıktısı doğru program yalnızca
+                # "kullanılmayan fonksiyon" yüzünden 3 tur reddedildi. Tek başına
+                # bu bulgu bir tur düzeltme hakkı alır; sonra uyarıya dönüşür.
+                soft_quality_rounds += 1
+                if soft_quality_rounds > SOFT_QUALITY_ROUNDS:
+                    quality_warnings = "; ".join(
+                        f"{fp}: " + ", ".join(i["code"] for i in iss) for fp, iss in quality.items())
+                    log(f"ℹ️ Yalnızca küçük kod bulguları kaldı ({quality_warnings}); başarıyı engellemiyor.")
+                    quality = {}
             if quality:
                 summary = "; ".join(
                     f"{fp}: " + ", ".join(i["code"] for i in iss) for fp, iss in quality.items()
@@ -3461,6 +3517,8 @@ def _build_project(
                     f" Verified outputs: {', '.join(str(o.get('path', o)) if isinstance(o, dict) else str(o) for o in expected_outputs)}."
                     if expected_outputs else ""
                 )
+                if quality_warnings:
+                    verified_note += f" Küçük kod uyarıları (engel değil): {quality_warnings}."
                 if acceptance_disputed:
                     verified_note += (" Not: örnek girdideki otomatik beklenti hatalı çıktı ve devre dışı bırakıldı "
                                       f"({acceptance_disputed[:160]}) — sonucu bir kez kontrol edin.")

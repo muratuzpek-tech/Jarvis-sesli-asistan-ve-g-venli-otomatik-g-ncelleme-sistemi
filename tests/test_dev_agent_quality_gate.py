@@ -335,3 +335,20 @@ def test_judge_is_not_asked_when_code_did_not_change(env, monkeypatch):
     result = da._build_project("kelime sayici", "python", "", 10, player=None, speak=None)
     assert "is working" not in result
     assert not [p for p in model.prompts if p.startswith("A program was tested")]
+
+
+UNUSED_STORE = REAL_STORE + '''
+
+def export_all() -> str:
+    """Hiç çağrılmayan yardımcı."""
+    return "\\n".join(load_notes())
+'''
+
+
+def test_unused_definition_alone_blocks_only_one_round(env, monkeypatch):
+    """Canlı test 2026-09-29 (kitap_raporu): doğru program yalnız kullanılmayan fonksiyon yüzünden reddedildi."""
+    model = FakeModel([UNUSED_STORE])
+    monkeypatch.setattr(da, "_get_model", lambda name: model)
+    result = da._build_project("not uygulamasi", "python", "", 10, player=None, speak=None)
+    assert "is working" in result and "UNUSED-DEFINITION" in result, result
+    assert "Built in 2 attempts" in result, result

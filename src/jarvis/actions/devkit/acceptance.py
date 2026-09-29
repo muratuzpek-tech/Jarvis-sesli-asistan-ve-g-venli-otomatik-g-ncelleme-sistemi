@@ -79,6 +79,10 @@ If not applicable return {{"applicable": false, "reason": "..."}}.
 JSON:"""
 
 
+BINARY_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".pdf", ".zip", ".gz",
+                             ".db", ".sqlite", ".sqlite3", ".xlsx", ".xls", ".docx", ".pptx", ".mp3", ".wav"})
+
+
 def build_prompt(description: str, plan: dict) -> str:
     outs = [o.get("path") if isinstance(o, dict) else str(o) for o in plan.get("expected_outputs", []) or []]
     return PROMPT.format(description=description, entry=plan.get("entry_point", "main.py"),
@@ -90,18 +94,36 @@ def _safe_rel(path: str) -> bool:
     return bool(str(path).strip()) and not p.is_absolute() and ".." not in p.parts and "\x00" not in str(path)
 
 
-def parse_spec(raw_text: str) -> dict | None:
-    text = (raw_text or "").strip()
-    m = re.search(r"```(?:json)?\s*\n(.*?)\n?```", text, re.DOTALL)
-    if m:
-        text = m.group(1)
+def _loads_lenient(text: str) -> object:
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
         return None
-    try:
-        return json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        return None
+    body = text[start:end + 1]
+    # strict=False: modelin örnek dosya içeriğine koyduğu ham satır sonları
+    # JSON'u geçersiz kılıyordu ("spesifikasyon JSON nesnesi değil",
+    # canlı test 2026-09-29); ikinci deneme sondaki fazladan virgülleri siler.
+    for candidate in (body, re.sub(r",\s*([}\]])", r"\1", body)):
+        try:
+            return json.loads(candidate, strict=False)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def parse_spec(raw_text: str) -> dict | None:
+    text = (raw_text or "").strip()
+    # Önce kod çiti içindeki JSON, olmazsa tüm metin: örnek dosya içeriği
+    # kendisi ``` içerebilir (Markdown görevleri) ve çit eşleşmesini bozar.
+    candidates = []
+    m = re.search(r"```(?:json)?\s*\n(.*?)\n?```", text, re.DOTALL)
+    if m:
+        candidates.append(m.group(1))
+    candidates.append(text)
+    for c in candidates:
+        data = _loads_lenient(c)
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 def validate_spec(spec: object) -> tuple[dict | None, str]:
@@ -267,6 +289,12 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
                     )
                 else:
                     problems.append(f"'{ex['output']}' kabul testinde oluşturulmadı (çalışma klasörüne yazılmalı).")
+                continue
+            elif path.suffix.lower() in BINARY_SUFFIXES:
+                # Resim/zip/veritabanı içinde metin aranamaz (canlı test 2026-09-29:
+                # hata_grafigi.png içinde sayı bekleniyordu): boş olmaması yeter.
+                if path.stat().st_size == 0:
+                    problems.append(f"'{ex['output']}' oluştu ama boş (0 bayt).")
                 continue
             else:
                 text, label = path.read_text(encoding="utf-8", errors="replace"), f"'{ex['output']}'"

@@ -252,3 +252,20 @@ def test_token_that_is_the_output_path_itself_is_satisfied(tmp_path):
     spec, _ = validate_spec({**TREE_SPEC, "expect": [{"output": "sorted/2024-01/a.jpg", "contains": ["a.jpg"]}]})
     (tmp_path / "main.py").write_text(TREE_PROGRAM.replace("{root}", "sorted"))
     assert run_acceptance(tmp_path, "main.py", spec)[0] == []
+
+
+def test_spec_with_raw_newlines_in_fixture_content_is_parsed():
+    """Canlı test 2026-09-29: 'spesifikasyon JSON nesnesi değil' — içerikte ham satır sonu vardı."""
+    raw = '{"applicable": true, "fixtures": [{"path": "a.md", "content": "# Baslik\n```\n# kod\n```\n"}],' \
+          ' "args": ["{FIXTURE}/a.md"], "expect": [{"output": "STDOUT", "contains": ["Baslik"]},],}'
+    spec = parse_spec(raw)
+    assert spec and "```" in spec["fixtures"][0]["content"]
+    assert validate_spec(spec)[0] is not None
+
+
+def test_binary_output_only_needs_to_exist(tmp_path):
+    spec, _ = validate_spec({**TREE_SPEC, "expect": [{"output": "chart.png", "contains": ["13,1"]}]})
+    (tmp_path / "main.py").write_text("open('chart.png', 'wb').write(b'\\x89PNG' + bytes(100))")
+    assert run_acceptance(tmp_path, "main.py", spec)[0] == []
+    (tmp_path / "main.py").write_text("open('chart.png', 'wb').close()")
+    assert "boş" in run_acceptance(tmp_path, "main.py", spec)[0][0]
