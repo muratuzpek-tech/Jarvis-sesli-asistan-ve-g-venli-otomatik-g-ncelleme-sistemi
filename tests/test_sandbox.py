@@ -188,3 +188,21 @@ def test_go_binary_runs_in_sandbox(tmp_path, monkeypatch):
     tc.project_dir = tmp_path
     r = tc.run_binary([], 30)
     assert "sizmasin-go" not in r.output and "JARVIS_IN_SANDBOX=1" in r.output, r.output
+
+
+def test_interpreter_symlink_chain_roots_are_bound(tmp_path, monkeypatch):
+    """murat@goxs 2026-09-29: uv '.venv/bin/python → …/cpython-3.12-linux…(takma ad)/bin/python3.12'
+    zincirindeki takma ad kafese bağlanmadığı için 'execvp: No such file' alındı."""
+    real = tmp_path / "uv" / "cpython-3.12.14"
+    (real / "bin").mkdir(parents=True)
+    (real / "bin" / "python3.12").write_text("")
+    alias = tmp_path / "uv" / "cpython-3.12"
+    alias.symlink_to(real)
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(alias / "bin" / "python3.12")
+    monkeypatch.setattr(sandbox.sys, "executable", str(venv / "bin" / "python"))
+    monkeypatch.setattr(sandbox.sys, "prefix", str(venv))
+    monkeypatch.setattr(sandbox.sys, "base_prefix", str(real))
+    roots = {str(p) for p in sandbox._python_runtime_paths()}
+    assert {str(venv), str(alias), str(real)} <= roots

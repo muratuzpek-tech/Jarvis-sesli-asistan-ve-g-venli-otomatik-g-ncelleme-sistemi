@@ -61,11 +61,15 @@ def sandbox_works() -> tuple[bool, str]:
     if not bw:
         return False, ("bubblewrap kurulu değil (Linux'ta: sudo apt install bubblewrap)"
                        if sys.platform.startswith("linux") else "bubblewrap yalnızca Linux'ta var")
-    probe = [bw, *_base_args(network=False), "--", "/bin/true"]
-    try:
-        r = subprocess.run(probe, capture_output=True, text=True, timeout=15, check=False)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return False, f"bubblewrap çalıştırılamadı: {e}"
+    # Deneme, gerçek görevdeki gibi AYNI Python yorumlayıcısıyla yapılır: yalnız
+    # /bin/true denemek, yorumlayıcının kafeste bulunamadığı durumu gizliyordu.
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="jarvis_kafes_") as d:
+        probe, env = build([sys.executable, "-c", "import json, ssl, sqlite3"], Path(d), network=False)
+        try:
+            r = subprocess.run(probe, env=env, capture_output=True, text=True, timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, f"bubblewrap çalıştırılamadı: {e}"
     if r.returncode != 0:
         return False, f"bubblewrap kafes kuramadı: {(r.stderr or r.stdout).strip()[:300]}"
     return True, "bubblewrap"
@@ -95,9 +99,31 @@ def _ro(src: Path, dest: str) -> list[str]:
     return ["--ro-bind", str(src), dest]
 
 
+def _symlink_hops(path: str, limit: int = 20) -> list[Path]:
+    """Yolun kendisi ve izlediği her sembolik bağlantı adımı (ör. uv'nin
+    '.venv/bin/python → …/cpython-3.12-linux…/bin/python3.12' takma adı →
+    '…/cpython-3.12.14…'). Kafeste her adımın yolu var olmalı; yoksa
+    'execvp: No such file or directory' (canlı test 2026-09-29, murat@goxs)."""
+    hops, p = [], Path(path)
+    for _ in range(limit):
+        hops.append(p)
+        if not p.is_symlink():
+            break
+        target = Path(os.readlink(p))
+        p = target if target.is_absolute() else p.parent / target
+    return hops
+
+
 def _python_runtime_paths() -> list[Path]:
-    """Kafesin içinde aynı Python'un (ve kurulu paketlerin) çalışması için."""
-    paths = {Path(sys.prefix), Path(sys.base_prefix), Path(os.path.realpath(sys.executable)).parent.parent}
+    """Kafesin içinde aynı Python'un (ve kurulu paketlerin) çalışması için:
+    sanal ortam, temel kurulum ve yorumlayıcıya giden her bağlantı adımının
+    kurulum kökü (bin/'in bir üstü) — takma adlar dahil."""
+    paths = {Path(sys.prefix), Path(sys.base_prefix)}
+    for hop in _symlink_hops(sys.executable):
+        paths.add(hop.parent.parent)
+        # Kökün kendisi de bir takma ad olabilir (uv: cpython-3.12-… → cpython-3.12.14-…).
+        for root_hop in _symlink_hops(str(hop.parent.parent)):
+            paths.add(root_hop)
     return sorted(p for p in paths if p.exists() and not str(p).startswith("/usr"))
 
 
@@ -133,7 +159,7 @@ def build(argv: list[str], project_dir: Path, *, network: bool = True, gui: bool
     project = str(project_dir)
     args = [bw, *_base_args(network)]
     for p in _python_runtime_paths():
-        args += _ro(p, str(p))
+        args += _ro(Path(os.path.realpath(p)), str(p))
     browsers = _playwright_browsers()
     if browsers:
         args += _ro(Path(os.path.realpath(browsers)), str(browsers))
