@@ -134,6 +134,37 @@ def _ollama_options() -> dict:
     return {"num_ctx": int(_num("JARVIS_OLLAMA_CTX", 8192)), "temperature": _num("JARVIS_OLLAMA_TEMP", 0.2)}
 
 
+_REMOTE_STATE: dict = {"checked_at": -1e9, "result": None}
+
+
+def _remote_ollama() -> "tuple[str, str] | None":
+    """Kiralık GPU sunucusu (Murat'ın kararı 2026-09-29: saatlik kiralama).
+    JARVIS_REMOTE_OLLAMA_URL (ör. SSH tüneli: http://localhost:11435) ayarlıysa
+    ve sunucu cevap verip model yüklüyse (url, model) döner; değilse None →
+    yerel model. Sunucu kapatılınca JARVIS kendiliğinden yerel modele döner.
+    Sonuç 60 sn önbelleklenir (her dosya yazımında yeniden sorulmaz)."""
+    url = os.environ.get("JARVIS_REMOTE_OLLAMA_URL", "").strip().rstrip("/")
+    if not url:
+        return None
+    now = time.monotonic()
+    if now - _REMOTE_STATE["checked_at"] < 60:
+        return _REMOTE_STATE["result"]
+    model = os.environ.get("JARVIS_REMOTE_MODEL", "").strip() or "devstral:24b"
+    result = None
+    try:
+        import requests as _requests
+        tags = _requests.get(f"{url}/api/tags", timeout=3).json()
+        names = {m.get("name", "") for m in tags.get("models", [])}
+        if model in names or f"{model}:latest" in names:
+            result = (url, model)
+        else:
+            print(f"[DevAgent] ⚠️ Kiralık sunucuda '{model}' yüklü değil; yerel model kullanılıyor.")
+    except Exception:  # noqa: BLE001
+        print("[DevAgent] ℹ️ Kiralık sunucuya ulaşılamadı (kapalı ya da tünel yok); yerel model kullanılıyor.")
+    _REMOTE_STATE.update(checked_at=now, result=result)
+    return result
+
+
 def _get_model(model_name: str, prefer: str = ""):
     """Once yerel Ollama'yi (qwen2.5-coder) dener - Google Gemini kesintilerinde
     bile calisir. Ollama kapaliysa/kurulu degilse otomatik olarak Gemini'ye
@@ -145,6 +176,9 @@ def _get_model(model_name: str, prefer: str = ""):
     # birakti (todo_app, CodeReviewProgram). Varsayilan 14b; kurulu degilse
     # 7b'ye duser. JARVIS_DEVAGENT_MODEL ile degistirilebilir.
     OLLAMA_MODEL = os.environ.get("JARVIS_DEVAGENT_MODEL", "").strip() or "qwen2.5-coder:14b"
+    remote = _remote_ollama()
+    if remote and not (prefer or "").strip():
+        OLLAMA_URL, OLLAMA_MODEL = f"{remote[0]}/api/generate", remote[1]
 
     class _OllamaResponse:
         def __init__(self, text):
@@ -170,6 +204,9 @@ def _get_model(model_name: str, prefer: str = ""):
     try:
         if prefer_gemini:
             raise RuntimeError("Gemini tercih edildi")
+        if remote and OLLAMA_URL.startswith(remote[0]):
+            print(f"[DevAgent] ☁️ Kiralık sunucu kullanılıyor: {OLLAMA_MODEL}")
+            return _OllamaWrapper()
         tags = _requests.get("http://localhost:11434/api/tags", timeout=5).json()
         installed = {m.get("name", "") for m in tags.get("models", [])}
         if OLLAMA_MODEL not in installed and "qwen2.5-coder:7b" in installed and not os.environ.get("JARVIS_DEVAGENT_MODEL"):
