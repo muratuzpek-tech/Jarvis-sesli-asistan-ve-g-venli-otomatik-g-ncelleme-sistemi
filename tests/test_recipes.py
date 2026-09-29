@@ -62,16 +62,16 @@ def _run(code: str, tmp_path, *args):
 
 
 def test_csv_and_folder_and_general_recipes_really_work(tmp_path):
-    (tmp_path / "s.csv").write_text("urun,adet,birim_fiyat\nkalem,2,10\ndefter,1,25\nkalem,3,10\n")
+    (tmp_path / "s.csv").write_text("city,temperature\nAnkara,10\nIzmir,20\nAnkara,14\n")
     assert _run(r.CSV_AGGREGATE, tmp_path, "s.csv").returncode == 0
-    assert json.loads((tmp_path / "ozet.json").read_text()) == {"kalem": 50.0, "defter": 25.0}
+    assert json.loads((tmp_path / "averages.json").read_text()) == {"Ankara": 12.0, "Izmir": 20.0}
     (tmp_path / "m").mkdir()
-    (tmp_path / "m" / "a.txt").write_text("elma armut elma")
-    (tmp_path / "m" / "b.txt").write_text("elma")
+    (tmp_path / "m" / "a.bin").write_bytes(b"x" * 100)
+    (tmp_path / "m" / "b.bin").write_bytes(b"x" * 10)
     assert _run(r.FOLDER_WALK, tmp_path, "m").returncode == 0
-    assert (tmp_path / "report.txt").read_text().splitlines()[0] == "elma: 3"
+    assert (tmp_path / "sizes.txt").read_text().splitlines()[0] == "a.bin: 100 bytes"
     assert _run(r.GENERAL_IO, tmp_path, "s.csv").returncode == 0
-    assert (tmp_path / "report.txt").read_text() == "satir: 4\n"
+    assert (tmp_path / "result.txt").read_text() == "satir: 4\n"
     assert _run(r.GENERAL_IO, tmp_path).returncode != 0  # girdi yoksa açıkça çıkmalı
 
 
@@ -96,7 +96,7 @@ def test_recipes_reach_writer_prompt(monkeypatch, tmp_path):
     da._write_file(file_info={"path": "main.py", "description": "entry", "imports": []},
                    project_description="https://quotes.toscrape.com/scroll kaydırarak 20 alıntı topla",
                    all_files=[{"path": "main.py"}], language="python", project_dir=tmp_path, already_written={})
-    assert "PROVEN PATTERNS" in seen[0] and "sync_playwright" in seen[0] and "max_scrolls" in seen[0]
+    assert "PROVEN PATTERNS" in seen[0] and "sync_playwright" in seen[0] and "max_rounds" in seen[0]
 
 
 def test_extra_stdlib_recipes_really_work(tmp_path):
@@ -130,3 +130,22 @@ def test_extra_stdlib_recipes_really_work(tmp_path):
 def test_working_folder_phrase_does_not_trigger_folder_scan(desc, folder):
     """PR #20 kod incelemesi: 'çalışma klasöründeki' hemen her görevde geçiyordu."""
     assert ("folder_walk" in [n for n, _ in r.select_recipes(desc)]) is folder
+
+
+def test_templates_do_not_contain_test_answers():
+    """Kopya kağıdı yasak: şablonlar YÖNTEM öğretir, canlı test görevlerinin
+    cevabını (çıktı dosya adları, site seçicileri, sütun adları) içermez.
+    (2026-09-29: ilk şablonlar sabit görevlerin cevabını içeriyordu; 5/5 kısmen şişikti.)"""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "scripts"
+    tasks = "\n".join((root / f).read_text(encoding="utf-8")
+                      for f in ("canli_test.py", "canli_test_surpriz.py", "canli_test_karmasik.py"))
+    forbidden = set(re.findall(r"\b[\w-]+\.(?:json|csv|txt|log|html|md|db|png|zip)\b", tasks))
+    forbidden |= {"div.quote", "span.text", "small.author", "birim_fiyat", "urun", "musteri_id", "quotes.toscrape",
+                  "books.toscrape", "product_pod", "price_color"}
+    forbidden -= {"main.py"}
+    templates = "\n".join(getattr(r, n) for n in ALL) + "\n".join(getattr(x, n) for n in EXTRA)
+    leaks = sorted(t for t in forbidden if re.search(rf"(?<![\w.-]){re.escape(t)}(?![\w-])", templates))
+    assert not leaks, f"Şablonlarda test cevabı var: {leaks}"

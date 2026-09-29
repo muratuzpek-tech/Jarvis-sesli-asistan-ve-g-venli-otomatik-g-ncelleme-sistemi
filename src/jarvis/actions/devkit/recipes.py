@@ -29,8 +29,8 @@ def main() -> None:
     if len(sys.argv) < 2:
         sys.exit("Kullanım: python main.py <girdi_dosyası>")   # girdi yoksa açıkça çık
     result = process(Path(sys.argv[1]))
-    Path("report.txt").write_text(result, encoding="utf-8")   # ASLA Path(__file__).parent / ...
-    print(f"Wrote report.txt ({len(result)} chars)")
+    Path("result.txt").write_text(result, encoding="utf-8")   # ASLA Path(__file__).parent / ...
+    print(f"Wrote result.txt ({len(result)} chars)")
 
 if __name__ == "__main__":
     main()
@@ -38,35 +38,39 @@ if __name__ == "__main__":
 
 PLAYWRIGHT_SCROLL = '''
 # JAVASCRIPT / SONSUZ KAYDIRMA KALIBI — Playwright (Selenium DEĞİL), SERT DURDURMA ile
+# (Örnek konu: bir ürün listesi. Seçicileri ve alanları GÖREVİN sayfasına göre değiştir.)
 import json, sys
 from playwright.sync_api import sync_playwright
 
-def scrape(url: str, target: int = 20, max_scrolls: int = 40) -> list[dict]:
+ITEM, NAME, PRICE = "li.product", ".product-name", ".product-price"   # ← sayfaya göre değiştir
+
+def collect(url: str, target: int, max_rounds: int = 40) -> list[dict]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         page.goto(url, timeout=30_000)
-        page.wait_for_selector("div.quote", timeout=10_000)       # seçiciyi gerçek sayfaya göre seç
-        for _ in range(max_scrolls):                               # döngü HER ZAMAN sınırlı
-            if page.locator("div.quote").count() >= target:        # yeterince öğe → dur
+        page.wait_for_selector(ITEM, timeout=10_000)
+        for _ in range(max_rounds):                               # döngü HER ZAMAN sınırlı
+            if page.locator(ITEM).count() >= target:              # yeterince öğe → dur
                 break
-            page.mouse.wheel(0, 20_000)
+            page.mouse.wheel(0, 20_000)                            # ya da: "daha fazla" düğmesine tıkla
             page.wait_for_timeout(800)
-        items = [{"id": i, "text": q.locator("span.text").inner_text(),
-                  "author": q.locator("small.author").inner_text()}
-                 for i, q in enumerate(page.locator("div.quote").all()[:target], 1)]
+        rows = [{"name": el.locator(NAME).inner_text().strip(),
+                 "price": el.locator(PRICE).inner_text().strip()}
+                for el in page.locator(ITEM).all()[:target]]
         browser.close()
-    return items
+    return rows
 
 if __name__ == "__main__":
-    data = scrape(sys.argv[1])
-    with open("quotes.json", "w", encoding="utf-8") as fh:     # göreli yol
+    data = collect(sys.argv[1], target=int(sys.argv[2]) if len(sys.argv) > 2 else 50)
+    with open("products.json", "w", encoding="utf-8") as fh:        # göreli yol, görevin istediği ad
         json.dump(data, fh, ensure_ascii=False, indent=2)
-    print(f"Saved {len(data)} items")                           # GERÇEK veri; asla örnek/uydurma veri yazma
+    print(f"Saved {len(data)} items")                               # GERÇEK veri; asla örnek/uydurma veri
 '''
 
 REQUESTS_BS4 = '''
 # DÜZ SAYFA KAZIMA KALIBI — requests + BeautifulSoup (JavaScript gerekmiyorsa)
+# (Örnek konu: bir haber listesi. Seçicileri ve sütunları GÖREVİN sayfasına göre değiştir.)
 import csv, sys
 import requests
 from bs4 import BeautifulSoup
@@ -75,56 +79,60 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chr
 
 def fetch(url: str) -> BeautifulSoup:
     resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()                                   # hatayı yutma, görünür olsun
+    resp.raise_for_status()                                       # hatayı yutma, görünür olsun
     return BeautifulSoup(resp.text, "html.parser")
 
 if __name__ == "__main__":
     soup = fetch(sys.argv[1])
-    rows = [(q.select_one(".text").get_text(strip=True), q.select_one(".author").get_text(strip=True))
-            for q in soup.select("div.quote")]                  # seçiciyi gerçek sayfaya göre seç
+    rows = []
+    for card in soup.select("div.news-card"):                     # ← sayfaya göre değiştir
+        link = card.select_one("a")
+        # Görünen metin kısaltılmış olabilir ("..."): tam değer genellikle title= özniteliğindedir
+        title = link.get("title") or link.get_text(strip=True)
+        rows.append((title, card.select_one("time").get_text(strip=True)))
     if not rows:
-        sys.exit("Sayfada öğe bulunamadı — seçici yanlış olabilir")   # sessizce boş dosya yazma
-    with open("quotes.csv", "w", newline="", encoding="utf-8") as fh:
+        sys.exit("No items found - selector may be wrong")        # sessizce boş dosya yazma
+    with open("news.csv", "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["text", "author"])
+        writer.writerow(["title", "date"])
         writer.writerows(rows)
 '''
 
 CSV_AGGREGATE = '''
-# CSV TOPLAMA KALIBI — DictReader + sayıya çevirme + gruplama
+# CSV GRUPLAMA KALIBI — DictReader + sayıya çevirme + gruplama
+# (Örnek konu: şehir bazında ortalama sıcaklık. Sütun adlarını GÖREVİN dosyasına göre değiştir.)
 import csv, json, sys
 from collections import defaultdict
 
-def totals(path: str) -> dict[str, float]:
-    out: dict[str, float] = defaultdict(float)
+def group_average(path: str, key_col: str, value_col: str) -> dict[str, float]:
+    sums: dict[str, float] = defaultdict(float)
+    counts: dict[str, int] = defaultdict(int)
     with open(path, newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh):                        # sütun adlarıyla eriş (row["urun"])
-            out[row["urun"]] += float(row["adet"]) * float(row["birim_fiyat"])
-    return dict(out)
+        for row in csv.DictReader(fh):                            # sütun adlarıyla eriş
+            sums[row[key_col]] += float(row[value_col])
+            counts[row[key_col]] += 1
+    return {k: round(sums[k] / counts[k], 2) for k in sums}
 
 if __name__ == "__main__":
-    with open("ozet.json", "w", encoding="utf-8") as fh:
-        json.dump(totals(sys.argv[1]), fh, ensure_ascii=False, indent=2)
+    result = group_average(sys.argv[1], "city", "temperature")
+    with open("averages.json", "w", encoding="utf-8") as fh:
+        json.dump(result, fh, ensure_ascii=False, indent=2)
 '''
 
 FOLDER_WALK = '''
 # KLASÖR TARAMA KALIBI — alt klasörler dahil, yalnızca dosyalar
+# (Örnek konu: en büyük dosyaları bulmak. İşlemi GÖREVE göre değiştir.)
 import sys
-from collections import Counter
 from pathlib import Path
 
-def scan(root: Path) -> Counter:
-    counts: Counter = Counter()
-    for p in root.rglob("*"):
-        if p.is_file():
-            text = p.read_text(encoding="utf-8", errors="replace")
-            counts.update(w.lower() for w in text.split())
-    return counts
+def largest_files(root: Path, top: int = 10) -> list[tuple[str, int]]:
+    files = [(str(p.relative_to(root)), p.stat().st_size) for p in root.rglob("*") if p.is_file()]
+    return sorted(files, key=lambda x: x[1], reverse=True)[:top]
 
 if __name__ == "__main__":
-    counts = scan(Path(sys.argv[1]))
-    lines = [f"{word}: {n}" for word, n in counts.most_common(10)]   # gerçek değerler, şablon metin değil
-    Path("report.txt").write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+    rows = largest_files(Path(sys.argv[1]))                        # girdi klasörü komut satırından
+    lines = [f"{name}: {size} bytes" for name, size in rows]       # gerçek değerler, şablon metin değil
+    Path("sizes.txt").write_text("\\n".join(lines) + "\\n", encoding="utf-8")
 '''
 
 SQLITE_STORE = '''

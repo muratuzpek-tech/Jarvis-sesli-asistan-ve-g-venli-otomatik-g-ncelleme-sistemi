@@ -288,3 +288,80 @@ def test_hanging_batch_program_gets_hard_stop_hint(env, monkeypatch):
     result = da._build_project("not raporu", "python", "", 1, player=None, speak=None)
     assert "is working" in result, result
     assert any("NEVER FINISHED" in p for p in prompts)
+
+
+class DisputeModel(AcceptanceModel):
+    """Beklentisi yanlış ('TOPLAM 5' istenmemişti) bir kabul testi + hakem."""
+
+    def __init__(self, versions, verdict, values=("elma: 3", "kiraz: 1")):
+        super().__init__(versions)
+        self.verdict = verdict
+        self.values = list(values)
+
+    def generate_content(self, prompt):
+        class R:
+            pass
+
+        if prompt.startswith("You design an ACCEPTANCE TEST"):
+            self.prompts.append(prompt)
+            r = R()
+            r.text = json.dumps({**WC_SPEC, "expect": [{"output": "report.txt", "contains": ["elma: 3", "TOPLAM 5"]}]})
+            return r
+        if prompt.startswith("A program was tested on a small sample input"):
+            self.prompts.append(prompt)
+            r = R()
+            r.text = json.dumps({"correct": self.verdict, "reason": "elma 3 kez geçiyor; TOPLAM görevde yok",
+                                 "correct_values": self.values})
+            return r
+        return super().generate_content(prompt)
+
+
+@pytest.mark.parametrize("verdict,works", [("program", True), ("expectation", False)])
+def test_wrong_expectation_is_dropped_only_when_different_code_agrees(env, monkeypatch, verdict, works):
+    """Canlı test 2026-09-29 (hata_saatleri): beklenti yanlıştı, doğru program 5 tur reddedildi."""
+    monkeypatch.setattr(da, "_plan_project", lambda d, lang: dict(WC_PLAN))
+    model = DisputeModel([WC_REAL, WC_REAL + "\n# ikinci yazim\n", WC_REAL + "\n# ucuncu\n"], verdict)
+    monkeypatch.setattr(da, "_get_model", lambda name: model)
+    result = da._build_project("kelime sayici", "python", "", 10, player=None, speak=None)
+    judged = [p for p in model.prompts if p.startswith("A program was tested")]
+    assert len(judged) == 1 and "elma armut elma" in judged[0]
+    assert ("is working" in result) is works, result
+    if works:
+        assert "beklenti hatalı" in result
+
+
+def test_judge_is_asked_even_when_model_keeps_the_same_code(env, monkeypatch):
+    """Canlı test 2026-09-29 (2. tur): model kodu değiştirmeyince hakem hiç sorulmuyordu."""
+    monkeypatch.setattr(da, "_plan_project", lambda d, lang: dict(WC_PLAN))
+    model = DisputeModel([WC_REAL], "program")
+    monkeypatch.setattr(da, "_get_model", lambda name: model)
+    result = da._build_project("kelime sayici", "python", "", 10, player=None, speak=None)
+    assert "is working" in result and "beklenti hatalı" in result, result
+    assert len([p for p in model.prompts if p.startswith("A program was tested")]) == 1
+
+
+UNUSED_STORE = REAL_STORE + '''
+
+def export_all() -> str:
+    """Hiç çağrılmayan yardımcı."""
+    return "\\n".join(load_notes())
+'''
+
+
+def test_unused_definition_alone_blocks_only_one_round(env, monkeypatch):
+    """Canlı test 2026-09-29 (kitap_raporu): doğru program yalnız kullanılmayan fonksiyon yüzünden reddedildi."""
+    model = FakeModel([UNUSED_STORE])
+    monkeypatch.setattr(da, "_get_model", lambda name: model)
+    result = da._build_project("not uygulamasi", "python", "", 10, player=None, speak=None)
+    assert "is working" in result and "UNUSED-DEFINITION" in result, result
+    assert "Built in 2 attempts" in result, result
+
+
+def test_judge_that_contradicts_the_program_output_is_ignored(env, monkeypatch):
+    """Canlı test 2026-09-29 (3. tur): hakem 'hello: 6 doğru' deyip 'hello: 3' yazan
+    hatalı programı onayladı → YALANCI BAŞARI. Hakemin değerleri çıktıda yoksa karar geçersiz."""
+    monkeypatch.setattr(da, "_plan_project", lambda d, lang: dict(WC_PLAN))
+    model = DisputeModel([WC_REAL], "program", values=("elma: 4", "kiraz: 1"))
+    monkeypatch.setattr(da, "_get_model", lambda name: model)
+    result = da._build_project("kelime sayici", "python", "", 10, player=None, speak=None)
+    assert "is working" not in result, result

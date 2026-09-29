@@ -178,3 +178,124 @@ def test_bare_html_tag_token_accepts_attributes():
     assert _token_found("<TABLE>", "<table\n class=x>")
     assert not _token_found("<table>", "<tablet>")
     assert not _token_found("<table>", "tablo yok")
+
+
+def test_fixture_mtime_is_applied(tmp_path):
+    spec, why = validate_spec({
+        "applicable": True,
+        "fixtures": [{"path": "foto/a.jpg", "content": "x", "mtime": "2024-01-15"}],
+        "args": ["{FIXTURE}/foto"],
+        "expect": [{"output": "STDOUT", "contains": ["2024-01"]}],
+    })
+    assert spec, why
+    (tmp_path / "main.py").write_text(
+        "import sys, datetime, pathlib\n"
+        "for p in pathlib.Path(sys.argv[1]).iterdir():\n"
+        "    print(datetime.datetime.fromtimestamp(p.stat().st_mtime).strftime('%Y-%m'))\n")
+    assert run_acceptance(tmp_path, "main.py", spec)[0] == []
+    assert validate_spec({**spec, "applicable": True,
+                          "fixtures": [{"path": "a", "content": "", "mtime": "dün"}]})[0] is None
+
+
+# Dış analiz raporu (2026-09-29): klasör ağacı üreten doğru program
+# "oluşturulmadı" diye reddediliyordu.
+TREE_SPEC = {
+    "applicable": True,
+    "fixtures": [{"path": "foto/a.jpg", "content": "x", "mtime": "2024-01-15"},
+                 {"path": "foto/c.jpg", "content": "y", "mtime": "2024-03-02"}],
+    "args": ["{FIXTURE}/foto"],
+    "expect": [{"output": "sorted", "contains": ["2024-01/a.jpg", "2024-03/c.jpg"]}],
+}
+TREE_PROGRAM = '''
+import shutil, sys, datetime
+from pathlib import Path
+for p in Path(sys.argv[1]).iterdir():
+    d = Path("{root}") / datetime.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m")
+    d.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(p, d / p.name)
+'''
+
+
+def test_folder_tree_output_is_accepted(tmp_path):
+    spec, why = validate_spec(TREE_SPEC)
+    assert spec, why
+    (tmp_path / "main.py").write_text(TREE_PROGRAM.replace("{root}", "sorted"))
+    assert run_acceptance(tmp_path, "main.py", spec)[0] == []
+
+
+def test_folder_tree_missing_file_is_rejected(tmp_path):
+    spec, _ = validate_spec(TREE_SPEC)
+    (tmp_path / "main.py").write_text(TREE_PROGRAM.replace("{root}", "sorted").replace(
+        "for p in Path(sys.argv[1]).iterdir():", "for p in sorted(Path(sys.argv[1]).iterdir())[:1]:"))
+    problems, _ = run_acceptance(tmp_path, "main.py", spec)
+    assert len(problems) == 1 and "2024-03/c.jpg" in problems[0]
+
+
+def test_empty_output_folder_is_rejected(tmp_path):
+    spec, _ = validate_spec(TREE_SPEC)
+    (tmp_path / "main.py").write_text("import os; os.makedirs('sorted')")
+    problems, _ = run_acceptance(tmp_path, "main.py", spec)
+    assert len(problems) == 1 and "hiç dosya yok" in problems[0]
+
+
+def test_folder_tree_written_next_to_script_is_detected(tmp_path):
+    """copy2 eski tarihi korusa bile (ctime) yanlış yere yazılan klasör bulunur."""
+    spec, _ = validate_spec(TREE_SPEC)
+    (tmp_path / "main.py").write_text(TREE_PROGRAM.replace('Path("{root}")', 'Path(__file__).parent / "sorted"'))
+    problems, _ = run_acceptance(tmp_path, "main.py", spec)
+    assert len(problems) == 1 and "kendi klasörüne" in problems[0]
+
+
+def test_token_that_is_the_output_path_itself_is_satisfied(tmp_path):
+    """Canlı test 2026-09-29: beklenti 'sirali/2024-01/a.jpg' içinde 'a.jpg' arıyordu;
+    kopyalanan resmin içeriğinde kendi adı geçmez, doğru program 3 tur reddedildi."""
+    spec, _ = validate_spec({**TREE_SPEC, "expect": [{"output": "sorted/2024-01/a.jpg", "contains": ["a.jpg"]}]})
+    (tmp_path / "main.py").write_text(TREE_PROGRAM.replace("{root}", "sorted"))
+    assert run_acceptance(tmp_path, "main.py", spec)[0] == []
+
+
+def test_spec_with_raw_newlines_in_fixture_content_is_parsed():
+    """Canlı test 2026-09-29: 'spesifikasyon JSON nesnesi değil' — içerikte ham satır sonu vardı."""
+    raw = '{"applicable": true, "fixtures": [{"path": "a.md", "content": "# Baslik\n```\n# kod\n```\n"}],' \
+          ' "args": ["{FIXTURE}/a.md"], "expect": [{"output": "STDOUT", "contains": ["Baslik"]},],}'
+    spec = parse_spec(raw)
+    assert spec and "```" in spec["fixtures"][0]["content"]
+    assert validate_spec(spec)[0] is not None
+
+
+def test_binary_output_only_needs_to_exist(tmp_path):
+    spec, _ = validate_spec({**TREE_SPEC, "expect": [{"output": "chart.png", "contains": ["13,1"]}]})
+    (tmp_path / "main.py").write_text("open('chart.png', 'wb').write(b'\\x89PNG' + bytes(100))")
+    assert run_acceptance(tmp_path, "main.py", spec)[0] == []
+    (tmp_path / "main.py").write_text("open('chart.png', 'wb').close()")
+    assert "boş" in run_acceptance(tmp_path, "main.py", spec)[0][0]
+
+
+def test_bare_small_numbers_are_dropped_from_expectations():
+    spec, _ = validate_spec({**SPEC, "expect": [{"output": "r.txt", "contains": ["7", "elma: 3"]}]})
+    assert spec["expect"][0]["contains"] == ["elma: 3"]
+    assert validate_spec({**SPEC, "expect": [{"output": "r.txt", "contains": ["1", "2", "2"]}]})[0] is None
+
+
+def test_dispute_consistency_check():
+    from jarvis.actions.devkit.acceptance import dispute_is_consistent
+    prog = '{\n  "satir": 3,\n  "kelime": 10\n}'
+    assert dispute_is_consistent(["satir: 3", "kelime: 10"], prog, ["kelime: 11"])[0]
+    assert not dispute_is_consistent(["hello: 6"], "hello: 3\nworld: 2", ["hello: 6"])[0]
+    assert not dispute_is_consistent([], prog, ["x"])[0]
+    assert not dispute_is_consistent(["satir: 3"], prog, ["satir: 3"])[0]
+
+
+def test_quote_space_and_float_differences_are_tolerated():
+    from jarvis.actions.devkit.acceptance import _token_found
+    low = '{\n    "satir": 3,\n    "kelime": 10,\n    "elma": 50.0\n}'
+    assert _token_found("satir: 3", low) and _token_found('"elma": 50', low)
+    assert not _token_found("satir: 4", low) and not _token_found("elma: 5", low)
+
+
+def test_list_of_objects_gets_shape_hint(tmp_path):
+    spec, _ = validate_spec({**TREE_SPEC, "expect": [{"output": "o.json", "contains": ['"elma": 50']}]})
+    (tmp_path / "main.py").write_text(
+        "import json; json.dump([{'urun': 'elma', 'toplam': 50.0}], open('o.json', 'w'))")
+    problems = run_acceptance(tmp_path, "main.py", spec)[0]
+    assert len(problems) == 1 and "nesne LİSTESİ" in problems[0]

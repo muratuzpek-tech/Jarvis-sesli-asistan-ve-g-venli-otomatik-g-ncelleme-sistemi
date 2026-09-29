@@ -191,10 +191,39 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+def _is_live_scrape(description: str) -> bool:
+    from jarvis.actions.devkit.task_intake import has_url, needs_browser_or_web
+    return has_url(description) and needs_browser_or_web(description)
+
+
+# Tek başına başarıyı süresiz engellememesi gereken kalite bulguları
+# (Go'daki LINT_BLOCKING_ROUNDS ile aynı fikir).
+SOFT_QUALITY_CODES = frozenset({"UNUSED-DEFINITION"})
+SOFT_QUALITY_ROUNDS = 1
+
+
+def _acceptance_expectation_wrong(description: str, spec: dict, problems: list[str], output: str,
+                                  program_text: str = "") -> tuple[bool, str]:
+    """Hakem: kabul testindeki beklenti mi yanlış, program mı? Her hatada ve
+    hakem kendi hesabıyla çelişkiliyse (False, ...) — şüphede program suçlu."""
+    try:
+        from jarvis.actions.devkit.acceptance import build_dispute_prompt, dispute_is_consistent, parse_dispute
+        response = _get_model(MODEL_PLANNER).generate_content(
+            build_dispute_prompt(description, spec, problems, output))
+        wrong, reason, values = parse_dispute(response.text)
+        if not wrong:
+            return False, reason
+        missing = [t for m in re.finditer(r"İÇERMİYOR: (\[.*?\])\.", "\n".join(problems))
+                   for t in re.findall(r"'([^']*)'", m.group(1))]
+        ok, why = dispute_is_consistent(values, program_text or output, missing)
+        return (True, reason) if ok else (False, f"hakem kararı reddedildi: {why}")
+    except Exception as e:  # noqa: BLE001
+        return False, f"hakem çalışmadı: {type(e).__name__}"
+
+
 def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
     """Kabul testi spesifikasyonu ister; her hatada None (build engellenmez)."""
-    from jarvis.actions.devkit.task_intake import has_url, needs_browser_or_web
-    if has_url(description) and needs_browser_or_web(description):
+    if _is_live_scrape(description):
         # Canlı test 2026-09-28: model gerçek siteye benzemeyen bir örnek sayfa
         # uydurdu; gerçek sitede DOĞRU çalışan program bu sayfada reddedildi.
         # Gerçek URL'li kazıma görevlerinde doğrulama gerçek çalıştırmanın
@@ -225,6 +254,25 @@ _SELENIUM_HINT = (
     "page.mouse.wheel(0, 10000) / page.click(...) in a loop until enough items are loaded; "
     "html = page.content(). Remove every selenium import."
 )
+
+
+_STRPTIME_MISMATCH = re.compile(r"time data '([^']*)' does not match format '([^']*)'")
+
+
+def _known_error_hint(output: str) -> str:
+    """Sık görülen, modelin tekrar tekrar göremediği hatalar için kesin ipucu."""
+    m = _STRPTIME_MISMATCH.search(output or "")
+    if m:
+        # Canlı test 2026-09-29 (hata_saatleri): satır boşluktan bölünüp YALNIZ
+        # tarih parçası tam biçimle çözülmeye çalışıldı; 5 tur aynı hata.
+        return (
+            f"\n\nROOT CAUSE: datetime.strptime received the text {m.group(1)!r} but the format "
+            f"{m.group(2)!r} expects more (or different) parts. The string you pass must contain EXACTLY what "
+            f"the format describes. If the line looks like 'YYYY-MM-DD HH:MM:SS LEVEL msg', split once more "
+            f"(parts = line.split(maxsplit=3); stamp = parts[0] + ' ' + parts[1]) or use line[:19] — or "
+            f"simply read the hour as int(parts[1][:2]). Do not swallow this error with try/except."
+        )
+    return ""
 
 
 def _bare_filename_hint(output: str, run_command: str) -> str:
@@ -308,6 +356,45 @@ def _parse_traceback(output: str, project_files: list[str]) -> tuple[str | None,
                 return pf, int(line_str)
 
     return None, None
+
+
+def _undefined_name_note(output: str, file_codes: dict[str, str]) -> tuple[str, list[str]] | None:
+    """'name X is not defined' hatasında X'in kullanıldığı yerleri bulur."""
+    import ast as _ast
+    names = sorted(set(re.findall(r"name '(\w+)' is not defined", output or "")))
+    if not names:
+        return None
+    lines, files = [], []
+    for name in names[:3]:
+        for fp, code in file_codes.items():
+            if not fp.endswith(".py"):
+                continue
+            try:
+                tree = _ast.parse(code)
+            except SyntaxError:
+                continue
+            used = sorted({n.lineno for n in _ast.walk(tree)
+                           if isinstance(n, _ast.Name) and n.id == name and isinstance(n.ctx, _ast.Load)})
+            if used:
+                files.append(fp)
+                lines.append(f"'{name}' is USED in {fp} at line(s) {used[:8]}")
+    if not lines:
+        return None
+    return ("UNDEFINED NAME LOCATED (deterministic): " + "; ".join(lines) + ". At each of these places the "
+            "name does not exist in that scope: define it there, pass it in as a parameter, or use the variable "
+            "that actually holds that value. Do not hide errors with a broad try/except that only prints them.",
+            files)
+
+
+def _traceback_project_files(output: str, project_files: list[str]) -> list[str]:
+    """Traceback'te geçen proje dosyaları (en derinden en dışa, tekrarsız)."""
+    pattern = re.compile(r'File ["\']([^"\']+\.py)["\'],\s+line\s+\d+', re.IGNORECASE)
+    found: list[str] = []
+    for raw_path in reversed(pattern.findall(output)):
+        for pf in project_files:
+            if (Path(pf).name == Path(raw_path).name or raw_path.endswith(pf)) and pf not in found:
+                found.append(pf)
+    return found
 
 
 def _classify_error(output: str, project_dir: Path | None = None) -> str:
@@ -428,7 +515,7 @@ Critical rules:
 5. Use relative paths only (e.g. "utils/helpers.py", not absolute paths).
 6. Standard library modules (os, sys, json, etc.) do NOT go in "dependencies".
 7. CRITICAL for correctness: if two or more files exchange a data structure (a dict, a class instance, a tuple shape) — even files that never import each other, because the data actually flows through a third file like main.py — describe its EXACT shape ONCE in "shared_data_contracts" (field names, types, whether it's a dict or a specific class). Every file that touches this data MUST use the identical shape. This is the most common source of real bugs: e.g. one file builds {{"amount": ..., "category": ...}} while another expects an object with .amount/.category attributes.
-8. If running the entry point is supposed to durably create or update a file (a database, a report, an exported document, a log, a generated image, etc.), list each such file's relative path in "expected_outputs" with a one-line description of what a CORRECT result looks like inside it. Leave this list EMPTY only for purely interactive/display-only programs that persist nothing (e.g. a calculator, a GUI that only shows numbers on screen). This is critical: a program can run to completion with NO Python error while silently producing nothing real (a network call that fails silently, a thread that never runs, wrong file path) — "expected_outputs" is what lets that be caught instead of wrongly reported as a success.
+8. If running the entry point is supposed to durably create or update a file (a database, a report, an exported document, a log, a generated image, etc.), list each such file's relative path in "expected_outputs" with a one-line description of what a CORRECT result looks like inside it. If the result is a FOLDER TREE (files copied/moved/sorted into sub-folders), list that output folder's relative path (e.g. "sorted") instead of guessing individual file names. Leave this list EMPTY only for purely interactive/display-only programs that persist nothing (e.g. a calculator, a GUI that only shows numbers on screen). This is critical: a program can run to completion with NO Python error while silently producing nothing real (a network call that fails silently, a thread that never runs, wrong file path) — "expected_outputs" is what lets that be caught instead of wrongly reported as a success.
 9. This is a completely standalone, independent project with NO relationship to any AI assistant framework. NEVER plan a file path or an import under a top-level name "jarvis" (e.g. "jarvis/core/engine.py", or importing "jarvis.anything") — that name does not exist for this project and is never a real requirement, no matter what the description mentions.
 10. If the task needs content that appears only after JavaScript runs (infinite scroll, "load more" buttons, dynamic pages, "wait until the page is fully loaded"), plain HTTP clients (requests/httpx/urllib) are WRONG: use Playwright and list "playwright" in dependencies. If the task works on a web page, take the URL from the command line (sys.argv[1]) and put the real URL from the description into run_command.
 
@@ -608,8 +695,24 @@ def _check_expected_outputs(project_dir: Path, expected_outputs: list, run_start
         full_path = _safe_project_path(project_dir, rel_path)
         if full_path is None:
             continue
+        if full_path.is_dir():
+            # Klasör çıktısı (ör. dosyaları alt klasörlere ayıran görev): bu
+            # çalıştırmada içine en az bir dosya yazılmış olmalı.
+            files = [f for f in full_path.rglob("*") if f.is_file()]
+            if not files:
+                problems.append(f"Folder '{rel_path}' was created but contains no files.")
+            # ctime de sayılır: shutil.copy2 kopyada eski mtime'ı korur.
+            elif max(max(f.stat().st_mtime, f.stat().st_ctime) for f in files) < run_started_at - 2:
+                problems.append(f"Folder '{rel_path}' exists but no file inside it was written during this run.")
+            continue
         if not full_path.is_file():
-            problems.append(f"'{rel_path}' was never created.")
+            elsewhere = [q.relative_to(project_dir).as_posix() for q in project_dir.rglob(Path(rel_path).name)
+                         if q.is_file() and ".jarvis" not in q.parts and q.stat().st_mtime >= run_started_at - 2][:3]
+            if elsewhere:
+                problems.append(f"'{rel_path}' was written to the WRONG place ({', '.join(elsewhere)}); "
+                                f"write it exactly at '{rel_path}' relative to the working directory.")
+            else:
+                problems.append(f"'{rel_path}' was never created.")
             continue
         try:
             stat = full_path.stat()
@@ -2644,6 +2747,26 @@ def _fix_files(
     else:
         files_to_fix.append(entry_point)
 
+    undefined_note = _undefined_name_note(error_output, file_codes)
+    if undefined_note:
+        # Canlı test 2026-09-29 (tarihe_gore_ayir): "Hata: name 'src' is not
+        # defined" yakalanıp yazdırıldığı için traceback yoktu; model 5 tur
+        # yalnız main.py'yi düzeltti. Adın geçtiği dosyalar da düzeltilir.
+        for fp in undefined_note[1]:
+            if fp not in files_to_fix:
+                files_to_fix.append(fp)
+        error_output = error_output + "\n\n" + undefined_note[0]
+
+    if repeat_of_previous:
+        # Canlı test 2026-09-29 (js_kazima): hata main.py:29'da görünüyordu ama
+        # traceback'in en derin proje dosyası helpers.py olduğu için 4 tur
+        # boyunca YALNIZ helpers.py düzeltildi, hata birebir tekrarlandı.
+        # Aynı hata tekrarlanıyorsa traceback'teki TÜM proje dosyaları
+        # (çağıran taraf dahil) düzeltmeye açılır.
+        for fp in _traceback_project_files(error_output, list(file_codes.keys())):
+            if fp not in files_to_fix:
+                files_to_fix.append(fp)
+
     if import_mismatch and import_mismatch["target_path"] not in files_to_fix:
         # Hedef modulu (import EDILEN, ismi eksik olan dosya) de kendi
         # ayri duzeltme denemesini alsin - sadece error_file'in "read-only"
@@ -2925,6 +3048,11 @@ def _build_project(
     # sinanir - bkz. jarvis/actions/devkit/acceptance.py. Spesifikasyon
     # uretilemezse/gecersizse test ATLANIR, build engellenmez.
     acceptance_spec = None if gui_task else _plan_acceptance(description, plan, log)
+    acc_last: tuple[str, int] | None = None   # (son kabul hatası, o anki kodun imzası)
+    acc_judged = False
+    acceptance_disputed = ""
+    soft_quality_rounds = 0
+    quality_warnings = ""
     if acceptance_spec:
         from jarvis.actions.devkit.acceptance import contract_text
         shared_contracts_text = (shared_contracts_text + "\n- " + contract_text(acceptance_spec)).strip()
@@ -3268,8 +3396,16 @@ def _build_project(
             # YETMIYOR. Ici bos fonksiyon / cift __main__ / yalnizca basliktan
             # olusan rapor varsa proje BASARILI SAYILMAZ; duzeltme turuna girer.
             quality = _python_quality_issues(file_codes)
-            from jarvis.actions.devkit.python_quality import header_only_outputs, placeholder_data_outputs
+            from jarvis.actions.devkit.python_quality import (
+                header_only_outputs,
+                placeholder_data_outputs,
+                truncated_value_outputs,
+            )
             header_problems = header_only_outputs(project_dir, expected_outputs)
+            for _p in truncated_value_outputs(project_dir, expected_outputs):
+                quality.setdefault(entry_point, []).append(
+                    {"code": "OUTPUT-TRUNCATED", "message": _p, "line": 0, "col": 0}
+                )
             for _p in placeholder_data_outputs(project_dir, expected_outputs, description):
                 quality.setdefault(entry_point, []).append(
                     {"code": "OUTPUT-PLACEHOLDER-DATA", "message": _p, "line": 0, "col": 0}
@@ -3278,6 +3414,16 @@ def _build_project(
                 quality.setdefault(entry_point, []).extend(
                     {"code": "OUTPUT-HEADER-ONLY", "message": p, "line": 0, "col": 0} for p in header_problems
                 )
+            if quality and all(i["code"] in SOFT_QUALITY_CODES for iss in quality.values() for i in iss):
+                # Canlı test 2026-09-29 (kitap_raporu): çıktısı doğru program yalnızca
+                # "kullanılmayan fonksiyon" yüzünden 3 tur reddedildi. Tek başına
+                # bu bulgu bir tur düzeltme hakkı alır; sonra uyarıya dönüşür.
+                soft_quality_rounds += 1
+                if soft_quality_rounds > SOFT_QUALITY_ROUNDS:
+                    quality_warnings = "; ".join(
+                        f"{fp}: " + ", ".join(i["code"] for i in iss) for fp, iss in quality.items())
+                    log(f"ℹ️ Yalnızca küçük kod bulguları kaldı ({quality_warnings}); başarıyı engellemiyor.")
+                    quality = {}
             if quality:
                 summary = "; ".join(
                     f"{fp}: " + ", ".join(i["code"] for i in iss) for fp, iss in quality.items()
@@ -3333,6 +3479,35 @@ def _build_project(
                         log(f"🔧 Çıktı yolu programın klasörü yerine çalışma klasörüne çevrildi (model yerine deterministik): {sorted(rewritten)}")
                         continue
                 if acc_problems:
+                    # Canlı test 2026-09-29 (hata_saatleri): modelin YAZDIĞI beklenti
+                    # yanlıştı ('15,1'); program 5 farklı yazımda da aynı doğru
+                    # sonucu verdi ve 5 tur boşa gitti. FARKLI kod aynı çıktıyı
+                    # veriyorsa beklenti şüphelidir: bir kez hakem sorusu sorulur.
+                    acc_sig = "\n".join(acc_problems)
+                    code_sig = hash(tuple(sorted(file_codes.items())))
+                    # Canlı test 2026-09-29 (2. tur): model "doğru" bulduğu kodu hiç
+                    # değiştirmeyince (metin_istatistigi, yapilacaklar_raporu) hakem hiç
+                    # sorulmadı. Artık AYNI başarısızlık ikinci kez görülünce sorulur;
+                    # hakem yalnızca örnek girdiden kendi hesabıyla karar verir.
+                    if (acc_last and acc_last[0] == acc_sig and not acc_judged
+                            and not any("oluşturulmadı" in pr or "hata koduyla" in pr for pr in acc_problems)):
+                        acc_judged = True
+                        run_dir = project_dir / ".jarvis" / "acceptance" / "run"
+                        prog_text = acc_output + "\n" + "\n".join(
+                            (run_dir / e["output"]).read_text(encoding="utf-8", errors="replace")
+                            for e in acceptance_spec["expect"]
+                            if e["output"] != "STDOUT" and (run_dir / e["output"]).is_file()
+                            and (run_dir / e["output"]).stat().st_size < 200_000)
+                        wrong, why = _acceptance_expectation_wrong(
+                            description, acceptance_spec, acc_problems, acc_output, prog_text)
+                        if not wrong:
+                            log(f"⚖️ Hakem: beklenti geçerli sayıldı ({why[:160]})")
+                        if wrong:
+                            log(f"⚖️ Kabul testi beklentisinin kendisi hatalı bulundu (farklı kod aynı sonucu verdi): {why[:200]}")
+                            acceptance_disputed = why[:300]
+                            acc_problems = []
+                    acc_last = (acc_sig, code_sig)
+                if acc_problems:
                     log(f"❌ Kabul testi geçilemedi: {acc_problems[0][:200]}")
                     last_output = "ACCEPTANCE TEST FAILED:\n" + "\n".join(acc_problems) + f"\n\nProgram output:\n{acc_output}"
                     if attempt == MAX_FIX_ATTEMPTS:
@@ -3370,7 +3545,8 @@ def _build_project(
                         return msg
                     time.sleep(1)
                     continue
-                log("✅ Kabul testi geçti (örnek girdide beklenen sonuçlar üretildi).")
+                if not acceptance_disputed:
+                    log("✅ Kabul testi geçti (örnek girdide beklenen sonuçlar üretildi).")
             if is_timeout:
                 if expected_outputs:
                     verified_note = f" Beklenen çıktılar gerçekten doğrulandı ({', '.join(str(o.get('path', o)) if isinstance(o, dict) else str(o) for o in expected_outputs)})."
@@ -3386,8 +3562,18 @@ def _build_project(
                     f" Verified outputs: {', '.join(str(o.get('path', o)) if isinstance(o, dict) else str(o) for o in expected_outputs)}."
                     if expected_outputs else ""
                 )
-                if acceptance_spec:
+                if quality_warnings:
+                    verified_note += f" Küçük kod uyarıları (engel değil): {quality_warnings}."
+                if acceptance_disputed:
+                    verified_note += (" Not: örnek girdideki otomatik beklenti hatalı çıktı ve devre dışı bırakıldı "
+                                      f"({acceptance_disputed[:160]}) — sonucu bir kez kontrol edin.")
+                elif acceptance_spec:
                     verified_note += " Acceptance test on a known sample input passed."
+                elif _is_live_scrape(description):
+                    # Dış analiz raporu (2026-09-29): gerçek site görevlerinde içerik
+                    # otomatik doğrulanamıyor; kullanıcıya bunu açıkça söyle.
+                    verified_note += (" Not: çıktı içeriği gerçek siteye karşı otomatik doğrulanamadı "
+                                      "(yalnızca dosya/biçim kontrolleri yapıldı) — ilk birkaç satıra bir göz atın.")
                 msg = (
                     f"Project '{proj_name}' is working, sir. "
                     f"Built in {attempt} attempt{'s' if attempt > 1 else ''}.{verified_note} "
@@ -3444,7 +3630,8 @@ def _build_project(
         log(f"Fixing errors (type: {error_type})...")
         try:
             _sel = _selenium_instead_of_playwright(file_codes, dependencies)
-            _extra = (("\n\n" + _SELENIUM_HINT) if _sel else "") + _bare_filename_hint(last_output, run_command)
+            _extra = ((("\n\n" + _SELENIUM_HINT) if _sel else "") + _bare_filename_hint(last_output, run_command)
+                      + _known_error_hint(last_output))
             updated = _fix_files(
                 error_output=last_output + _extra,
                 project_description=description,

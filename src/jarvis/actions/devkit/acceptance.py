@@ -21,6 +21,7 @@ Akış (dev_agent._build_project içinden):
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -56,6 +57,10 @@ If applicable, create a small sample input ("fixtures") whose correct result you
 and list short tokens that ANY correct output must contain regardless of formatting:
 identifiers (function names), file names, or numbers — NOT full sentences, NOT line formats.
 Every token must be justified by the fixtures. Include at least one token per requested feature.
+Never use a bare small number as a token ("7", "2"): write it WITH its label as the program would print it
+("satir: 3", "line 4"), and count it yourself carefully from the fixture text.
+If the result depends on file DATES (modification time), give EVERY fixture an "mtime": "YYYY-MM-DD" —
+otherwise fixtures are created with today's date and date-based expectations cannot hold.
 
 Return ONLY JSON:
 {{
@@ -70,8 +75,14 @@ Rules: fixture paths are relative (no "..", no absolute paths), at most {max_fix
 "args" are the command-line arguments for the test run; use {{FIXTURE}} for the fixture folder,
 or {{FIXTURE_URL}} for its local http:// URL (web scrapers).
 "output" is a relative output file path from the program's working directory, or "STDOUT".
+If the program's result is a FOLDER TREE (files copied/moved/sorted into sub-folders), "output" is that
+folder (e.g. "sorted") and "contains" lists the relative file paths expected inside it (e.g. "2024-01/a.jpg").
 If not applicable return {{"applicable": false, "reason": "..."}}.
 JSON:"""
+
+
+BINARY_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".pdf", ".zip", ".gz",
+                             ".db", ".sqlite", ".sqlite3", ".xlsx", ".xls", ".docx", ".pptx", ".mp3", ".wav"})
 
 
 def build_prompt(description: str, plan: dict) -> str:
@@ -85,18 +96,36 @@ def _safe_rel(path: str) -> bool:
     return bool(str(path).strip()) and not p.is_absolute() and ".." not in p.parts and "\x00" not in str(path)
 
 
-def parse_spec(raw_text: str) -> dict | None:
-    text = (raw_text or "").strip()
-    m = re.search(r"```(?:json)?\s*\n(.*?)\n?```", text, re.DOTALL)
-    if m:
-        text = m.group(1)
+def _loads_lenient(text: str) -> object:
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
         return None
-    try:
-        return json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        return None
+    body = text[start:end + 1]
+    # strict=False: modelin örnek dosya içeriğine koyduğu ham satır sonları
+    # JSON'u geçersiz kılıyordu ("spesifikasyon JSON nesnesi değil",
+    # canlı test 2026-09-29); ikinci deneme sondaki fazladan virgülleri siler.
+    for candidate in (body, re.sub(r",\s*([}\]])", r"\1", body)):
+        try:
+            return json.loads(candidate, strict=False)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def parse_spec(raw_text: str) -> dict | None:
+    text = (raw_text or "").strip()
+    # Önce kod çiti içindeki JSON, olmazsa tüm metin: örnek dosya içeriği
+    # kendisi ``` içerebilir (Markdown görevleri) ve çit eşleşmesini bozar.
+    candidates = []
+    m = re.search(r"```(?:json)?\s*\n(.*?)\n?```", text, re.DOTALL)
+    if m:
+        candidates.append(m.group(1))
+    candidates.append(text)
+    for c in candidates:
+        data = _loads_lenient(c)
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 def validate_spec(spec: object) -> tuple[dict | None, str]:
@@ -115,7 +144,13 @@ def validate_spec(spec: object) -> tuple[dict | None, str]:
         content = fx.get("content", "")
         if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_FIXTURE_BYTES:
             return None, f"örnek dosya içeriği geçersiz/çok büyük: {fx.get('path')}"
-        clean_fx.append({"path": str(fx["path"]).replace("\\", "/"), "content": content})
+        item = {"path": str(fx["path"]).replace("\\", "/"), "content": content}
+        mtime = str(fx.get("mtime", "") or "").strip()
+        if mtime:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2})?", mtime):
+                return None, f"geçersiz mtime: {mtime!r}"
+            item["mtime"] = mtime
+        clean_fx.append(item)
     args = spec.get("args", [])
     if not isinstance(args, list) or len(args) > 10 or not all(isinstance(a, str) and len(a) < 300 for a in args):
         return None, "args düz metin listesi olmalı"
@@ -142,7 +177,15 @@ def validate_spec(spec: object) -> tuple[dict | None, str]:
         tokens = [str(t).strip() for t in tokens if str(t).strip()]
         if not tokens or any(len(t) > 120 for t in tokens):
             return None, "beklenen ifadeler kısa olmalı"
+        # Tek başına 1-2 haneli sayı ('7', '2') bilgi taşımaz ve modelin en sık
+        # yanlış hesapladığı şeydir (canlı test 2026-09-29: doğru programlar
+        # '7' ve '1','2','2' yüzünden 5 tur reddedildi). Bağlamsız sayılar atılır.
+        tokens = [t for t in tokens if not re.fullmatch(r"\d{1,2}", t)]
+        if not tokens:
+            continue
         clean_ex.append({"output": out, "contains": tokens})
+    if not clean_ex:
+        return None, "beklentilerde yalnızca bağlamsız küçük sayılar vardı"
     contract = str(spec.get("input_contract", "")).strip()[:500]
     _correct_word_counts(clean_fx, clean_ex)
     return {"fixtures": clean_fx, "args": args, "expect": clean_ex, "input_contract": contract}, "ok"
@@ -204,6 +247,12 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
         target.relative_to(fixture.resolve())  # validate_spec zaten garanti ediyor; ikinci kilit
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(fx["content"], encoding="utf-8")
+        if fx.get("mtime"):
+            # Tarihe bağlı görevler için (canlı test 2026-09-29: örnek dosyalar
+            # bugünün tarihiyle oluştuğu için '2024-01' beklentisi imkânsızdı).
+            from datetime import datetime
+            ts = datetime.fromisoformat(fx["mtime"].replace(" ", "T")).timestamp()
+            os.utime(target, (ts, ts))
 
     uses_url = any(URL_PLACEHOLDER in a for a in spec["args"])
     server = _serve_directory(fixture) if uses_url else None
@@ -231,7 +280,15 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
             text, label = output, "program çıktısı (stdout)"
         else:
             path = run_dir / ex["output"]
-            if not path.is_file():
+            if path.is_dir():
+                # Klasör çıktısı (dış analiz raporu 2026-09-29: klasör ağacı üreten
+                # doğru program 'oluşturulmadı' diye reddediliyordu): içindeki
+                # dosyaların göreli yolları metin olarak karşılaştırılır.
+                text, label = _tree_text(path), f"'{ex['output']}' klasörü"
+                if not text:
+                    problems.append(f"'{ex['output']}' klasörü oluştu ama içinde hiç dosya yok.")
+                    continue
+            elif not path.is_file():
                 stray = _written_elsewhere(project_dir, ex["output"], before)
                 if stray:
                     problems.append(
@@ -243,12 +300,104 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
                 else:
                     problems.append(f"'{ex['output']}' kabul testinde oluşturulmadı (çalışma klasörüne yazılmalı).")
                 continue
-            text, label = path.read_text(encoding="utf-8", errors="replace"), f"'{ex['output']}'"
+            elif path.suffix.lower() in BINARY_SUFFIXES:
+                # Resim/zip/veritabanı içinde metin aranamaz (canlı test 2026-09-29:
+                # hata_grafigi.png içinde sayı bekleniyordu): boş olmaması yeter.
+                if path.stat().st_size == 0:
+                    problems.append(f"'{ex['output']}' oluştu ama boş (0 bayt).")
+                continue
+            else:
+                text, label = path.read_text(encoding="utf-8", errors="replace"), f"'{ex['output']}'"
         low = text.lower()
-        missing = [t for t in ex["contains"] if not _token_found(t, low)]
+        # Beklenen ifade çıktının KENDİ yolunun parçasıysa (ör. çıktı
+        # 'sirali/2024-01/a.jpg', ifade 'a.jpg') dosyanın var olması yeter:
+        # kopyalanan resmin içeriğinde kendi adı geçmez (canlı test 2026-09-29).
+        own_path = ex["output"].lower()
+        missing = [t for t in ex["contains"] if not (_token_found(t, low) or t.lower() in own_path)]
         if missing:
-            problems.append(f"{label} şu beklenen ifadeleri İÇERMİYOR: {missing}. İçerik (ilk 800 karakter): {text[:800]!r}")
+            problems.append(f"{label} şu beklenen ifadeleri İÇERMİYOR: {missing}. İçerik (ilk 800 karakter): {text[:800]!r}"
+                            + _json_shape_hint(text, missing))
     return problems, output[:2000]
+
+
+DISPUTE_PROMPT = """A program was tested on a small sample input, and the test expected certain text in its output.
+The program's output did NOT contain the expected text. Several DIFFERENT versions of the program all
+produced exactly the same output, so the EXPECTATION itself may have been written wrongly.
+
+TASK the program must do:
+{description}
+
+SAMPLE INPUT FILES:
+{fixtures}
+
+EXPECTED (written by a model before any program existed):
+{expected}
+
+WHAT THE PROGRAM ACTUALLY PRODUCED / PROBLEMS:
+{problems}
+
+Work it out yourself from the SAMPLE INPUT FILES, step by step (count every line/item carefully and
+follow every rule in the task). Then decide which is correct.
+Return ONLY JSON: {{"correct": "program" | "expectation", "reason": "short explanation with your own count",
+ "correct_values": ["2-5 short exact lines/values the CORRECT output must contain, by your own count"]}}
+JSON:"""
+
+
+def build_dispute_prompt(description: str, spec: dict, problems: list[str], output: str) -> str:
+    expected = "\n".join(f"- {e['output']}: {e['contains']}" for e in spec["expect"])
+    return DISPUTE_PROMPT.format(description=description, fixtures=describe_fixtures(spec, 3000),
+                                 expected=expected, problems=("\n".join(problems) + "\n" + output)[:3000])
+
+
+def parse_dispute(text: str) -> tuple[bool, str, list[str]]:
+    """(beklenti_yanlış_mı, gerekçe, hakemin_doğru_değerleri). Anlaşılamayan
+    cevap = beklenti doğru sayılır."""
+    data = parse_spec(text)
+    if not isinstance(data, dict):
+        return False, "hakem cevabı anlaşılamadı", []
+    reason = str(data.get("reason", ""))[:300]
+    values = [str(v).strip() for v in (data.get("correct_values") or []) if str(v).strip()][:5]
+    return str(data.get("correct", "")).strip().lower() == "program", reason, values
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[\s\"'`]+", "", text.lower())
+
+
+def dispute_is_consistent(values: list[str], program_text: str, missing_tokens: list[str]) -> tuple[bool, str]:
+    """Hakemin "program doğru" kararı KENDİ hesabıyla tutarlı mı? (canlı test
+    2026-09-29: hakem 'hello: 6 doğru' deyip programın 'hello: 3' çıktısını
+    onayladı → yalancı başarı.) Hakemin doğru dediği her değer programın
+    çıktısında GERÇEKTEN olmalı ve hakem, eksik beklentilerden en az biriyle
+    aynı fikirde olmamalı."""
+    if not values:
+        return False, "hakem doğru değerleri vermedi"
+    prog = _norm(program_text)
+    absent = [v for v in values if _norm(v) not in prog]
+    if absent:
+        return False, f"hakemin doğru dediği değerler programın çıktısında yok: {absent}"
+    judged = " ".join(_norm(v) for v in values)
+    if all(_norm(t) in judged for t in missing_tokens):
+        return False, "hakem eksik beklentileri de doğru sayıyor (çelişki)"
+    return True, "tutarlı"
+
+
+def _tree_text(folder: Path, limit: int = 500) -> str:
+    """Klasördeki dosyaların göreli yolları (posix, satır satır)."""
+    rels = sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file())
+    return "\n".join(rels[:limit])
+
+
+def _stamp(p: Path) -> int | None:
+    """Dosyanın, klasörse içindeki en yeni dosyanın değişim zamanı. Klasör
+    içinde ctime da sayılır: shutil.copy2 eski mtime'ı KORUR, ama yeni kopyanın
+    ctime'ı (Windows'ta oluşturma zamanı) şimdidir."""
+    if p.is_file():
+        return p.stat().st_mtime_ns
+    if p.is_dir():
+        times = [max(st.st_mtime_ns, st.st_ctime_ns) for f in p.rglob("*") if f.is_file() for st in [f.stat()]]
+        return max(times) if times else None
+    return None
 
 
 _BARE_TAG = re.compile(r"^<([a-z][a-z0-9]*)>$", re.IGNORECASE)
@@ -262,7 +411,34 @@ def _token_found(token: str, low_text: str) -> bool:
     if t in low_text:
         return True
     m = _BARE_TAG.match(t)
-    return bool(m and re.search(rf"<{m.group(1)}[\s>/]", low_text))
+    if m and re.search(rf"<{m.group(1)}[\s>/]", low_text):
+        return True
+    # Yalnızca boşluk/tırnak ya da 50 ↔ 50.0 farkı: 'satir: 3' ile '"satir": 3'
+    # aynı bilgidir (canlı test 2026-09-29: doğru JSON 5 tur reddedildi).
+    lt = _loose(t)
+    return bool(lt) and re.search(rf"(?<![\w.]){re.escape(lt)}(?![\w.])"
+                                  if lt[0].isalnum() and lt[-1].isalnum() else re.escape(lt), _loose(low_text)) is not None
+
+
+def _loose(text: str) -> str:
+    text = re.sub(r"(\d)\.0+(?!\d)", r"\1", text)
+    return re.sub(r"[\s\"'`]+", "", text)
+
+
+def _json_shape_hint(text: str, missing: list[str]) -> str:
+    """Beklenen '"anahtar": değer' ama çıktı nesne LİSTESİ ise biçim ipucu."""
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return ""
+    if not (isinstance(data, list) and data and all(isinstance(x, dict) for x in data)):
+        return ""
+    values = {str(v).lower() for x in data for v in x.values()}
+    keys = [m.group(1).lower() for t in missing if (m := re.match(r'^"?([^":]+)"?\s*:', t.strip()))]
+    if keys and any(k in values for k in keys):
+        return (" BİÇİM: beklenen tek bir JSON NESNESİ ({\"anahtar\": değer, ...}); program ise nesne LİSTESİ "
+                "([{...}, {...}]) yazdı. Görevdeki biçime birebir uy.")
+    return ""
 
 
 def _output_snapshot(project_dir: Path, spec: dict) -> dict[Path, int]:
@@ -278,8 +454,8 @@ def _output_snapshot(project_dir: Path, spec: dict) -> dict[Path, int]:
             continue
         for p in project_dir.rglob(PurePosixPath(ex["output"]).name):
             try:
-                if root not in p.parents and p.is_file():
-                    snap[p] = p.stat().st_mtime_ns
+                if root not in p.parents and p != root and (st := _stamp(p)) is not None:
+                    snap[p] = st
             except OSError:
                 continue
     return snap
@@ -292,9 +468,10 @@ def _written_elsewhere(project_dir: Path, output: str, before: dict[Path, int]) 
     root = project_dir / ACCEPT_DIR
     for p in project_dir.rglob(PurePosixPath(output).name):
         try:
-            if root in p.parents or not p.is_file():
+            if root in p.parents or p == root:
                 continue
-            if before.get(p) != p.stat().st_mtime_ns:
+            st = _stamp(p)
+            if st is not None and before.get(p) != st:
                 return p.relative_to(project_dir).as_posix()
         except OSError:
             continue

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import re
+import textwrap
 from pathlib import Path
 
 # Bir çıktı dosyası bundan az "anlamlı" satır içeriyorsa yalnızca başlık sayılır
@@ -67,6 +68,27 @@ def _function_body_lines(source_lines: list[str], fn: ast.AST) -> str:
     return "\n".join(source_lines[start:end])
 
 
+_PLACEHOLDER_COMMENT = re.compile(
+    r"^#\s*(?:(?:TODO|FIXME|XXX)\b\s*[:(\-]|.*\bplaceholder\b|.*\bimplement (?:this|me|later)\b"
+    r"|.*\bnot (?:yet )?implemented\b)", re.IGNORECASE)
+
+
+def _has_placeholder_comment(text: str) -> bool:
+    r"""Gerçek bir YORUM kodu yarım bırakıldığını söylüyor mu ("# TODO: ...",
+    "# placeholder ...")? Yalnızca yorum belirteçlerine bakılır: TODO/FIXME
+    ARAYAN bir programın dizgileri (r"#\s*(TODO|FIXME)") ve "# TODO ve FIXME
+    notlarını bul" gibi açıklamaları yer tutucu sayılmaz (canlı test
+    2026-09-29: yapilacaklar_raporu doğru çalıştığı hâlde 5 tur reddedildi)."""
+    import io
+    import tokenize
+    try:
+        comments = [t.string for t in tokenize.generate_tokens(io.StringIO(textwrap.dedent(text)).readline)
+                    if t.type == tokenize.COMMENT]
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        comments = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("#")]
+    return any(_PLACEHOLDER_COMMENT.search(c) for c in comments)
+
+
 def find_stub_functions(tree: ast.Module, source: str) -> list[dict]:
     """Gövdesi (docstring hariç) yalnızca önemsiz ifadelerden oluşan fonksiyonlar."""
     lines = source.splitlines()
@@ -88,7 +110,7 @@ def find_stub_functions(tree: ast.Module, source: str) -> list[dict]:
                 f"Fonksiyonu gerçekten uygula ya da çağıranları gerçek uygulamaya yönlendir.",
                 node.lineno, node.col_offset,
             ))
-        elif _PLACEHOLDER_RE.search(text) and re.search(r"#.*\b(placeholder|todo|fixme)\b", text, re.I):
+        elif _has_placeholder_comment(text):
             found.append(_issue(
                 "PLACEHOLDER-COMMENT",
                 f"'{node.name}' içinde yer tutucu/TODO yorumu var; eksik kalan mantığı tamamla.",
@@ -307,5 +329,36 @@ def placeholder_data_outputs(project_dir: Path, expected_outputs: list, descript
             problems.append(
                 f"'{rel}' gerçek veri yerine UYDURMA örnek veri içeriyor ({', '.join(sorted(set(hits))[:4])}). "
                 f"Program veriyi gerçek kaynaktan (site/dosya) okumalı; örnek veri yazıp başarılı gibi görünmemeli."
+            )
+    return problems
+
+
+_TRUNC = re.compile(r"(?:\.\.\.|…)\s*$")
+
+
+def truncated_value_outputs(project_dir: Path, expected_outputs: list) -> list[str]:
+    """Çıktı değerleri '...' ile KESİLMİŞ mi? (canlı test 2026-09-29: kitap
+    kazıyıcı bağlantı metnini aldı — 'A Light in the ...' — tam ad title=
+    özniteliğindeydi; JARVIS 'çalışıyor' dedi ama veri eksikti.)"""
+    problems = []
+    for item in expected_outputs or []:
+        rel = item.get("path") if isinstance(item, dict) else str(item)
+        if not rel or Path(rel).suffix.lower() not in {".csv", ".json", ".txt", ".tsv", ".md", ".html"}:
+            continue
+        target = project_dir / rel
+        try:
+            target.resolve().relative_to(project_dir.resolve())
+            if target.stat().st_size > 5_000_000:
+                continue
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            continue
+        values = [v.strip().strip('"') for v in re.split(r"[\n,;\t]|\":\s*\"|\"\s*[,}\]]", text) if v.strip()]
+        cut = [v for v in values if len(v) > 4 and _TRUNC.search(v)]
+        if len(cut) >= 3 and len(cut) >= 0.2 * max(1, len(values) // 2):
+            problems.append(
+                f"'{rel}' contains {len(cut)} TRUNCATED values ending with '...' (e.g. {cut[0][:60]!r}). This is "
+                f"shortened display text; take the FULL value (e.g. the title= attribute of the link, or the "
+                f"detail page) instead of the visible text."
             )
     return problems
