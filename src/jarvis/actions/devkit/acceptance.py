@@ -57,6 +57,10 @@ If applicable, create a small sample input ("fixtures") whose correct result you
 and list short tokens that ANY correct output must contain regardless of formatting:
 identifiers (function names), file names, or numbers — NOT full sentences, NOT line formats.
 Every token must be justified by the fixtures. Include at least one token per requested feature.
+Make the fixtures REALISTIC and include at least one tricky edge case that a naive implementation of
+THIS input format typically gets wrong (something that looks like the target but must be ignored, an
+empty or malformed line, a nested/sub-folder item, a duplicate), and make the expectations prove it
+is handled.
 Never use a bare small number as a token ("7", "2"): write it WITH its label as the program would print it
 ("satir: 3", "line 4"), and count it yourself carefully from the fixture text.
 If the result depends on file DATES (modification time), give EVERY fixture an "mtime": "YYYY-MM-DD" —
@@ -274,7 +278,9 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
             server.server_close()
     problems: list[str] = []
     if code != 0:
-        problems.append(f"Program kabul testinde hata koduyla bitti ({code}).")
+        tail = output.strip()[-400:]
+        problems.append(f"Program kabul testinde hata koduyla bitti ({code})."
+                        + (f" Son çıktı: {tail!r}" if tail else " Hiç çıktı yok (hata sessizce sys.exit(1) ile mi bitiyor?)."))
     for ex in spec["expect"]:
         if ex["output"] == "STDOUT":
             text, label = output, "program çıktısı (stdout)"

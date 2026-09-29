@@ -3490,7 +3490,11 @@ def _build_project(
                     # sorulmadı. Artık AYNI başarısızlık ikinci kez görülünce sorulur;
                     # hakem yalnızca örnek girdiden kendi hesabıyla karar verir.
                     if (acc_last and acc_last[0] == acc_sig and not acc_judged
-                            and not any("oluşturulmadı" in pr or "hata koduyla" in pr for pr in acc_problems)):
+                            and not any("oluşturulmadı" in pr or "hata koduyla" in pr or "BİÇİM:" in pr
+                                        for pr in acc_problems)):
+                        # "BİÇİM:" = görevin istediği yapı kesin olarak farklı (ör. nesne yerine
+                        # liste); bu bir sayım anlaşmazlığı değil, hakeme gidilmez (canlı test
+                        # 2026-09-29: hakem görevde olmayan bir biçimi "istenen" sandı).
                         acc_judged = True
                         run_dir = project_dir / ".jarvis" / "acceptance" / "run"
                         prog_text = acc_output + "\n" + "\n".join(

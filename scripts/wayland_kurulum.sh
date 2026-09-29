@@ -85,8 +85,14 @@ cat > "$SERVICE_FILE" <<'EOF'
 [Unit]
 Description=ydotool daemon for JARVIS (Wayland keyboard/mouse)
 After=graphical-session.target
+# Sonsuz yeniden başlatma döngüsü olmasın (2026-09-29: "Another ydotoold is
+# running with the same socket" ile 780+ kez yeniden başladı, günlüğü doldurdu).
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
+# Elle başlatılıp açık kalmış eski ydotoold aynı soketi tutuyorsa önce onu kapat.
+ExecStartPre=-/usr/bin/pkill -x -u %u ydotoold
 ExecStart=/usr/bin/ydotoold --socket-path=%t/.ydotool_socket --socket-perm=0600
 Restart=on-failure
 RestartSec=2
