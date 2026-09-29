@@ -74,7 +74,7 @@ _PLACEHOLDER_COMMENT = re.compile(
 
 
 def _has_placeholder_comment(text: str) -> bool:
-    """Gerçek bir YORUM kodu yarım bırakıldığını söylüyor mu ("# TODO: ...",
+    r"""Gerçek bir YORUM kodu yarım bırakıldığını söylüyor mu ("# TODO: ...",
     "# placeholder ...")? Yalnızca yorum belirteçlerine bakılır: TODO/FIXME
     ARAYAN bir programın dizgileri (r"#\s*(TODO|FIXME)") ve "# TODO ve FIXME
     notlarını bul" gibi açıklamaları yer tutucu sayılmaz (canlı test

@@ -249,6 +249,25 @@ _SELENIUM_HINT = (
 )
 
 
+_STRPTIME_MISMATCH = re.compile(r"time data '([^']*)' does not match format '([^']*)'")
+
+
+def _known_error_hint(output: str) -> str:
+    """Sık görülen, modelin tekrar tekrar göremediği hatalar için kesin ipucu."""
+    m = _STRPTIME_MISMATCH.search(output or "")
+    if m:
+        # Canlı test 2026-09-29 (hata_saatleri): satır boşluktan bölünüp YALNIZ
+        # tarih parçası tam biçimle çözülmeye çalışıldı; 5 tur aynı hata.
+        return (
+            f"\n\nROOT CAUSE: datetime.strptime received the text {m.group(1)!r} but the format "
+            f"{m.group(2)!r} expects more (or different) parts. The string you pass must contain EXACTLY what "
+            f"the format describes. If the line looks like 'YYYY-MM-DD HH:MM:SS LEVEL msg', split once more "
+            f"(parts = line.split(maxsplit=3); stamp = parts[0] + ' ' + parts[1]) or use line[:19] — or "
+            f"simply read the hour as int(parts[1][:2]). Do not swallow this error with try/except."
+        )
+    return ""
+
+
 def _bare_filename_hint(output: str, run_command: str) -> str:
     """'No such file or directory: 'a.jpg'' hatasında dosya aslında komut
     satırındaki girdi klasöründeyse: program TAM YOL yerine yalnızca dosya adını
@@ -680,7 +699,13 @@ def _check_expected_outputs(project_dir: Path, expected_outputs: list, run_start
                 problems.append(f"Folder '{rel_path}' exists but no file inside it was written during this run.")
             continue
         if not full_path.is_file():
-            problems.append(f"'{rel_path}' was never created.")
+            elsewhere = [q.relative_to(project_dir).as_posix() for q in project_dir.rglob(Path(rel_path).name)
+                         if q.is_file() and ".jarvis" not in q.parts and q.stat().st_mtime >= run_started_at - 2][:3]
+            if elsewhere:
+                problems.append(f"'{rel_path}' was written to the WRONG place ({', '.join(elsewhere)}); "
+                                f"write it exactly at '{rel_path}' relative to the working directory.")
+            else:
+                problems.append(f"'{rel_path}' was never created.")
             continue
         try:
             stat = full_path.stat()
@@ -3453,7 +3478,11 @@ def _build_project(
                     # veriyorsa beklenti şüphelidir: bir kez hakem sorusu sorulur.
                     acc_sig = "\n".join(acc_problems)
                     code_sig = hash(tuple(sorted(file_codes.items())))
-                    if (acc_last and acc_last[0] == acc_sig and acc_last[1] != code_sig and not acc_judged
+                    # Canlı test 2026-09-29 (2. tur): model "doğru" bulduğu kodu hiç
+                    # değiştirmeyince (metin_istatistigi, yapilacaklar_raporu) hakem hiç
+                    # sorulmadı. Artık AYNI başarısızlık ikinci kez görülünce sorulur;
+                    # hakem yalnızca örnek girdiden kendi hesabıyla karar verir.
+                    if (acc_last and acc_last[0] == acc_sig and not acc_judged
                             and not any("oluşturulmadı" in pr or "hata koduyla" in pr for pr in acc_problems)):
                         acc_judged = True
                         wrong, why = _acceptance_expectation_wrong(description, acceptance_spec, acc_problems, acc_output)
@@ -3585,7 +3614,8 @@ def _build_project(
         log(f"Fixing errors (type: {error_type})...")
         try:
             _sel = _selenium_instead_of_playwright(file_codes, dependencies)
-            _extra = (("\n\n" + _SELENIUM_HINT) if _sel else "") + _bare_filename_hint(last_output, run_command)
+            _extra = ((("\n\n" + _SELENIUM_HINT) if _sel else "") + _bare_filename_hint(last_output, run_command)
+                      + _known_error_hint(last_output))
             updated = _fix_files(
                 error_output=last_output + _extra,
                 project_description=description,

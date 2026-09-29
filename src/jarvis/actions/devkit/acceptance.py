@@ -57,6 +57,8 @@ If applicable, create a small sample input ("fixtures") whose correct result you
 and list short tokens that ANY correct output must contain regardless of formatting:
 identifiers (function names), file names, or numbers — NOT full sentences, NOT line formats.
 Every token must be justified by the fixtures. Include at least one token per requested feature.
+Never use a bare small number as a token ("7", "2"): write it WITH its label as the program would print it
+("satir: 3", "line 4"), and count it yourself carefully from the fixture text.
 If the result depends on file DATES (modification time), give EVERY fixture an "mtime": "YYYY-MM-DD" —
 otherwise fixtures are created with today's date and date-based expectations cannot hold.
 
@@ -175,7 +177,15 @@ def validate_spec(spec: object) -> tuple[dict | None, str]:
         tokens = [str(t).strip() for t in tokens if str(t).strip()]
         if not tokens or any(len(t) > 120 for t in tokens):
             return None, "beklenen ifadeler kısa olmalı"
+        # Tek başına 1-2 haneli sayı ('7', '2') bilgi taşımaz ve modelin en sık
+        # yanlış hesapladığı şeydir (canlı test 2026-09-29: doğru programlar
+        # '7' ve '1','2','2' yüzünden 5 tur reddedildi). Bağlamsız sayılar atılır.
+        tokens = [t for t in tokens if not re.fullmatch(r"\d{1,2}", t)]
+        if not tokens:
+            continue
         clean_ex.append({"output": out, "contains": tokens})
+    if not clean_ex:
+        return None, "beklentilerde yalnızca bağlamsız küçük sayılar vardı"
     contract = str(spec.get("input_contract", "")).strip()[:500]
     _correct_word_counts(clean_fx, clean_ex)
     return {"fixtures": clean_fx, "args": args, "expect": clean_ex, "input_contract": contract}, "ok"

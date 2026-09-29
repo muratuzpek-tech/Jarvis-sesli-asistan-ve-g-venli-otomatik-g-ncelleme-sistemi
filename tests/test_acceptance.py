@@ -269,3 +269,9 @@ def test_binary_output_only_needs_to_exist(tmp_path):
     assert run_acceptance(tmp_path, "main.py", spec)[0] == []
     (tmp_path / "main.py").write_text("open('chart.png', 'wb').close()")
     assert "boş" in run_acceptance(tmp_path, "main.py", spec)[0][0]
+
+
+def test_bare_small_numbers_are_dropped_from_expectations():
+    spec, _ = validate_spec({**SPEC, "expect": [{"output": "r.txt", "contains": ["7", "elma: 3"]}]})
+    assert spec["expect"][0]["contains"] == ["elma: 3"]
+    assert validate_spec({**SPEC, "expect": [{"output": "r.txt", "contains": ["1", "2", "2"]}]})[0] is None

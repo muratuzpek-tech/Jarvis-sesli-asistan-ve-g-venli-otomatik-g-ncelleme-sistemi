@@ -328,13 +328,14 @@ def test_wrong_expectation_is_dropped_only_when_different_code_agrees(env, monke
         assert "beklenti hatalı" in result
 
 
-def test_judge_is_not_asked_when_code_did_not_change(env, monkeypatch):
+def test_judge_is_asked_even_when_model_keeps_the_same_code(env, monkeypatch):
+    """Canlı test 2026-09-29 (2. tur): model kodu değiştirmeyince hakem hiç sorulmuyordu."""
     monkeypatch.setattr(da, "_plan_project", lambda d, lang: dict(WC_PLAN))
     model = DisputeModel([WC_REAL], "program")
     monkeypatch.setattr(da, "_get_model", lambda name: model)
     result = da._build_project("kelime sayici", "python", "", 10, player=None, speak=None)
-    assert "is working" not in result
-    assert not [p for p in model.prompts if p.startswith("A program was tested")]
+    assert "is working" in result and "beklenti hatalı" in result, result
+    assert len([p for p in model.prompts if p.startswith("A program was tested")]) == 1
 
 
 UNUSED_STORE = REAL_STORE + '''

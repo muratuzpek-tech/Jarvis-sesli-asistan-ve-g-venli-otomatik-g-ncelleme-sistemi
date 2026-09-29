@@ -26,3 +26,17 @@ def test_undefined_name_is_located_even_without_traceback():
     note, files = da._undefined_name_note("Hata: name 'src' is not defined", codes)
     assert files == ["utils/helpers.py"] and "line(s) [5]" in note
     assert da._undefined_name_note("başka bir hata", codes) is None
+
+
+def test_strptime_mismatch_gets_precise_hint():
+    out = "Error parsing line: x\n - time data '2025-10-10' does not match format '%Y-%m-%d %H:%M:%S'"
+    assert "maxsplit" in da._known_error_hint(out)
+    assert da._known_error_hint("başka") == ""
+
+
+def test_output_written_to_subfolder_is_pointed_out(tmp_path):
+    import time
+    t0 = time.time()
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "r.zip").write_bytes(b"PK")
+    assert "WRONG place (out/r.zip)" in da._check_expected_outputs(tmp_path, ["r.zip"], t0)[0]
