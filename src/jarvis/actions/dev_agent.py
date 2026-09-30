@@ -140,11 +140,34 @@ def _ollama_options() -> dict:
 # yoksa, kota dolduysa ya da istek fazla büyükse yerel modele düşülür.
 CLOUD_LLM_DEFAULT_URL = "https://api.groq.com/openai/v1"
 CLOUD_LLM_DEFAULT_MODEL = "openai/gpt-oss-120b"
+# Canlı test 2026-09-30: günlük 200K token 12 görevin 6.'sında bitti; kalan görevler
+# zayıf yerel modelle yazıldı ve 3'ü kaldı. Groq'ta her modelin GÜNLÜK sınırı AYRIDIR:
+# biri dolunca sıradakine geçilir (Groq model listesi 2026-09-30). Hepsi dolunca yerel.
+CLOUD_LLM_MODEL_CHAIN = ("openai/gpt-oss-120b", "qwen/qwen3.8-27b", "llama-3.3-70b-versatile",
+                         "openai/gpt-oss-20b")
+# Arka plan işleri (sohbet, keşif) küçük modeli kullanır; büyük modelin kotası koda kalır.
+CLOUD_LLM_BACKGROUND_MODEL = "openai/gpt-oss-20b"
 _CLOUD_OFF_UNTIL = 0.0
+_CLOUD_MODEL_OFF: dict[str, float] = {}
 
 
-def _cloud_llm() -> "tuple[str, str, str] | None":
-    """(url, model, key) ya da None. JARVIS_DEVAGENT_BACKEND=local ile kapanır."""
+def _cloud_models(cfg: dict, url: str) -> list[str]:
+    chain = os.environ.get("JARVIS_CLOUD_LLM_MODELS") or cfg.get("cloud_llm_models") or ""
+    if isinstance(chain, str):
+        chain = [m.strip() for m in chain.split(",") if m.strip()]
+    if chain:
+        return [str(m) for m in chain]
+    explicit = os.environ.get("JARVIS_CLOUD_LLM_MODEL") or cfg.get("cloud_llm_model") or ""
+    if url != CLOUD_LLM_DEFAULT_URL:                 # başka sağlayıcı: Groq model adları geçersiz
+        return [str(explicit or CLOUD_LLM_DEFAULT_MODEL)]
+    if explicit:
+        return [str(explicit)] + [m for m in CLOUD_LLM_MODEL_CHAIN if m != explicit]
+    return list(CLOUD_LLM_MODEL_CHAIN)
+
+
+def _cloud_llm(prefer: "str | None" = None) -> "tuple[str, str, str] | None":
+    """(url, model, key) ya da None. JARVIS_DEVAGENT_BACKEND=local ile kapanır.
+    Günlük sınırı dolmuş modeller atlanır; hepsi doluysa None (yerel model)."""
     if os.environ.get("JARVIS_DEVAGENT_BACKEND", "").strip().lower() == "local":
         return None
     if time.time() < _CLOUD_OFF_UNTIL:
@@ -158,8 +181,14 @@ def _cloud_llm() -> "tuple[str, str, str] | None":
     if not key:
         return None
     url = (os.environ.get("JARVIS_CLOUD_LLM_URL") or cfg.get("cloud_llm_url") or CLOUD_LLM_DEFAULT_URL).rstrip("/")
-    model = os.environ.get("JARVIS_CLOUD_LLM_MODEL") or cfg.get("cloud_llm_model") or CLOUD_LLM_DEFAULT_MODEL
-    return url, str(model), key
+    models = _cloud_models(cfg, url)
+    if prefer and prefer in models:
+        models = [prefer] + [m for m in models if m != prefer]
+    now = time.time()
+    for model in models:
+        if now >= _CLOUD_MODEL_OFF.get(model, 0.0):
+            return url, model, key
+    return None
 
 
 class _CloudLLM:
@@ -179,7 +208,15 @@ class _CloudLLM:
             msg = str(e).replace(self._key, "***")
             too_big = any(k in msg for k in ("413", "too large", "Request too large", "context_length"))
             daily = any(k in msg for k in ("per day", "RPD", "TPD", "insufficient_quota"))
-            if daily:
+            gone = any(k in msg for k in ("model_not_found", "decommissioned", "does not exist"))
+            if daily or gone:
+                # Yalnız BU modeli kapat; sıradaki Groq modelinin günlük sınırı ayrıdır.
+                _CLOUD_MODEL_OFF[self.model] = time.time() + (24 if gone else 6) * 3600
+                nxt = _cloud_llm()
+                if nxt and nxt[1] != self.model:
+                    why = "günlük sınırı doldu" if daily else "artık sunulmuyor"
+                    print(f"[DevAgent] ☁️ {self.model} {why}; {nxt[1]} modeline geçiliyor.")
+                    return _CloudLLM(*nxt, fallback=self.fallback, timeout=self.timeout).generate_content(contents)
                 _CLOUD_OFF_UNTIL = time.time() + 6 * 3600
                 why = "günlük ücretsiz sınır doldu (6 saat yerel model)"
             elif too_big:
@@ -223,6 +260,7 @@ class _CloudLLM:
                 raise RuntimeError(f"{resp.status_code}: {resp.text[:300]}")
             data = resp.json()
             text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.S)   # düşünen modeller (qwen3)
             if not text.strip():
                 raise RuntimeError("boş cevap")
             return text
@@ -965,7 +1003,8 @@ JSON:"""
                     "görev JavaScript ile yüklenen içerik istiyor (kaydırma/'daha fazla yükle') ama planlayıcı "
                     "iki denemede de tarayıcı (Playwright) kullanmadı; requests ile bu içerik alınamaz."
                 )
-        return _ensure_described_outputs(_ensure_url_in_run_command(plan, description), description)
+        return _ensure_described_outputs(
+            _ensure_paths_in_run_command(_ensure_url_in_run_command(plan, description), description), description)
     except json.JSONDecodeError as e:
         raise ValueError(f"Planner returned invalid JSON: {e}\nRaw: {response.text[:300]}") from e
     except Exception as e:
@@ -988,6 +1027,28 @@ def _ensure_url_in_run_command(plan: dict, description: str) -> dict:
         url = urls[0].rstrip(".,;:!?")
         plan["run_command"] = f"{cmd} {url}"
         print(f"[DevAgent] 🔧 run_command'a görevdeki URL eklendi: {plan['run_command']}")
+    return plan
+
+
+_ABS_PATH_IN_TEXT = re.compile(r"(?<![\w:/.~-])(/[^\s'\"<>()\[\],;`]+)")
+
+
+def _ensure_paths_in_run_command(plan: dict, description: str) -> dict:
+    """Görevde VAR OLAN girdi dosya/klasör yolları verilmiş ama run_command bunları
+    içermiyorsa ekler (canlı test 2026-09-30, csv_birlestir: görev iki CSV yolu verdi,
+    plan 'python main.py' dedi; JARVIS 'girdi verilmedi' sanıp kendi örnek verisiyle
+    çalıştırdı, gerçek dosyalara hiç dokunmadı ve 'çalışıyor' dedi → YALANCI BAŞARI)."""
+    cmd = str(plan.get("run_command") or "")
+    if not cmd:
+        return plan
+    found: list[str] = []
+    for m in _ABS_PATH_IN_TEXT.finditer(description or ""):
+        path = m.group(1).rstrip(".,;:!?'\"")
+        if path not in found and path not in cmd and os.path.exists(path):
+            found.append(path)
+    if found:
+        plan["run_command"] = " ".join([cmd, *(shlex.quote(p) for p in found)])
+        print(f"[DevAgent] 🔧 run_command'a görevdeki girdi yolları eklendi: {plan['run_command']}")
     return plan
 
 

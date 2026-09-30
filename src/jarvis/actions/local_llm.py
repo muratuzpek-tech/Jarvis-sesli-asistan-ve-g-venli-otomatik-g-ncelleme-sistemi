@@ -101,8 +101,8 @@ _GEMINI_QUOTA_UNTIL = 0.0
 def cloud_generate(prompt: str) -> str | None:
     """Kayıtlı ücretsiz bulut modeli (Groq) ile metin; yoksa/başarısızsa None."""
     try:
-        from jarvis.actions.dev_agent import _CloudLLM, _cloud_llm
-        cfg = _cloud_llm()
+        from jarvis.actions.dev_agent import CLOUD_LLM_BACKGROUND_MODEL, _CloudLLM, _cloud_llm
+        cfg = _cloud_llm(prefer=CLOUD_LLM_BACKGROUND_MODEL)   # büyük modelin kotası koda kalsın
         if not cfg:
             return None
         text = _CloudLLM(*cfg, fallback=None, timeout=90).generate_content(prompt).text
