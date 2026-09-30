@@ -894,6 +894,9 @@ class JarvisLive:
         self._loop                = None
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
+        self._voice_gate          = None    # ses kapısı (core/voice_gate.py); None = her ses dinlenir
+        self._voice_gate_ready    = False
+        self._gate_loop           = None
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
         self._vision_cam_active    = False   # True if camera was opened for vision → auto-close after response
@@ -1672,9 +1675,33 @@ class JarvisLive:
             msg = await self.out_queue.get()
             await self.session.send_realtime_input(media=msg)
 
+    def _gate_put(self, data: bytes) -> None:
+        q = self.out_queue
+        if q is None:
+            return
+        try:
+            q.put_nowait({"data": data, "mime_type": "audio/pcm;rate=16000"})
+        except asyncio.QueueFull:
+            pass
+
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
         loop = asyncio.get_event_loop()
+        # SES KAPISI (Murat@goxs 2026-09-30: "benim sesimi tanısın, her şeye cevap
+        # veriyor"): profil kayıtlıysa mikrofon sesi yalnız "Hey Jarvis" + ses izi
+        # doğrulamasından sonra Gemini'ye gider. Bir kez kurulur; yeniden bağlanmada
+        # yalnız olay döngüsü güncellenir.
+        self._gate_loop = loop
+        if not self._voice_gate_ready:
+            self._voice_gate_ready = True
+            try:
+                from jarvis.core.voice_gate import create_gate
+                self._voice_gate = create_gate(
+                    lambda b: self._gate_loop.call_soon_threadsafe(self._gate_put, b),
+                    log=lambda m: print(f"[JARVIS] {m}"))
+            except Exception as _e:  # noqa: BLE001
+                print(f"[JARVIS] [SES] Ses kapısı yüklenemedi: {_e}")
+                self._voice_gate = None
 
         import numpy as _np
         _level_state = {"last_print": 0.0}
@@ -1739,6 +1766,9 @@ class JarvisLive:
                     positions = _np.linspace(0, len(mono) - 1, out_len)
                     samples = _np.interp(positions, _np.arange(len(mono)), mono).astype(_np.int16)
                 data = samples.tobytes()
+                if self._voice_gate is not None:
+                    self._voice_gate.feed(samples)
+                    return
                 loop.call_soon_threadsafe(
                     self.out_queue.put_nowait,
                     {"data": data, "mime_type": "audio/pcm;rate=16000"}
@@ -1851,6 +1881,8 @@ class JarvisLive:
                             # Split into ~50 ms chunks so interrupt() stops audio within 50 ms
                             # (24000 Hz × 2 bytes/sample × 0.05 s = 2400 bytes per slice)
                             _SLICE = 2400
+                            if self._voice_gate is not None:
+                                self._voice_gate.touch()   # JARVIS cevap verirken kapı kapanmasın
                             for _i in range(0, len(_audio_data), _SLICE):
                                 self.audio_in_queue.put_nowait(_audio_data[_i : _i + _SLICE])
 

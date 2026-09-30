@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""JARVIS ses profili: JARVIS yalnız sizin sesinize cevap versin.
+
+Kullanım (proje klasöründe):
+    .venv/bin/python scripts/ses_kaydi.py          # sesinizi kaydeder (3 cümle, ~30 sn)
+    .venv/bin/python scripts/ses_kaydi.py --dene   # 4 sn konuşun: "siz" mi, "başkası" mı?
+    .venv/bin/python scripts/ses_kaydi.py --sil    # profili siler (JARVIS her sesi dinler)
+
+Ses kaydı ve ses izi YALNIZ bu bilgisayarda kalır (~/.local/share/MuratJARVIS/voice,
+yalnız sizin okuyabileceğiniz izinlerle). Ham ses dosyası saklanmaz, yalnız ses izi
+(256 sayı) saklanır.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from jarvis.core import voice_gate as vg  # noqa: E402
+
+CUMLELER = [
+    "Hey Jarvis, bugün hava nasıl olacak, dışarı çıkmadan önce bilmek istiyorum.",
+    "Masaüstündeki dosyaları türlerine göre klasörlere ayır ve bana kısa bir rapor ver.",
+    "Hey Jarvis, yarın sabah dokuzda toplantım var, bana yarım saat önce hatırlat.",
+]
+
+
+def kaydet(saniye: float, cihaz: int | None) -> np.ndarray:
+    import sounddevice as sd
+    try:
+        sd.check_input_settings(device=cihaz, samplerate=vg.SAMPLE_RATE, channels=1, dtype="int16")
+        rate = vg.SAMPLE_RATE
+    except Exception:  # noqa: BLE001
+        rate = int(sd.query_devices(cihaz, "input")["default_samplerate"])
+    ses = sd.rec(int(saniye * rate), samplerate=rate, channels=1, dtype="int16", device=cihaz)
+    sd.wait()
+    ses = ses.reshape(-1)
+    if rate != vg.SAMPLE_RATE:
+        n = int(len(ses) * vg.SAMPLE_RATE / rate)
+        ses = np.interp(np.linspace(0, len(ses) - 1, n), np.arange(len(ses)), ses).astype(np.int16)
+    return ses
+
+
+def seviye(ses: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.square(ses.astype(np.float32)))))
+
+
+def profil_kaydet(cihaz: int | None) -> int:
+    print("Ses modeli hazırlanıyor…")
+    vg.ensure_wake_model()
+    dogrulayici = vg.SpeakerVerifier(vg.ensure_speaker_model())
+    izler = []
+    for i, cumle in enumerate(CUMLELER, 1):
+        while True:
+            input(f"\n[{i}/{len(CUMLELER)}] Enter'a basın, sonra 8 saniye içinde normal sesinizle okuyun:\n"
+                  f"   « {cumle} »\n")
+            print("   🎙️  Kaydediliyor…")
+            ses = kaydet(8.0, cihaz)
+            if seviye(ses) < 150:
+                print("   ⚠️  Ses çok kısık ya da mikrofon sessiz. Mikrofona biraz yaklaşıp tekrar deneyin.")
+                continue
+            izler.append(dogrulayici.embed(ses))
+            print("   ✅ Alındı.")
+            break
+    profil = np.mean(izler, axis=0)
+    profil /= np.linalg.norm(profil) or 1.0
+    # Eşik: kendi kısa (2 sn) parçalarınızın profile en düşük benzerliğinin biraz altı.
+    parcalar = []
+    input("\nSon adım: Enter'a basın ve 4 saniye 'Hey Jarvis, saat kaç?' deyin (eşik ayarı için)…\n")
+    deneme = kaydet(4.0, cihaz)
+    for bas in range(0, len(deneme) - 2 * vg.SAMPLE_RATE + 1, vg.SAMPLE_RATE // 2):
+        parca = deneme[bas:bas + 2 * vg.SAMPLE_RATE]
+        if seviye(parca) >= 150:
+            parcalar.append(vg.similarity(dogrulayici.embed(parca), profil))
+    kendi = min(parcalar) if parcalar else 0.6
+    esik = round(float(min(0.60, max(0.35, kendi - 0.15))), 2)
+    vg.VOICE_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(vg.VOICE_DIR, 0o700)
+    with open(vg.PROFILE_PATH, "wb") as fh:
+        np.save(fh, profil.astype(np.float32))
+    os.chmod(vg.PROFILE_PATH, 0o600)
+    vg.save_settings({"benzerlik_esigi": esik})
+    print(f"\n✅ Ses profili kaydedildi. Sizin kısa konuşmanızın benzerliği: {kendi:.2f} → eşik {esik:.2f}")
+    print("   JARVIS'i yeniden başlatın. Artık 'Hey Jarvis' diye başlayın.")
+    print("   Denemek için: .venv/bin/python scripts/ses_kaydi.py --dene")
+    return 0
+
+
+def dene(cihaz: int | None) -> int:
+    if not vg.PROFILE_PATH.is_file():
+        print("Önce profil kaydedin: .venv/bin/python scripts/ses_kaydi.py")
+        return 1
+    dogrulayici = vg.SpeakerVerifier(vg.ensure_speaker_model())
+    profil = np.load(vg.PROFILE_PATH)
+    esik = vg.settings()["benzerlik_esigi"]
+    input("Enter'a basın ve 4 saniye konuşun (ya da başkasını/TV'yi konuşturun)…")
+    ses = kaydet(4.0, cihaz)
+    if seviye(ses) < 150:
+        print("Ses çok kısık; tekrar deneyin.")
+        return 1
+    sim = vg.similarity(dogrulayici.embed(ses), profil)
+    print(f"Benzerlik: {sim:.2f} (eşik {esik:.2f}) → {'✅ SİZ' if sim >= esik else '🚫 BAŞKASI'}")
+    return 0
+
+
+def sil() -> int:
+    for yol in (vg.PROFILE_PATH, vg.SETTINGS_PATH):
+        if yol.exists():
+            yol.unlink()
+    print("Ses profili silindi. JARVIS yeniden başlayınca her sesi dinler.")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dene", action="store_true", help="kayıtlı sesle karşılaştır")
+    ap.add_argument("--sil", action="store_true", help="ses profilini sil")
+    ap.add_argument("--esik", type=float, help="benzerlik eşiğini elle ayarla (ör. 0.5)")
+    ap.add_argument("--cihaz", type=int, default=None, help="mikrofon numarası (varsayılan: sistem mikrofonu)")
+    a = ap.parse_args()
+    if a.sil:
+        return sil()
+    if a.esik is not None:
+        vg.save_settings({"benzerlik_esigi": float(a.esik)})
+        print(f"Eşik {a.esik:.2f} olarak kaydedildi.")
+        return 0
+    if a.dene:
+        return dene(a.cihaz)
+    return profil_kaydet(a.cihaz)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
