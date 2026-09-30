@@ -82,3 +82,29 @@ def test_task_input_paths_are_added_to_run_command(tmp_path):
     assert plan["run_command"] == f"python main.py {k}/musteriler.csv {k}/siparisler.csv"
     same = da._ensure_paths_in_run_command({"run_command": plan["run_command"]}, desc)
     assert same["run_command"] == plan["run_command"]
+
+
+def test_output_preview_shows_real_error_line():
+    tb = ("STDERR:\nTraceback (most recent call last):\n  File \"/x/main.py\", line 32, in <module>\n    main()\n"
+          "  File \"/x/main.py\", line 25, in main\n    generate_chart()\n"
+          "TypeError: generate_chart() missing 1 required positional argument: 'stats'\n")
+    prev = da._output_preview(tb)
+    assert "TypeError: generate_chart() missing 1 required positional argument" in prev
+    assert da._output_preview("STDOUT:\nkısa çıktı") == "STDOUT:\nkısa çıktı"
+
+
+def test_call_signature_mismatch_found_across_files():
+    codes = {
+        "core/report.py": "def compute(db):\n    return {}\n\ndef generate_chart(stats, output_path='g.png'):\n    pass\n",
+        "main.py": ("from core.report import compute, generate_chart\n"
+                    "def main():\n    s = compute(1)\n    generate_chart()\n    generate_chart(s, 'a', 'b')\n"
+                    "    generate_chart(s, renk='k')\n    generate_chart(stats=s)\n    generate_chart(*[s])\n"),
+    }
+    found = da._call_mismatches(codes)
+    msgs = [i["message"] for i in found["main.py"]]
+    lines = [i["line"] for i in found["main.py"]]
+    assert lines == [4, 5, 6], msgs
+    assert "missing required argument(s): stats" in msgs[0]
+    assert "at most 2" in msgs[1] and "renk" in msgs[2]
+    assert "core/report.py" in da._call_mismatch_hint(codes)
+    assert da._call_mismatches({"main.py": "print(1)\n"}) == {}

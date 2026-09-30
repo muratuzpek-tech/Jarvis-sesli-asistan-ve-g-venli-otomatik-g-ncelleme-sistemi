@@ -739,6 +739,87 @@ def _selenium_instead_of_playwright(file_codes: dict[str, str], dependencies) ->
     return found
 
 
+def _call_mismatches(file_codes: dict[str, str]) -> dict[str, list[dict]]:
+    """Dosyalar arası çağrı/imza uyuşmazlığı (modelden bağımsız, çalıştırmadan).
+    Murat@goxs 2026-09-30: main.py 'generate_chart()' diye argümansız çağırdı, core/
+    report.py 'generate_chart(stats, ...)' tanımladı; traceback en içteki dosyayı
+    gösterdiği için 5 denemede hep report.py düzeltildi, çağıran main.py'ye hiç
+    dokunulmadı. Yalnız 'from paket.modul import f' ile alınan üst düzey fonksiyonlar
+    denetlenir; emin olunamayan (*args, **kwargs, *liste) çağrılar atlanır."""
+    import ast
+    sigs: dict[tuple[str, str], tuple[list[str], int, bool, bool, list[str]]] = {}
+    trees: dict[str, ast.AST] = {}
+    for path, code in file_codes.items():
+        if not path.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        trees[path] = tree
+        mod = path[:-3].replace("/", ".").removesuffix(".__init__")
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                a = node.args
+                pos = [x.arg for x in (*a.posonlyargs, *a.args)]
+                n_req = len(pos) - len(a.defaults)
+                kw_req = [k.arg for k, d in zip(a.kwonlyargs, a.kw_defaults, strict=True) if d is None]
+                kwonly = [k.arg for k in a.kwonlyargs]
+                sigs[(mod, node.name)] = (pos, n_req, a.vararg is not None, a.kwarg is not None, kw_req + ["\0"] + kwonly)
+    found: dict[str, list[dict]] = {}
+    for path, tree in trees.items():
+        local: dict[str, tuple[str, str]] = {}
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                for al in node.names:
+                    if (node.module, al.name) in sigs:
+                        local[al.asname or al.name] = (node.module, al.name)
+        if not local:
+            continue
+        for call in ast.walk(tree):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in local):
+                continue
+            if any(isinstance(x, ast.Starred) for x in call.args) or any(k.arg is None for k in call.keywords):
+                continue
+            mod, name = local[call.func.id]
+            pos, n_req, has_var, has_kw, kw_info = sigs[(mod, name)]
+            kw_req, kwonly = kw_info[:kw_info.index("\0")], kw_info[kw_info.index("\0") + 1:]
+            given_kw = {k.arg for k in call.keywords}
+            n = len(call.args)
+            problems = []
+            missing = [p for p in pos[n:n_req] if p not in given_kw] + [k for k in kw_req if k not in given_kw]
+            if missing:
+                problems.append(f"missing required argument(s): {', '.join(missing)}")
+            if n > len(pos) and not has_var:
+                problems.append(f"passes {n} positional arguments but it accepts at most {len(pos)}")
+            unknown = [k for k in given_kw if k not in pos and k not in kwonly]
+            if unknown and not has_kw:
+                problems.append(f"unknown keyword argument(s): {', '.join(sorted(unknown))}")
+            if problems:
+                where = mod.replace(".", "/") + ".py"
+                found.setdefault(path, []).append({
+                    "code": "CALL-SIGNATURE-MISMATCH",
+                    "message": (f"{name}() is called here but {where} defines {name}({', '.join(pos)}"
+                                f"{', *, ' + ', '.join(kwonly) if kwonly else ''}): {'; '.join(problems)}. "
+                                f"Make THIS call match the definition (or change the definition and every caller "
+                                f"consistently); pass the real data the function needs."),
+                    "line": call.lineno, "col": call.col_offset,
+                })
+    return found
+
+
+def _call_mismatch_hint(file_codes: dict[str, str]) -> str:
+    try:
+        found = _call_mismatches(file_codes)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not found:
+        return ""
+    lines = [f"- {fp}:{it['line']}: {it['message']}" for fp, items in found.items() for it in items]
+    return ("\n\nCALL/DEFINITION MISMATCHES found by static analysis (fix the CALLING file too, not only "
+            "the file in the traceback):\n" + "\n".join(lines[:10]))
+
+
 def _recipes_for_fix(description: str, language: str) -> str:
     """Düzeltme istemine de usta şablonlarını ekler (hata olursa boş döner)."""
     try:
@@ -2004,6 +2085,20 @@ def _probe_web_app(run_command: str, project_dir: Path, file_codes: dict[str, st
         if proc is not None and proc.poll() is None:
             _kill_process_tree(proc)
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _output_preview(output: str) -> str:
+    """Logdaki önizleme. Yalnız ilk 150 karakter yazılınca Python hatalarının asıl
+    satırı ('TypeError: ...') hiç görünmüyordu (Murat@goxs 2026-09-30: 5 deneme
+    'main.py, line 32' diye kesildi, neyin bozuk olduğu logdan anlaşılamadı).
+    Hata varsa son 6 satır da eklenir."""
+    text = output or ""
+    head = text[:150]
+    if "Traceback" in text or "Error" in text[150:]:
+        tail = "\n".join(text.strip().splitlines()[-6:])
+        if tail and tail not in head:
+            return f"{head}\n  …\n{tail[-600:]}"
+    return head
 
 
 def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
@@ -3452,6 +3547,16 @@ def _fix_files(
     else:
         files_to_fix.append(entry_point)
 
+    # Çağrı/imza uyuşmazlığı varsa ÇAĞIRAN dosya da düzeltilecekler arasına girer
+    # (traceback yalnız tanımın olduğu dosyayı gösterebilir).
+    if error_type != "lint_error":
+        try:
+            for fp in _call_mismatches(file_codes):
+                if fp not in files_to_fix:
+                    files_to_fix.append(fp)
+        except Exception:  # noqa: BLE001
+            pass
+
     undefined_note = _undefined_name_note(error_output, file_codes)
     if undefined_note:
         # Canlı test 2026-09-29 (tarihe_gore_ayir): "Hata: name 'src' is not
@@ -3888,6 +3993,13 @@ def _build_project(
     for _fp, _issues in _selenium_instead_of_playwright(file_codes, dependencies).items():
         lint_issues.setdefault(_fp, []).extend(_issues)
 
+    # Dosyalar arası çağrı/imza uyuşmazlığı (2026-09-30, grafik görevi).
+    try:
+        for _fp, _issues in _call_mismatches(file_codes).items():
+            lint_issues.setdefault(_fp, []).extend(_issues)
+    except Exception:  # noqa: BLE001
+        pass
+
     if lint_issues:
         affected = ", ".join(sorted(lint_issues.keys()))
         log(f"İlk çalıştırmadan önce statik analizle olası çalışma-zamanı/davranış hatası tespit edildi ({affected}), model ile düzeltiliyor (bir çalıştırma denemesi harcanmadan)...")
@@ -4034,7 +4146,7 @@ def _build_project(
         log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
         run_started_at = time.time()
         last_output = _run_project(run_command, project_dir, current_timeout)
-        log(f"Output preview: {last_output[:150]}")
+        log(f"Output preview: {_output_preview(last_output)}")
 
         if last_output.startswith("REFUSED:"):
             # Bu bir kod hatasi degil, bir GUVENLIK reddi - self-fix dongusune
@@ -4435,7 +4547,8 @@ def _build_project(
         try:
             _sel = _selenium_instead_of_playwright(file_codes, dependencies)
             _extra = ((("\n\n" + _SELENIUM_HINT) if _sel else "") + _bare_filename_hint(last_output, run_command)
-                      + _known_error_hint(last_output) + _known_code_hint(file_codes))
+                      + _known_error_hint(last_output) + _known_code_hint(file_codes)
+                      + _call_mismatch_hint(file_codes))
             # Aynı hata tekrarlıyorsa düşük sıcaklıktaki model aynı (yanlış) kodu yeniden
             # üretiyor: bu turda daha yüksek sıcaklıkla FARKLI bir çözüm denenir.
             _diversify = repeat_of_previous and "JARVIS_OLLAMA_TEMP" not in os.environ
