@@ -196,6 +196,21 @@ def _known_names(memory: dict | None) -> list[str]:
     return names[:20]
 
 
+def _sounds_like(name: str, heard: str) -> bool:
+    """'Miran' ile duyulan 'Mira'nın' gibi: ortak ön ek en az 4 harf ya da 1 harf fark."""
+    n = _fold(name)
+    for w in re.findall(r"[\wçğıöşüÇĞİÖŞÜ'’]+", heard or ""):
+        w = _fold(w)
+        common = 0
+        for a, b in zip(n, w, strict=False):
+            if a != b:
+                break
+            common += 1
+        if common >= min(4, len(n)) or (len(n) >= 4 and abs(len(w) - len(n)) <= 1 and common >= len(n) - 1):
+            return True
+    return False
+
+
 def _asked_to_close(heard: str) -> bool:
     return bool(_CLOSE_RE.search(heard or ""))
 
@@ -397,15 +412,20 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "reminder",
-        "description": "Sets a timed reminder using Task Scheduler.",
+        "description": (
+            "Sets a reminder with a desktop notification and sound. One-time: give date + time. "
+            "Repeating (e.g. every weekday at 17:00): give time + repeat and NO date — make ONE "
+            "call, never one call per day."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "date":    {"type": "STRING", "description": "Date in YYYY-MM-DD format"},
+                "date":    {"type": "STRING", "description": "Date in YYYY-MM-DD format (one-time reminders only)"},
                 "time":    {"type": "STRING", "description": "Time in HH:MM format (24h)"},
-                "message": {"type": "STRING", "description": "Reminder message text"}
+                "message": {"type": "STRING", "description": "Reminder message text (Turkish)"},
+                "repeat":  {"type": "STRING", "description": "For repeating reminders: daily | weekdays | weekends | comma list like mon,wed,fri"}
             },
-            "required": ["date", "time", "message"]
+            "required": ["time", "message"]
         }
     },
     {
@@ -1578,6 +1598,12 @@ class JarvisLive:
             value    = args.get("value", "")
             unheard = _unheard_names(value, f"{self._heard_prev} {self._heard_now}") \
                 if category in ("identity", "relationships") else []
+            if unheard:
+                # Daha önce kaydedilmiş bir isim (ör. Miran) yanlış duyulmuş olabilir ('Mira'):
+                # hafızada zaten olan ve duyulana benzeyen isimler kabul edilir.
+                known = set(_known_names(load_memory()))
+                heard = f"{self._heard_prev} {self._heard_now}"
+                unheard = [n for n in unheard if not (n in known and _sounds_like(n, heard))]
             if key and value and unheard:
                 # Murat@goxs 2026-09-30: 'Benim oğlum var' deyince hafızaya uydurma bir isim
                 # (son_name = Emir) yazıldı. Kullanıcının SÖYLEMEDİĞİ isim kaydedilmez.

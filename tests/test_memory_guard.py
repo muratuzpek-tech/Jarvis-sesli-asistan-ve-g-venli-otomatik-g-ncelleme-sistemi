@@ -40,3 +40,8 @@ def test_live_model_can_be_chosen_by_env(monkeypatch):
     src = open(jm.__file__, encoding="utf-8").read()
     assert "model=self._live_model" in src and "eski modele dönülüyor" in src
     assert jm.LIVE_MODEL.endswith("native-audio-preview-12-2025")
+
+
+def test_known_name_misheard_is_accepted():
+    assert jm._sounds_like("Miran", "Saat 17'de Mira'nın okuldan al")
+    assert not jm._sounds_like("Miran", "Emir geldi")

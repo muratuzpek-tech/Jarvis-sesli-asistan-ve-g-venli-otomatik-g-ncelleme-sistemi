@@ -176,6 +176,10 @@ def recall_conversation(parameters: dict) -> str:
     topic = (p.get("topic") or "").strip()
 
     rng = _minutes_range(minutes) if minutes not in (None, "") else None
+    if rng is None and not period and not explicit_date:
+        # Murat@goxs 2026-09-30: "Ne konuştuk bu zamana kadar?" → aralık verilmedi,
+        # araç soru soruyordu. Aralık yoksa bugün varsayılır.
+        period = "bugun"
     if rng is None:
         rng = _date_range(period, explicit_date)
     if rng is None:
