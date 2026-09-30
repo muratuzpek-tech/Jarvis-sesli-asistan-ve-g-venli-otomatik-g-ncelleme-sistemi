@@ -365,3 +365,25 @@ def test_word_and_line_metrics_are_computed():
     fx = [{"path": "hikaye.txt", "content": "bir iki üç\ndört beş\naltı yedi sekiz dokuz\n"}]
     assert _drop_miscounted(['"kelime": 7', '"satir": 2'], '{"satir": 3, "kelime": 9}', fx) == []
     assert _drop_miscounted(['"kelime": 7'], '{"kelime": 8}', fx) == ['"kelime": 7']
+
+
+def test_bare_invented_labels_are_ignored():
+    from jarvis.actions.devkit.acceptance import _drop_invented_labels
+    fixtures = [{"path": "a/eski.tmp", "content": "x"}]
+    out = "Gereksiz Dosya Bulucu\nBulunan dosya: 3\nToplam boyut: 12 KB\neski.tmp\n"
+    missing = ["files_found:", "total_size:", "eski.tmp_yok"]
+    assert _drop_invented_labels(missing, out, fixtures) == ["eski.tmp_yok"]
+
+
+def test_bare_label_kept_when_task_asks_for_it():
+    from jarvis.actions.devkit.acceptance import _drop_invented_labels
+    fixtures = [{"path": "a/eski.tmp", "content": "x"}]
+    task = "Raporda 'files_found:' ve 'total_size:' satırları olsun."
+    assert _drop_invented_labels(["files_found:"], "rapor", fixtures, task) == ["files_found:"]
+
+
+def test_underscore_label_with_value_checks_only_number():
+    from jarvis.actions.devkit.acceptance import _drop_invented_labels
+    fixtures = [{"path": "a.txt", "content": "x"}]
+    assert _drop_invented_labels(["files_found: 3"], "Bulunan: 3", fixtures) == []
+    assert _drop_invented_labels(["files_found: 3"], "Bulunan: 4", fixtures) == ["files_found: 3"]

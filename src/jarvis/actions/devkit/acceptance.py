@@ -64,6 +64,8 @@ is handled. The edge case must follow ONLY the rules written in the task — nev
 (e.g. words to ignore, a required output wording) that the task does not state.
 Never use a bare small number as a token ("7", "2"): write it WITH its label as the program would print it
 ("satir: 3", "line 4"), and count it yourself carefully from the fixture text.
+Never use a bare label with no value ("files_found:", "total_size:") — a label is output WORDING, which the
+task does not fix; the value (a file name, a number) is what proves correctness.
 If the result depends on file DATES (modification time), give EVERY fixture an "mtime": "YYYY-MM-DD" —
 otherwise fixtures are created with today's date and date-based expectations cannot hold.
 
@@ -329,7 +331,7 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
         if missing:
             missing = _drop_miscounted(missing, text, spec["fixtures"])
         if missing and not _is_structured(ex["output"], text):
-            missing = _drop_invented_labels(missing, text, spec["fixtures"])
+            missing = _drop_invented_labels(missing, text, spec["fixtures"], spec.get("task", ""))
         if missing:
             problems.append(f"{label} şu beklenen ifadeleri İÇERMİYOR: {missing}. İçerik (ilk 800 karakter): {text[:800]!r}"
                             + _json_shape_hint(text, missing))
@@ -444,7 +446,8 @@ def _token_found(token: str, low_text: str) -> bool:
 
 
 _KEYED_COUNT = re.compile(r'^"?([\w.\-/]{1,40})"?\s*[:=]\s*(\d{1,6})$')
-_LABEL_VALUE = re.compile(r"^([^\W\d_][^\W\d_ ]*(?: [^\W\d_]+){0,3})\s*[:=]\s*(\d{1,6})$")
+_LABEL_VALUE = re.compile(r"^([^\W\d_][^\W\d ]*(?: [^\W\d_]+){0,3})\s*[:=]\s*(\d{1,6})$")
+_BARE_LABEL = re.compile(r"^([^\W\d][\w ]{0,40}?)\s*[:=]\s*$")
 
 
 def _fold(text: str) -> str:
@@ -511,7 +514,8 @@ def _is_structured(output_name: str, text: str) -> bool:
         return False
 
 
-def _drop_invented_labels(missing: list[str], output_text: str, fixtures: list[dict]) -> list[str]:
+def _drop_invented_labels(missing: list[str], output_text: str, fixtures: list[dict],
+                          task: str = "") -> list[str]:
     """'satir: 4', 'toplam not sayisi: 8' gibi beklentilerde ETİKET görevin değil,
     testi yazan modelin uydurduğu biçimdir (canlı test 2026-09-29 yapilacaklar_raporu:
     görev biçim belirtmiyordu; program 'ana.py:4' yazdığı için 5 tur reddedildi ve
@@ -519,6 +523,17 @@ def _drop_invented_labels(missing: list[str], output_text: str, fixtures: list[d
     girdilerde HİÇ geçmiyorsa (yani veri değil biçimse) yalnızca SAYI aranır: çıktıda
     o sayı, beklendiği kadar kez tek başına geçmeli. Metin/Markdown çıktılar içindir."""
     corpus = _fold("\n".join(fx["content"] for fx in fixtures))
+    # Değersiz çıplak etiket ('files_found:', 'total_size:') yalnız BİÇİMDİR: görevde
+    # ya da örnek girdide geçmiyorsa aranmaz (canlı test 2026-09-30 gereksiz dosya
+    # bulucu: yerel model bu İngilizce etiketleri uydurdu; Türkçe rapor yazan
+    # program reddedildi).
+    task_f = _fold(task)
+    bare = [t for t in missing if (m := _BARE_LABEL.match(t.strip()))
+            and not any(v in corpus or v in task_f
+                        for v in {_fold(m.group(1)), _fold(m.group(1)).replace("_", " ")})]
+    if bare:
+        print(f"[DevAgent] ℹ️ Kabul testindeki değersiz uydurma etiketler yok sayıldı: {bare}")
+        missing = [t for t in missing if t not in bare]
     numbers = re.findall(r"(?<![\w.])(\d+)(?![\w.])", output_text)
     need: dict[str, int] = {}
     relaxed: list[str] = []

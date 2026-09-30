@@ -646,6 +646,7 @@ def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
     if spec is None:
         log(f"ℹ️ Kabul testi uygulanmayacak: {reason}")
         return None
+    spec["task"] = description   # görevde açıkça istenen etiketler uydurma sayılmasın
     tokens = sum(len(e["contains"]) for e in spec["expect"])
     log(f"🧪 Kabul testi hazır: {len(spec['fixtures'])} örnek dosya, {tokens} beklenen ifade.")
     return spec
