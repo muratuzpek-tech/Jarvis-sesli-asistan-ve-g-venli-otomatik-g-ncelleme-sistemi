@@ -117,6 +117,10 @@ BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = api_keys_path()
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
 LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+# Deneme (Murat@goxs 2026-09-30): JARVIS_LIVE_MODEL=gemini-3.8-live ile yeni sesli model
+# denenir; bağlanamazsa ya da kota/desteklenmeyen ayar hatası verirse otomatik LIVE_MODEL'e dönülür.
+_FALLBACK_HINTS = ("not found", "not supported", "unsupported", "invalid", "INVALID_ARGUMENT",
+                   "RESOURCE_EXHAUSTED", "quota", "429", "1007", "1008", "permission")
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
@@ -966,6 +970,7 @@ class JarvisLive:
         self._speaking_lock       = threading.Lock()
         self._heard_now           = ""      # kullanıcının şu anki (bitmemiş) sözü
         self._heard_prev          = ""      # bir önceki tam sözü
+        self._live_model          = (os.environ.get("JARVIS_LIVE_MODEL", "").strip() or LIVE_MODEL)
         self._resume_handle       = None    # Gemini oturum devam anahtarı (~2 saat geçerli)
         self._resume_time         = 0.0
         self._voice_gate          = None    # ses kapısı (core/voice_gate.py); None = her ses dinlenir
@@ -2635,18 +2640,18 @@ class JarvisLive:
 
         while True:
             try:
-                print("[JARVIS] Connecting...")
+                print(f"[JARVIS] Connecting... (model: {self._live_model})")
                 self.ui.set_state("CONNECTING")
                 config = self._build_config()
 
                 # Fresh client on every reconnect — avoids stale HTTP session state
                 client = genai.Client(
                     api_key=_get_api_key(),
-                    http_options={"api_version": "v1beta"}
+                    http_options={"api_version": os.environ.get("JARVIS_LIVE_API_VERSION", "v1beta")}
                 )
 
                 async with (
-                    client.aio.live.connect(model=LIVE_MODEL, config=config) as session,
+                    client.aio.live.connect(model=self._live_model, config=config) as session,
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session          = session
@@ -2722,6 +2727,14 @@ class JarvisLive:
                     continue
 
                 print(f"[JARVIS] Error ({type(e).__name__}); reconnect will be delayed.")
+                if self._live_model != LIVE_MODEL and (
+                        self.session is None or any(h.lower() in err_str.lower() for h in _FALLBACK_HINTS)):
+                    why = re.sub(r"AIza[0-9A-Za-z_\-]{20,}", "***", err_str)[:200]
+                    print(f"[JARVIS] ↩️ {self._live_model} kullanılamadı ({type(e).__name__}: {why}); "
+                          f"eski modele dönülüyor: {LIVE_MODEL}")
+                    self.ui.write_log(f"SYS: {self._live_model} çalışmadı, eski sesli modele dönüldü.")
+                    self._live_model = LIVE_MODEL
+                    self._resume_handle = None   # devam anahtarı modele özeldir
                 if getattr(self, "_using_resume", None) and self.session is None:
                     # Devam anahtarıyla bağlanılamadı: bir sonraki denemede yeni oturum + son konuşmalar.
                     self._resume_handle = None

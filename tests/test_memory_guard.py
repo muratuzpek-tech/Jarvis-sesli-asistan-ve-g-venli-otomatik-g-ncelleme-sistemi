@@ -33,3 +33,10 @@ def test_known_names_and_vad_in_config(monkeypatch):
     cfg = jm.JarvisLive._build_config(_t.SimpleNamespace(_resume_handle=None, _resume_time=0.0))
     assert "Miran" in cfg.system_instruction and "caiz" in cfg.system_instruction
     assert cfg.realtime_input_config.automatic_activity_detection.silence_duration_ms == 800
+
+
+def test_live_model_can_be_chosen_by_env(monkeypatch):
+    monkeypatch.setenv("JARVIS_LIVE_MODEL", "gemini-3.8-live")
+    src = open(jm.__file__, encoding="utf-8").read()
+    assert "model=self._live_model" in src and "eski modele dönülüyor" in src
+    assert jm.LIVE_MODEL.endswith("native-audio-preview-12-2025")
