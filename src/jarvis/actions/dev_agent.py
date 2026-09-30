@@ -1855,14 +1855,12 @@ _HTTP_FAIL = re.compile(
 
 def _requested_count(description: str) -> "int | None":
     """Görev kaç satır/kayıt istiyor? ('en ucuz 5 kitap' → 5, 'ilk 10 haber' → 10).
+    Birden çok sayı varsa ('toplam 100 kitap topla, en düşük 10 kitabı göster') EN KÜÇÜĞÜ
+    alınır: gösterilen tablo toplanandan büyük olamaz; fazlasını istemek yanlış alarm olur.
     Emin değilse None — o zaman sayı denetlenmez (yanlış alarm yerine sessizlik)."""
-    for rx in _REQUESTED_COUNT:
-        m = rx.search(description or "")
-        if m:
-            n = int(m.group(1))
-            if 1 <= n <= 200:
-                return n
-    return None
+    found = [int(m.group(1)) for rx in _REQUESTED_COUNT for m in rx.finditer(description or "")]
+    found = [n for n in found if 1 <= n <= 200]
+    return min(found) if found else None
 
 
 def _speakable(text: str) -> str:

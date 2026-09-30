@@ -17,6 +17,10 @@ def test_requested_count_from_task():
     assert da._requested_count("top 10 haberi listele") == 10
     assert da._requested_count("en az 3 sayfa gez") is None
     assert da._requested_count("hava durumunu göster") is None
+    # 2026-09-30 logu: toplanan 100, gösterilen 10 → 10 (100 satır istemek yanlış alarm olurdu)
+    t2 = ("books.toscrape.com sitesinin ilk 5 sayfasından toplam 100 kitabı topla. Fiyatı en düşük "
+          "olan 10 kitabı bul ve tablo olarak göster.")
+    assert da._requested_count(t2) == 10
 
 
 def _server(tmp_path, rows, port, extra=""):
