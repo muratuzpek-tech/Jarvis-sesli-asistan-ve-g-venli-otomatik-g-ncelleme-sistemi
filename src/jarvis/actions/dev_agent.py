@@ -687,7 +687,23 @@ _STRPTIME_MISMATCH = re.compile(r"time data '([^']*)' does not match format '([^
 
 def _known_error_hint(output: str) -> str:
     """Sık görülen, modelin tekrar tekrar göremediği hatalar için kesin ipucu."""
-    m = _STRPTIME_MISMATCH.search(output or "")
+    out = output or ""
+    if ("partially initialized module" in out and "circular import" in out) or \
+            re.search(r"cannot import name '(\w+)' from '\1'", out) or \
+            "'function' object has no attribute 'run'" in out:
+        # Canlı test 2026-09-30 (flask_todo): app/__init__.py ↔ routes.py döngüsel
+        # import, 'from create_app import create_app' ve create_app.run() — 5 tur.
+        return (
+            "\n\nROOT CAUSE (Flask project layout): the modules import each other in a circle, or a FUNCTION "
+            "is imported as if it were a module. Use this exact, standard layout:\n"
+            "- app/__init__.py: `from flask import Flask` and `def create_app(): app = Flask(__name__); "
+            "from .routes import bp; app.register_blueprint(bp); return app` (import routes INSIDE the function).\n"
+            "- app/routes.py: `from flask import Blueprint, ...`; `bp = Blueprint('main', __name__)`; decorate "
+            "views with `@bp.route(...)`. routes.py must NOT import `app` or `create_app`.\n"
+            "- main.py: `from app import create_app` then `app = create_app()` and `app.run(...)` — call the "
+            "function first; never `create_app.run()` and never `from create_app import ...`."
+        )
+    m = _STRPTIME_MISMATCH.search(out)
     if m:
         # Canlı test 2026-09-29 (hata_saatleri): satır boşluktan bölünüp YALNIZ
         # tarih parçası tam biçimle çözülmeye çalışıldı; 5 tur aynı hata.
@@ -3149,8 +3165,43 @@ _IMPORT_TO_PYPI = {
 }
 
 
-def _try_auto_install(error_output: str, project_dir: Path) -> bool:
-    """ModuleNotFoundError varsa eksik paketi otomatik kurmaya çalışır."""
+# Planda olmasa da düzeltme sırasında kurulabilecek, bilinen yaygın paketler.
+# Bunların DIŞINDAKİ bir isim (modelin uydurduğu 'create_app' gibi) PyPI'dan
+# kurulmaz: pip install, paketin kurulum kodunu korumalı alan DIŞINDA çalıştırır
+# (canlı test 2026-09-30 flask_todo: 'create_app' adlı yabancı bir paket JARVIS'in
+# kendi .venv'ine kuruldu).
+_WELL_KNOWN_IMPORTS = frozenset({
+    "requests", "flask", "numpy", "pandas", "matplotlib", "seaborn", "plotly", "scipy", "lxml",
+    "openpyxl", "xlsxwriter", "tqdm", "rich", "click", "typer", "fastapi", "uvicorn", "jinja2",
+    "sqlalchemy", "pydantic", "httpx", "aiohttp", "psutil", "pygame", "playwright", "selenium",
+    "dateutil", "pytz", "tabulate", "colorama", "feedparser", "markdown", "reportlab", "qrcode",
+    "pyperclip", "watchdog", "schedule", "networkx", "sympy", "werkzeug", "flask_sqlalchemy",
+    "chardet", "emoji", "faker", "pyfiglet", "termcolor", "wordcloud", "nltk", "textblob",
+})
+_IMPORT_TO_PYPI_EXTRA = {"dateutil": "python-dateutil", "flask_sqlalchemy": "Flask-SQLAlchemy"}
+
+
+def _local_project_names(project_dir: Path) -> set[str]:
+    """Projedeki dosya/klasör adları ve tanımlı fonksiyon/sınıf adları (küçük harf)."""
+    names: set[str] = set()
+    try:
+        for f in project_dir.rglob("*"):
+            if ".jarvis" in f.parts or ".venv" in f.parts:
+                continue
+            names.add(f.stem.lower())
+            if f.suffix == ".py" and f.is_file() and f.stat().st_size < 500_000:
+                names.update(n.lower() for n in re.findall(
+                    r"^\s*(?:def|class)\s+(\w+)|^(\w+)\s*=", f.read_text(encoding="utf-8", errors="replace"),
+                    re.M) for n in n if n)
+    except OSError:
+        pass
+    return names
+
+
+def _try_auto_install(error_output: str, project_dir: Path, planned: "list[str] | tuple" = ()) -> bool:
+    """ModuleNotFoundError varsa eksik paketi otomatik kurmaya çalışır — yalnızca
+    planda onaylanmış ya da bilinen yaygın bir paketse; projenin kendi dosya /
+    fonksiyon adlarını (ör. 'create_app') ve tanınmayan isimleri ASLA kurmaz."""
     pattern = re.compile(
         r"No module named ['\"]([a-zA-Z0-9_\-\.]+)['\"]", re.IGNORECASE
     )
@@ -3187,7 +3238,18 @@ def _try_auto_install(error_output: str, project_dir: Path) -> bool:
         print(f"[DevAgent] ⚠️ '{module_name}' zaten Python standart kütüphanesinin bir parçası (pip'te böyle bir paket yok, ayrıca kurulmasına gerek yok) - kurulum denenmeyecek.")
         return False
 
-    pkg = _IMPORT_TO_PYPI.get(module_name.lower(), module_name.replace("_", "-"))
+    low = module_name.lower()
+    if low in _local_project_names(project_dir):
+        print(f"[DevAgent] ⚠️ '{module_name}' bu projenin kendi dosyası/fonksiyonu — dış paket değil, "
+              "kurulmayacak; import satırı düzeltilecek.")
+        return False
+    planned_low = {re.split(r"[<>=!~\[ ;]", str(d).strip(), maxsplit=1)[0].lower().replace("-", "_")
+                   for d in planned or ()}
+    if not (low in _WELL_KNOWN_IMPORTS or low in _IMPORT_TO_PYPI or low.replace("-", "_") in planned_low):
+        print(f"[DevAgent] ⚠️ '{module_name}' planda yok ve bilinen bir paket değil — güvenlik için "
+              "internetten KURULMAYACAK; import satırı düzeltilecek.")
+        return False
+    pkg = _IMPORT_TO_PYPI.get(low) or _IMPORT_TO_PYPI_EXTRA.get(low) or module_name.replace("_", "-")
     print(f"[DevAgent] 🔧 Auto-installing missing package: {pkg} (import: {module_name})")
     try:
         result = subprocess.run(
@@ -4512,7 +4574,7 @@ def _build_project(
                 continue
 
         if error_type == "dependency_error" and auto_installs < 3:
-            installed = _try_auto_install(last_output, project_dir)
+            installed = _try_auto_install(last_output, project_dir, dependencies)
             if installed:
                 auto_installs += 1
                 log("Missing dependency installed, retrying...")
