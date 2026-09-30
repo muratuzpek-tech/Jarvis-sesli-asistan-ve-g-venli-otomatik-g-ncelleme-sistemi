@@ -108,3 +108,14 @@ def test_frames_are_regrouped_to_80ms():
     g.process(_speech(2048))        # mikrofon 2048'lik parçalar veriyor
     g.process(_speech(2048))
     assert [len(b) for b in sent] == [vg.FRAME * 2] * 3
+
+
+def test_voiced_keeps_only_speech_and_normalized_levels():
+    rng = np.random.default_rng(0)
+    sessiz = (rng.standard_normal(6 * vg.SAMPLE_RATE) * 40).astype(np.int16)
+    konusma = (np.sin(np.arange(2 * vg.SAMPLE_RATE) / 7.0) * 2500).astype(np.int16)
+    kayit = np.concatenate([sessiz[:3 * vg.SAMPLE_RATE], konusma, sessiz[3 * vg.SAMPLE_RATE:]])
+    kisim = vg.voiced(kayit)
+    assert 1.8 * vg.SAMPLE_RATE <= len(kisim) <= 2.1 * vg.SAMPLE_RATE
+    assert len(vg.voiced(sessiz)) < 0.3 * vg.SAMPLE_RATE      # yalnız uğultu: konuşma yok
+    assert int(np.abs(vg.normalized(kisim)).max()) == 16000

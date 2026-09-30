@@ -109,6 +109,29 @@ class SpeakerVerifier:
         return vec / (np.linalg.norm(vec) or 1.0)
 
 
+def voiced(samples: np.ndarray, frame_ms: int = 30) -> np.ndarray:
+    """Yalnız konuşma olan kısımlar (sessizlik ve uğultu atılır). Murat@goxs
+    2026-09-30: 8 sn'lik kayıtların çoğu sessizlikti; ses izi gürültüden çıkarıldı
+    ve kişinin kendi sesi yalnız 0.19-0.20 benzerlik aldı."""
+    x = np.asarray(samples).reshape(-1).astype(np.float32)
+    n = int(SAMPLE_RATE * frame_ms / 1000)
+    if len(x) < n:
+        return x.astype(np.int16)
+    frames = x[: len(x) // n * n].reshape(-1, n)
+    rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    floor = float(np.percentile(rms, 20))
+    thr = max(120.0, floor * 3.0, float(np.percentile(rms, 95)) * 0.15)
+    keep = frames[rms >= thr]
+    return keep.reshape(-1).astype(np.int16) if keep.size else x[:0].astype(np.int16)
+
+
+def normalized(samples: np.ndarray) -> np.ndarray:
+    """Seviyeyi eşitler (kısık mikrofon ile yakın konuşma aynı sayılsın)."""
+    x = np.asarray(samples).astype(np.float32)
+    peak = float(np.abs(x).max(initial=0.0))
+    return (x * (16000.0 / peak)).astype(np.int16) if peak > 0 else x.astype(np.int16)
+
+
 def similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / ((np.linalg.norm(a) * np.linalg.norm(b)) or 1.0))
 
@@ -178,7 +201,10 @@ class VoiceGate:
             return
         self._last_try = now
         audio = np.concatenate(list(self._ring)[-int(2.0 * SAMPLE_RATE / FRAME):])
-        sim = similarity(self._verifier.embed(audio), self._profile)
+        speech = voiced(audio)
+        if len(speech) < int(0.6 * SAMPLE_RATE):
+            speech = audio
+        sim = similarity(self._verifier.embed(normalized(speech)), self._profile)
         if sim >= self.cfg["benzerlik_esigi"]:
             self.active = True
             self._last_activity = now
