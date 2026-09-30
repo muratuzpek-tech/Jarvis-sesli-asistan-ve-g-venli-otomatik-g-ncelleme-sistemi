@@ -604,10 +604,19 @@ def _with_sample_input(run_command: str, project_dir: Path, spec: dict, log=prin
     except ValueError:
         return run_command
     args = spec.get("args") or []
-    if len(parts) > 2 or not args or any(URL_PLACEHOLDER in a for a in args):
+    if not args or any(URL_PLACEHOLDER in a for a in args) or not any(PLACEHOLDER in a for a in args):
         return run_command
-    if not any(PLACEHOLDER in a for a in args):
-        return run_command
+    if len(parts) > 2:
+        # Windows testi 2026-09-30 (kelime_sayaci): plan 'python main.py input.txt' dedi ama
+        # input.txt HİÇ yoktu; 5 tur 'Dosya bulunamadı' ile boşa gitti. Ek argümanlar yalnızca
+        # proje klasöründe VAR OLMAYAN göreli dosya adlarıysa (uydurma örnek girdi) örnekle
+        # değiştirilir; gerçek/mutlak yollar ve seçenekler (-x) hiç değiştirilmez.
+        extra = parts[2:]
+        if not all(not a.startswith("-") and not os.path.isabs(a) and "://" not in a
+                   and not (project_dir / a).exists() for a in extra):
+            return run_command
+        log(f"ℹ️ Plandaki girdi {extra} proje klasöründe yok (uydurma); yerine örnek girdi kullanılacak.")
+        run_command = " ".join(parts[:2])
     sample = project_dir / SAMPLE_INPUT_DIR
     try:
         for fx in spec["fixtures"]:
