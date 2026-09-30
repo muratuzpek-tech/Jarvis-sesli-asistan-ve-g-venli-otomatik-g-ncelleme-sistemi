@@ -42,6 +42,7 @@ DEFAULTS = {
     "uyanma_esigi": 0.5,         # "Hey Jarvis" algılama puanı
     "pencere_sn": 12.0,          # son konuşmadan sonra kapının açık kalma süresi
     "ses_esigi": 500.0,          # bu RMS'in üstü "konuşma var" sayılır
+    "dogrulama_sn": 1.5,         # "Hey Jarvis"ten sonra ses izi için beklenen komut süresi
 }
 
 
@@ -151,6 +152,8 @@ class VoiceGate:
         self._pending = np.zeros(0, dtype=np.int16)
         self._ring: deque = deque(maxlen=int(2.5 * SAMPLE_RATE / FRAME))
         self.active = False
+        self._verifying: list | None = None   # "Hey Jarvis" duyuldu, komutun başı toplanıyor
+        self._wake_audio = np.zeros(0, dtype=np.int16)
         self._last_activity = 0.0
         self._last_try = -10.0
         self._thread: threading.Thread | None = None
@@ -195,26 +198,37 @@ class VoiceGate:
                 self._reset_wake()
                 self._log("🔒 Ses kapısı kapandı (sessizlik). Tekrar 'Hey Jarvis' deyin.")
             return
+        if self._verifying is not None:
+            # Murat@goxs 2026-09-30: yalnız "Hey Jarvis" (≈0.9 sn) ile ses tanıma güvenilmezdi
+            # (kendi sesi 0.68, TV 0.64). Komutun ilk ~1.5 sn'si de beklenir; bu sırada
+            # ses Gemini'ye GİTMEZ, doğrulanınca kayıpsız gönderilir.
+            self._verifying.append(frame)
+            if len(self._verifying) * FRAME < self.cfg["dogrulama_sn"] * SAMPLE_RATE:
+                return
+            held, self._verifying = self._verifying, None
+            audio = np.concatenate([self._wake_audio, *held])
+            speech = voiced(audio)
+            if len(speech) < int(0.6 * SAMPLE_RATE):
+                speech = audio
+            sim = similarity(self._verifier.embed(normalized(speech)), self._profile)
+            if sim >= self.cfg["benzerlik_esigi"]:
+                self.active = True
+                self._last_activity = now
+                self._log(f"🔓 'Hey Jarvis' — ses tanındı (benzerlik {sim:.2f}); dinliyorum.")
+                for f in held:
+                    self._send(f.tobytes())
+            else:
+                self._log(f"🚫 'Hey Jarvis' duyuldu ama ses tanınmadı (benzerlik {sim:.2f} < "
+                          f"{self.cfg['benzerlik_esigi']:.2f}); yok sayıldı.")
+            self._reset_wake()
+            return
         self._ring.append(frame)
         score = float(self._wake.predict(frame).get(WAKE_WORD, 0.0))
         if score < self.cfg["uyanma_esigi"] or now - self._last_try < 1.5:
             return
         self._last_try = now
-        audio = np.concatenate(list(self._ring)[-int(2.0 * SAMPLE_RATE / FRAME):])
-        speech = voiced(audio)
-        if len(speech) < int(0.6 * SAMPLE_RATE):
-            speech = audio
-        sim = similarity(self._verifier.embed(normalized(speech)), self._profile)
-        if sim >= self.cfg["benzerlik_esigi"]:
-            self.active = True
-            self._last_activity = now
-            self._reset_wake()
-            self._log(f"🔓 'Hey Jarvis' — ses tanındı (benzerlik {sim:.2f}); dinliyorum.")
-            for tail in list(self._ring)[-3:]:          # son 0.24 sn: komutun başı kaybolmasın
-                self._send(tail.tobytes())
-        else:
-            self._log(f"🚫 'Hey Jarvis' duyuldu ama ses tanınmadı (benzerlik {sim:.2f} < "
-                      f"{self.cfg['benzerlik_esigi']:.2f}); yok sayıldı.")
+        self._wake_audio = np.concatenate(list(self._ring)[-int(1.2 * SAMPLE_RATE / FRAME):])
+        self._verifying = [f for f in list(self._ring)[-3:]]   # komutun başı kaybolmasın
 
     def _reset_wake(self) -> None:
         reset = getattr(self._wake, "reset", None)

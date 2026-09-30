@@ -53,7 +53,7 @@ def kaydet(saniye: float, cihaz: int | None) -> np.ndarray:
         rate = int(sd.query_devices(cihaz, "input")["default_samplerate"])
     ses = sd.rec(int(saniye * rate), samplerate=rate, channels=1, dtype="int16", device=cihaz)
     sd.wait()
-    ses = ses.reshape(-1)
+    ses = ses.reshape(-1)[int(0.25 * rate):]      # açılış anındaki çıt sesini at
     if rate != vg.SAMPLE_RATE:
         n = int(len(ses) * vg.SAMPLE_RATE / rate)
         ses = np.interp(np.linspace(0, len(ses) - 1, n), np.arange(len(ses)), ses).astype(np.int16)
@@ -65,7 +65,12 @@ def konusma(ses: np.ndarray) -> tuple[np.ndarray, str]:
     kisim = vg.voiced(ses)
     tepe = int(np.abs(ses).max(initial=0))
     sn = len(kisim) / vg.SAMPLE_RATE
-    return kisim, f"konuşma {sn:.1f} sn, en yüksek seviye {tepe}"
+    tavan = float(np.mean(np.abs(kisim.astype(np.int32)) >= 32000)) * 100 if kisim.size else 0.0
+    bilgi = f"konuşma {sn:.1f} sn, en yüksek seviye {tepe}"
+    if tavan >= 0.5:
+        bilgi += (f" — ⚠️ sesin %{tavan:.1f}'i TAVANA VURUYOR (bozuluyor): "
+                  "Ayarlar → Ses → Giriş seviyesini ~%60'a indirin")
+    return kisim, bilgi
 
 
 def profil_kaydet(cihaz: int | None) -> int:
@@ -103,22 +108,25 @@ def profil_kaydet(cihaz: int | None) -> int:
     print(f"\nKayıtlarınızın birbirine benzerliği: {', '.join(f'{t:.2f}' for t in tutarlilik)}")
     kisa = []
     while True:
-        input("\nSon adım: Enter'a basın ve hemen 'Hey Jarvis, saat kaç?' deyin (4 sn)…\n")
+        input("\nSon adım: Enter'a basın ve hemen JARVIS'e konuşur gibi deyin (4 sn):\n"
+              "   « Hey Jarvis, saat kaç, bugün hava nasıl? »\n")
         kisim, bilgi = konusma(kaydet(4.0, cihaz))
         print(f"   ({bilgi})")
-        if len(kisim) >= 0.8 * vg.SAMPLE_RATE:
+        if len(kisim) >= 1.2 * vg.SAMPLE_RATE:
             kisa.append(vg.similarity(dogrulayici.embed(vg.normalized(kisim)), profil))
             break
         print("   ⚠️  Konuşma duyulmadı, tekrar deneyin.")
     kendi = min([*kisa, *tutarlilik])
-    esik = round(float(min(0.60, max(0.30, kendi - 0.15))), 2)
+    # Eşik: kendi sesinizin en düşük benzerliğinin biraz altı (0.60'ta tavan YOK:
+    # 2026-09-30'da TV 0.64 alıp "siz" sayıldı).
+    esik = round(float(min(0.80, max(0.45, kendi - 0.12))), 2)
     vg.VOICE_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(vg.VOICE_DIR, 0o700)
     with open(vg.PROFILE_PATH, "wb") as fh:
         np.save(fh, profil.astype(np.float32))
     os.chmod(vg.PROFILE_PATH, 0o600)
     vg.save_settings({"benzerlik_esigi": esik})
-    print(f"\n✅ Ses profili kaydedildi. 'Hey Jarvis, saat kaç?' benzerliği: {kisa[0]:.2f} → eşik {esik:.2f}")
+    print(f"\n✅ Ses profili kaydedildi. JARVIS'e konuşma benzerliği: {kisa[0]:.2f} → eşik {esik:.2f}")
     if kendi < 0.45:
         print("⚠️  Kayıtlarınız birbirine az benziyor (mikrofon kısık ya da ortam gürültülü olabilir).\n"
               "   Daha sessiz bir ortamda ve mikrofona yakın yeniden kaydetmeniz iyi olur.")
@@ -127,7 +135,7 @@ def profil_kaydet(cihaz: int | None) -> int:
     return 0
 
 
-def dene(cihaz: int | None) -> int:
+def dene(cihaz: int | None, kez: int = 3) -> int:
     if not vg.PROFILE_PATH.is_file():
         print("Önce profil kaydedin: .venv/bin/python scripts/ses_kaydi.py")
         return 1
@@ -135,14 +143,33 @@ def dene(cihaz: int | None) -> int:
     dogrulayici = vg.SpeakerVerifier(vg.ensure_speaker_model())
     profil = np.load(vg.PROFILE_PATH)
     esik = vg.settings()["benzerlik_esigi"]
-    input("Enter'a basın ve hemen 4 saniye konuşun (ya da başkasını/TV'yi konuşturun)…")
-    kisim, bilgi = konusma(kaydet(4.0, cihaz))
-    print(f"({bilgi})")
-    if len(kisim) < 0.8 * vg.SAMPLE_RATE:
-        print("Konuşma duyulmadı; tekrar deneyin.")
-        return 1
-    sim = vg.similarity(dogrulayici.embed(vg.normalized(kisim)), profil)
-    print(f"Benzerlik: {sim:.2f} (eşik {esik:.2f}) → {'✅ SİZ' if sim >= esik else '🚫 BAŞKASI'}")
+    print(f"Eşik: {esik:.2f}. JARVIS gibi değerlendirilir: 'Hey Jarvis' + komutun başı (~2.5 sn).")
+    sonuclar = []
+    for i in range(1, kez + 1):
+        kim = input(f"\n[{i}/{kez}] Kim konuşacak? (s = siz, t = TV/başkası) ve Enter, sonra HEMEN konuşun (4 sn): ")
+        kisim, bilgi = konusma(kaydet(4.0, cihaz))
+        print(f"   ({bilgi})")
+        if len(kisim) < 0.8 * vg.SAMPLE_RATE:
+            print("   Konuşma duyulmadı; bu deneme sayılmadı.")
+            continue
+        sim = vg.similarity(dogrulayici.embed(vg.normalized(kisim[: int(2.5 * vg.SAMPLE_RATE)])), profil)
+        karar = "✅ SİZ" if sim >= esik else "🚫 BAŞKASI"
+        etiket = "siz" if kim.strip().lower().startswith("s") else "TV/başkası"
+        print(f"   Benzerlik: {sim:.2f} → {karar}   (gerçekte: {etiket})")
+        sonuclar.append((etiket, sim))
+    siz = [x for e, x in sonuclar if e == "siz"]
+    tv = [x for e, x in sonuclar if e != "siz"]
+    print("\nÖzet:")
+    if siz:
+        print(f"   Siz:        {', '.join(f'{x:.2f}' for x in siz)}  (en düşük {min(siz):.2f})")
+    if tv:
+        print(f"   TV/başkası: {', '.join(f'{x:.2f}' for x in tv)}  (en yüksek {max(tv):.2f})")
+    if siz and tv:
+        if min(siz) > max(tv):
+            oneri = round((min(siz) + max(tv)) / 2, 2)
+            print(f"   İyi ayrışıyor. Önerilen eşik: {oneri:.2f}  →  .venv/bin/python scripts/ses_kaydi.py --esik {oneri:.2f}")
+        else:
+            print("   ⚠️ Sizin sesinizle TV karışıyor: mikrofon seviyesini düşürüp profili yeniden kaydedin.")
     return 0
 
 
@@ -160,6 +187,7 @@ def main() -> int:
     ap.add_argument("--sil", action="store_true", help="ses profilini sil")
     ap.add_argument("--esik", type=float, help="benzerlik eşiğini elle ayarla (ör. 0.5)")
     ap.add_argument("--cihaz", type=int, default=None, help="mikrofon numarası (varsayılan: JARVIS'in mikrofonu)")
+    ap.add_argument("--kez", type=int, default=6, help="--dene ile kaç deneme yapılacak (varsayılan 6)")
     a = ap.parse_args()
     if a.sil:
         return sil()
@@ -168,7 +196,7 @@ def main() -> int:
         print(f"Eşik {a.esik:.2f} olarak kaydedildi.")
         return 0
     if a.dene:
-        return dene(a.cihaz)
+        return dene(a.cihaz, a.kez)
     return profil_kaydet(a.cihaz)
 
 

@@ -54,6 +54,14 @@ def test_nothing_is_sent_before_wake_word():
     assert sent == [] and not g.active
 
 
+def _wake_and_wait(g, wake):
+    wake.fire = True
+    g.process(_speech())
+    wake.fire = False
+    for _ in range(19):             # doğrulama süresi (1.5 sn) boyunca komutun başı
+        g.process(_speech())
+
+
 def test_wake_word_from_owner_opens_gate_and_forwards_audio():
     g, sent, logs, wake, clock = _gate([0.95, 0.31])
     for _ in range(5):
@@ -61,7 +69,12 @@ def test_wake_word_from_owner_opens_gate_and_forwards_audio():
     wake.fire = True
     g.process(_speech())
     wake.fire = False
+    g.process(_speech())
+    assert not g.active and sent == []          # henüz doğrulanıyor: hiçbir şey gönderilmedi
+    for _ in range(18):
+        g.process(_speech())
     assert g.active and "ses tanındı" in logs[-1]
+    assert len(sent) >= 19                       # bekletilen ses kayıpsız gönderildi
     n = len(sent)
     g.process(_speech())
     assert len(sent) == n + 1
@@ -69,16 +82,13 @@ def test_wake_word_from_owner_opens_gate_and_forwards_audio():
 
 def test_wake_word_from_someone_else_is_ignored():
     g, sent, logs, wake, clock = _gate([0.1, 0.99])
-    wake.fire = True
-    g.process(_speech())
+    _wake_and_wait(g, wake)
     assert not g.active and sent == [] and "tanınmadı" in logs[-1]
 
 
 def test_gate_closes_after_silence_and_touch_keeps_it_open():
     g, sent, logs, wake, clock = _gate([1.0, 0.0])
-    wake.fire = True
-    g.process(_speech())
-    wake.fire = False
+    _wake_and_wait(g, wake)
     assert g.active
     silence = np.zeros(vg.FRAME, np.int16)
     clock.t += 4.0
