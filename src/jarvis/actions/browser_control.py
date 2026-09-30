@@ -343,6 +343,24 @@ def _detect_default_browser() -> str:
     return "chrome"
 
 
+def _pid_alive(pid: int) -> bool:
+    """Süreç yaşıyor mu? Şüphede True (kilide dokunulmaz). Windows'ta os.kill(pid, 0)
+    yoklama DEĞİLDİR, süreci sonlandırır (Windows testi 2026-09-30) — psutil kullanılır."""
+    if os.name == "nt":
+        try:
+            import psutil
+            return psutil.pid_exists(pid)
+        except Exception:  # noqa: BLE001
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def _clear_stale_chromium_lock(profile: Path) -> bool:
     """Chromium 'SingletonLock' kilidi 'makine-PID' adlı bir sembolik bağlantıdır. Kilidi
     tutan süreç artık YOKSA (JARVIS çöktü, bilgisayar kapandı) kilit dosyaları silinir.
@@ -354,13 +372,8 @@ def _clear_stale_chromium_lock(profile: Path) -> bool:
         pid = int(os.readlink(lock).rsplit("-", 1)[-1])
     except (OSError, ValueError):
         return False
-    try:
-        os.kill(pid, 0)
+    if _pid_alive(pid):
         return False                      # süreç yaşıyor: profil gerçekten kullanımda
-    except ProcessLookupError:
-        pass
-    except PermissionError:
-        return False
     for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
         try:
             (profile / name).unlink()

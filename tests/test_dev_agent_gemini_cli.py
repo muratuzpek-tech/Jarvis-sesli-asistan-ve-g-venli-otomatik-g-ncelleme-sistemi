@@ -1,11 +1,15 @@
 """Gemini CLI arka ucu: ücretsiz günlük 1000 istek; hata/kota durumunda yerel model."""
 from __future__ import annotations
 
+import os
 import stat
 
 import pytest
 
 from jarvis.actions import dev_agent as da
+
+# Sahte CLI bir "#!" betiği; Windows bunu doğrudan çalıştıramaz (WinError 193).
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="sahte CLI yalnız Unix'te çalışır")
 
 
 def _fake_cli(tmp_path, body: str) -> str:

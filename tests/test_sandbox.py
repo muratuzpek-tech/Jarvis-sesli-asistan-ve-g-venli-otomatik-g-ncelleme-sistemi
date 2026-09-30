@@ -190,6 +190,7 @@ def test_go_binary_runs_in_sandbox(tmp_path, monkeypatch):
     assert "sizmasin-go" not in r.output and "JARVIS_IN_SANDBOX=1" in r.output, r.output
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="kafes (bubblewrap) yalnız Linux'ta")
 def test_interpreter_symlink_chain_roots_are_bound(tmp_path, monkeypatch):
     """murat@goxs 2026-09-29: uv '.venv/bin/python → …/cpython-3.12-linux…(takma ad)/bin/python3.12'
     zincirindeki takma ad kafese bağlanmadığı için 'execvp: No such file' alındı."""
@@ -210,6 +211,7 @@ def test_interpreter_symlink_chain_roots_are_bound(tmp_path, monkeypatch):
     assert (str(real), str(alias)) in sandbox._python_runtime_symlinks(roots)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="kafes (bubblewrap) yalnız Linux'ta")
 def test_uv_shim_does_not_expose_parent_folder(tmp_path, monkeypatch):
     """murat@goxs: .venv/bin/python → ~/.local/bin/python3.12 (uv kısayolu) zinciri
     yüzünden ~/.local'ın TAMAMI (anahtarlık, JARVIS ayarları) kafese bağlanıyordu."""

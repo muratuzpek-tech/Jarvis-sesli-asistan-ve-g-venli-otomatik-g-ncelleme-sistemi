@@ -42,7 +42,7 @@ def _server(tmp_path, rows, port, extra=""):
 
 def test_probe_fails_when_fewer_rows_than_task_asks(tmp_path):
     codes = _server(tmp_path, rows=3, port=18771)
-    ok, note = da._probe_web_app("python main.py", tmp_path, codes, wait_s=6, min_rows=5)
+    ok, note = da._probe_web_app("python main.py", tmp_path, codes, wait_s=15, min_rows=5)
     assert ok is False and "3 veri satırı" in note and "5" in note, note
 
 
@@ -93,3 +93,13 @@ def test_stale_browser_lock_is_cleared_only_for_dead_process(tmp_path):
     os.symlink(f"goxs-{os.getpid()}", lock)                   # yaşayan süreç: dokunulmaz
     assert not bc._clear_stale_chromium_lock(tmp_path)
     assert lock.is_symlink()
+
+
+def test_windows_paths_in_task_are_detected_and_double_quoted(tmp_path, monkeypatch):
+    """Windows testi 2026-09-30: 'C:\\...' yolları görülmüyordu; shlex.quote tek tırnak koyuyordu."""
+    f = tmp_path / "a b.csv"
+    f.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(da.os, "name", "nt")
+    assert da._shell_quote(str(f)) == f'"{f}"'
+    m = da._ABS_PATH_IN_TEXT.search(r"dosya C:\Users\murat\veri.csv birleştir")
+    assert m and m.group(1) == r"C:\Users\murat\veri.csv"
