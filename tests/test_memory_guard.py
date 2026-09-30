@@ -22,3 +22,14 @@ def test_goodbye_is_not_shutdown():
 def test_transcript_fragments_join_into_words():
     parts = [jm._with_lead(r, jm._clean_transcript(r)) for r in (" Ya", "rı", "n hat", "ır", "lat", "man", " gere", "ken")]
     assert jm._join_transcript(parts) == "Yarın hatırlatman gereken"
+
+
+def test_known_names_and_vad_in_config(monkeypatch):
+    mem = {"relationships": {"son_name": {"value": "Miran"}, "wife": {"value": "Wife named Ayşe"}},
+           "identity": {"name": {"value": "Murat"}}}
+    assert jm._known_names(mem) == ["Murat", "Miran", "Ayşe"]
+    import types as _t
+    monkeypatch.setattr(jm, "load_memory", lambda: mem)
+    cfg = jm.JarvisLive._build_config(_t.SimpleNamespace(_resume_handle=None, _resume_time=0.0))
+    assert "Miran" in cfg.system_instruction and "caiz" in cfg.system_instruction
+    assert cfg.realtime_input_config.automatic_activity_detection.silence_duration_ms == 800

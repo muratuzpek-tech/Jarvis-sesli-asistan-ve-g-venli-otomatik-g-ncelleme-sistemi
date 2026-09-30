@@ -180,6 +180,18 @@ def _fold(text: str) -> str:
     return (text or "").replace("İ", "i").replace("I", "ı").casefold().replace("'", "").replace("’", "")
 
 
+def _known_names(memory: dict | None) -> list[str]:
+    """Hafızadaki kişi/kimlik değerlerinden özel isimler (duyulma hatalarını düzeltmek için)."""
+    names: list[str] = []
+    for cat in ("identity", "relationships"):
+        for entry in ((memory or {}).get(cat) or {}).values():
+            val = entry.get("value") if isinstance(entry, dict) else entry
+            for w in re.findall(r"[A-ZÇĞİÖŞÜ][\wçğıöşüÇĞİÖŞÜ]+", str(val or "")):
+                if w not in _EN_WORDS and w not in names:
+                    names.append(w)
+    return names[:20]
+
+
 def _asked_to_close(heard: str) -> bool:
     return bool(_CLOSE_RE.search(heard or ""))
 
@@ -1487,6 +1499,18 @@ class JarvisLive:
                     parts.append(recent)
             except Exception as _e:  # noqa: BLE001
                 print(f"[Memory] ⚠️ Son konuşmalar eklenemedi: {_e}")
+        # SES ALGILAMA (Murat@goxs 2026-09-30): 'Miran' → 'Mira', 'Jarvis' → 'caiz', bir kez
+        # 'Emir' uyduruldu. Yerli modelde dil kodu sabitlenemiyor (Google: native audio
+        # modelleri dili kendisi seçer); bilinen isimler ve belirsizlikte sorma kuralı verilir.
+        known = _known_names(memory)
+        parts.append(
+            "HEARING GUARD: Speech recognition sometimes mishears Turkish words and names. "
+            + (f"Known names in this user's life (prefer these spellings when a heard word sounds similar): "
+               f"{', '.join(known)}. " if known else "")
+            + "The assistant's name 'Jarvis' may be heard as 'caiz', 'carvis', 'çarviz', 'j'ai' — treat these as "
+            "'Jarvis'. If a name, number, time or date in the request is unclear, ASK the user to repeat it "
+            "instead of guessing; never invent a name the user did not say."
+        )
         parts.append(
             "LANGUAGE GUARD: The user interface language is Turkish. Unless the user "
             "clearly asks for another language, understand speech and answer only in "
@@ -1507,6 +1531,14 @@ class JarvisLive:
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": TOOL_DECLARATIONS}],
             max_output_tokens=16384,
+            # Konuşma algılama: kısa duraklamada cümle bölünmesin, başı kesilmesin
+            # (Google önerisi: sessizlik 500–800 ms).
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                    prefix_padding_ms=300,
+                    silence_duration_ms=800,
+                )),
             session_resumption=(types.SessionResumptionConfig(handle=resume) if resume
                                 else types.SessionResumptionConfig()),
             # Uzun konuşmada bağlam dolunca oturum kapanmasın: eski kısımlar kayar pencereyle atılır.
