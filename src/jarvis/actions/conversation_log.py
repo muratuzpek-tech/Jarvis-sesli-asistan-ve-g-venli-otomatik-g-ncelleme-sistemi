@@ -124,6 +124,32 @@ def _load_entries(start: datetime, end: datetime) -> list[dict]:
     return out
 
 
+def recent_context(max_turns: int = 30, max_chars: int = 3500, hours: int = 12) -> str:
+    """Yeni Gemini oturumu açılırken son konuşmalar (Murat@goxs 2026-09-30: "JARVIS
+    unutuyor"). Canlı oturum koptuğunda/yeniden başlatıldığında model hiçbir şey
+    hatırlamıyordu; günlükteki son turlar sistem talimatına eklenir."""
+    now = datetime.now()
+    entries = [e for e in _load_entries(now - timedelta(hours=hours), now + timedelta(minutes=1))
+               if e.get("role") in ("user", "jarvis", "You", "Jarvis")]
+    if not entries:
+        return ""
+    lines: list[str] = []
+    total = 0
+    for e in reversed(entries[-max_turns:]):
+        who = "Murat" if str(e.get("role", "")).lower() in ("user", "you") else "JARVIS"
+        ts = str(e.get("timestamp", ""))[11:16]
+        line = f"{ts} {who}: {str(e.get('text', ''))[:300]}"
+        if total + len(line) > max_chars:
+            break
+        lines.append(line)
+        total += len(line) + 1
+    if not lines:
+        return ""
+    return ("[SON KONUŞMALAR — önceki oturumdan; kullanıcı 'demin', 'az önce', 'o dosya' derse "
+            "buna bak, gerekirse recall_conversation aracını kullan. Tekrar okuma.]\n"
+            + "\n".join(reversed(lines)) + "\n")
+
+
 def _get_api_key() -> str:
     from jarvis.core.secure_config import get_gemini_api_key
     return get_gemini_api_key()

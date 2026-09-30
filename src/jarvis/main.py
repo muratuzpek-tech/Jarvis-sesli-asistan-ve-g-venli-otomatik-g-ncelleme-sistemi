@@ -894,6 +894,8 @@ class JarvisLive:
         self._loop                = None
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
+        self._resume_handle       = None    # Gemini oturum devam anahtarı (~2 saat geçerli)
+        self._resume_time         = 0.0
         self._voice_gate          = None    # ses kapısı (core/voice_gate.py); None = her ses dinlenir
         self._voice_gate_ready    = False
         self._gate_loop           = None
@@ -1407,9 +1409,23 @@ class JarvisLive:
             f"Use this to calculate exact times for reminders.\n\n"
         )
 
+        # HAFIZA (Murat@goxs 2026-09-30: "JARVIS unutuyor"): bağlantı koptuğunda ya da
+        # ~15 dk'lık oturum sınırında yeni oturum SIFIRDAN başlıyordu. Geçerli bir devam
+        # anahtarı varsa aynı konuşma sürdürülür; yoksa son konuşmalar talimata eklenir.
+        resume = self._resume_handle if (self._resume_handle
+                                         and time.time() - self._resume_time < 2 * 3600 - 300) else None
+        self._using_resume = resume
         parts = [time_ctx]
         if mem_str:
             parts.append(mem_str)
+        if not resume:
+            try:
+                from jarvis.actions.conversation_log import recent_context
+                recent = recent_context()
+                if recent:
+                    parts.append(recent)
+            except Exception as _e:  # noqa: BLE001
+                print(f"[Memory] ⚠️ Son konuşmalar eklenemedi: {_e}")
         parts.append(
             "LANGUAGE GUARD: The user interface language is Turkish. Unless the user "
             "clearly asks for another language, understand speech and answer only in "
@@ -1430,7 +1446,11 @@ class JarvisLive:
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": TOOL_DECLARATIONS}],
             max_output_tokens=16384,
-            session_resumption=types.SessionResumptionConfig(),
+            session_resumption=(types.SessionResumptionConfig(handle=resume) if resume
+                                else types.SessionResumptionConfig()),
+            # Uzun konuşmada bağlam dolunca oturum kapanmasın: eski kısımlar kayar pencereyle atılır.
+            context_window_compression=types.ContextWindowCompressionConfig(
+                sliding_window=types.SlidingWindow()),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -1870,6 +1890,13 @@ class JarvisLive:
         try:
             while True:
                 async for response in self.session.receive():
+
+                    _upd = getattr(response, "session_resumption_update", None)
+                    if _upd is not None and getattr(_upd, "resumable", False) and getattr(_upd, "new_handle", None):
+                        self._resume_handle = _upd.new_handle
+                        self._resume_time = time.time()
+                    if getattr(response, "go_away", None) is not None:
+                        print("[JARVIS] ↪️ Sunucu oturumu yeniliyor; konuşma kaldığı yerden sürecek.")
 
                     _audio_data = _response_audio_data(response)
                     if _audio_data:
@@ -2573,6 +2600,9 @@ class JarvisLive:
                     continue
 
                 print(f"[JARVIS] Error ({type(e).__name__}); reconnect will be delayed.")
+                if getattr(self, "_using_resume", None) and self.session is None:
+                    # Devam anahtarıyla bağlanılamadı: bir sonraki denemede yeni oturum + son konuşmalar.
+                    self._resume_handle = None
 
                 # Network / timeout errors — log clearly and back off
                 is_net_err = any(k in err_str for k in (
