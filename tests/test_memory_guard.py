@@ -45,3 +45,13 @@ def test_live_model_can_be_chosen_by_env(monkeypatch):
 def test_known_name_misheard_is_accepted():
     assert jm._sounds_like("Miran", "Saat 17'de Mira'nın okuldan al")
     assert not jm._sounds_like("Miran", "Emir geldi")
+
+
+def test_self_knowledge_in_config(monkeypatch):
+    import types as _t
+    monkeypatch.setattr(jm, "load_memory", lambda: {})
+    cfg = jm.JarvisLive._build_config(_t.SimpleNamespace(_resume_handle=None, _resume_time=0.0,
+                                                         _live_model="gemini-3.8-live"))
+    si = cfg.system_instruction
+    assert "gemini-3.8-live" in si and "Recurring reminders (e.g. weekdays 17:00) ARE supported" in si
+    assert "CANNOT change your own" in si
