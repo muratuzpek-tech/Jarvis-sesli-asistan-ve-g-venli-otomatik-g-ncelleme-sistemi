@@ -68,6 +68,27 @@ ayırmak için Windows'ta geçici bir klasöre `JARVIS_HOME` tanımlayın; test
 bitince bu klasörü kullanıcı kendisi silebilir. Uygulama onay olmadan kullanıcı
 verisini silmez veya toplu dosya işlemi onaylamaz.
 
+## NVIDIA Nemotron / NIM kullanımı
+
+RTX 3060 12 GB ile Ollama üzerinden 4B–8B sınıfı quantized modeller (ör. NVIDIA Nemotron 3 Nano 4B GGUF veya Llama-3.1 Nemotron Nano 8B) yerel
+olarak çalıştırılabilir. Nemotron model etiketleri Ollama kataloğunda mevcutsa
+modeli indirip yapılandırmadaki `llm_model` alanına yazın. Yerel kullanımda
+`llm_provider` değeri `ollama` kalır; konuşmalar NVIDIA sunucusuna gönderilmez.
+
+NVIDIA’nın barındırılan NIM API’sini denemek için NVIDIA Developer hesabından
+`build.nvidia.com` üzerinden anahtar oluşturun ve Windows PowerShell’de anahtarı
+kalıcı dosyaya yazmadan oturum değişkeni olarak tanımlayın:
+
+```powershell
+$env:NVIDIA_API_KEY = "nvapi-..."
+$env:JARVIS_LLM_PROVIDER = "nvidia"
+$env:JARVIS_LLM_MODEL = "nvidia/llama-3.1-nemotron-nano-8b-v1"
+.\BASLAT_WINDOWS.cmd
+```
+
+NVIDIA API prototip/test için ücretsiz erişim sunabilir; ticari üretim kullanımı
+ve NIM’in kendi altyapınızda kurumsal dağıtımı lisans koşullarına tabidir.
+
 ## Çalıştırma
 
 ### Windows

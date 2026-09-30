@@ -4,5 +4,6 @@
   "camera_index": 0,
   "llm_provider": "ollama",
   "llm_url": "http://localhost:11434",
-  "llm_model": "qwen2.5:7b"
+  "llm_model": "qwen2.5:7b",
+  "nvidia_api_url": "https://integrate.api.nvidia.com/v1"
 }
