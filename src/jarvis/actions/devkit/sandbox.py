@@ -243,7 +243,7 @@ def wrap(argv: list[str], project_dir: Path, *, gui: bool = False, cwd: Path | N
     durum: 'kafes', 'kafessiz' ya da 'REFUSED: …' (required modda kafes yoksa)."""
     m = mode()
     if m == "off":
-        return argv, _plain_env(), "kafessiz"
+        return argv, None, "kafessiz"
     ok, why = sandbox_works()
     if ok:
         cmd, env = build(argv, project_dir, gui=gui, cwd=cwd)
