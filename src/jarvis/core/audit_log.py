@@ -25,6 +25,13 @@ _PROTECTED_FIELDS = frozenset({
     "risk", "approval_required", "result", "approval_hash",
 })
 
+# extra icerisinde HASSAS kabul edilen anahtar desenleri
+# (bu degerler ASLA ham loglanmaz, SHA-256 hash olarak kaydedilir)
+_SENSITIVE_PATTERNS = (
+    "code", "pass", "secret", "token", "key", "auth",
+    "cred", "pin", "otp", "session",
+)
+
 
 def _get_log_path():
     from jarvis.paths import memory_dir
@@ -61,7 +68,12 @@ def log_action(
     if extra:
         for k, v in extra.items():
             if k not in _PROTECTED_FIELDS:
-                record[k] = v
+                kl = k.lower()
+                if any(p in kl for p in _SENSITIVE_PATTERNS):
+                    # GUVENLIK: hassas deger ham olarak ASLA loglanmaz
+                    record[f"{k}_sha256"] = _hash_code(str(v))
+                else:
+                    record[k] = v
 
     line = json.dumps(record, ensure_ascii=False, default=str)
     try:
