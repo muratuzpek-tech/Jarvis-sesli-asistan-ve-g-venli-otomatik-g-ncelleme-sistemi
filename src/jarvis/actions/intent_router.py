@@ -61,7 +61,7 @@ def match_terminal_command(text: str) -> dict | None:
     repo = str(project_root())
 
     if ("python" in low or "python'ın" in low) and any(x in low for x in ("sürüm", "surum", "version")):
-        return {"command": "python --version"}
+        return {"command": "python3 --version"}
     if any(x in low for x in ("bulunduğum klasör", "bulundugum klasor", "bulunduğun klasör", "bulundugun klasor", "mevcut klasör", "current directory")):
         return {"command": "pwd"}
     if "git" in low and any(x in low for x in ("durum", "status")):
@@ -77,7 +77,7 @@ def match_terminal_command(text: str) -> dict | None:
         payload = low.split(marker, 1)[1]
         payload = re.sub(r"\b(yazdır|yazdir|print)\b.*$", "", payload).strip(" .:'\"")
         if payload:
-            return {"command": f"python -c {shlex.quote(f'print({payload!r})')}"}
+            return {"command": f"python3 -c {shlex.quote(f'print({payload!r})')}"}
     return None
 
 
