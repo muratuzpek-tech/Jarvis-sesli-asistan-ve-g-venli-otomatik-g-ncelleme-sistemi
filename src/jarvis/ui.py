@@ -20,7 +20,7 @@ else:
 
 from PyQt6.QtCore import (
     QPointF, QRectF, Qt,
-    QTimer, pyqtSignal,
+    QObject, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QDragEnterEvent, QDropEvent, QFont, QKeySequence, QLinearGradient, QPainter, QPen, QPixmap,
@@ -1491,6 +1491,78 @@ class VoiceHudWidget(QWidget):
             p.drawLine(QPointF(pk_x, mid - peak_amp), QPointF(pk_x, mid + peak_amp))
 
 
+class ToastNotification(QFrame):
+    """Slide-in toast — disappears after _MS ms."""
+
+    def __init__(self, message: str, kind: str = "info", duration_ms: int = 4000, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Toast")
+        colors = {"success": C.GREEN, "error": C.RED, "warning": C.GOLD, "info": C.PRI}
+        accent = colors.get(kind, C.PRI)
+        self.setStyleSheet(
+            f"QFrame#Toast {{ background:{C.PANEL2}; border:1px solid {accent}; border-radius:8px; }}"
+        )
+        lay = QHBoxLayout(self); lay.setContentsMargins(14, 10, 14, 10); lay.setSpacing(8)
+        icon = {"success": "✅", "error": "❌", "warning": "⚠️", "info": "ℹ️"}.get(kind, "ℹ️")
+        lbl = QLabel(f"{icon}  {message}")
+        lbl.setFont(QFont("Segoe UI", 9))
+        lbl.setStyleSheet(f"color:{C.WHITE}; background:transparent; border:none;")
+        lbl.setWordWrap(True)
+        lay.addWidget(lbl)
+        self.setFixedHeight(40)
+        self.setMaximumWidth(340)
+        self._duration = duration_ms
+        self._fade_tmr = QTimer(self)
+        self._fade_tmr.setSingleShot(True)
+        self._fade_tmr.timeout.connect(self._hide)
+        self._opacity = 1.0
+
+    def start(self):
+        self.show()
+        self.raise_()
+        self._fade_tmr.start(self._duration)
+
+    def _hide(self):
+        self.hide()
+
+
+class _ToastStack(QObject):
+    """Manages up to 3 stacked toasts bottom-right of parent window."""
+
+    _toast_done = pyqtSignal()
+
+    def __init__(self, parent_widget: QWidget):
+        super().__init__(parent_widget)
+        self._parent = parent_widget
+        self._toasts: list[ToastNotification] = []
+        self._toast_done.connect(self._reposition)
+
+    def show(self, message: str, kind: str = "info", duration: int = 4000):
+        # remove old toasts beyond 3
+        while len(self._toasts) >= 3:
+            old = self._toasts.pop(0)
+            old.deleteLater()
+        toast = ToastNotification(message, kind, duration, self._parent)
+        self._toasts.append(toast)
+        self._reposition()
+        toast.start()
+        QTimer.singleShot(duration + 300, lambda: self._cleanup(toast))
+
+    def _cleanup(self, toast):
+        if toast in self._toasts:
+            self._toasts.remove(toast)
+            toast.deleteLater()
+        self._reposition()
+
+    def _reposition(self):
+        pw = self._parent
+        x0 = pw.width() - 350
+        y0 = pw.height() - 50
+        for i, t in enumerate(self._toasts):
+            ty = y0 - (i + 1) * 48
+            t.move(max(8, x0), max(8, ty))
+
+
 class MainWindow(QMainWindow):
     _log_sig     = pyqtSignal(str)
     _state_sig   = pyqtSignal(str)
@@ -1501,6 +1573,7 @@ class MainWindow(QMainWindow):
     _reconfig_sig = pyqtSignal()          # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)   # show camera frame preview (small overlay)
     _task_refresh_sig = pyqtSignal()  # force immediate task refresh (event-driven)
+    _toast_sig = pyqtSignal(str, str)  # (message, kind) -> show toast
     _cam_stream_sig = pyqtSignal(bool)   # True=start live stream, False=stop
     _cam_frame_sig  = pyqtSignal(bytes)  # live camera frame → HUD area
     _mic_dev_sig     = pyqtSignal(str)    # active microphone device name → left panel
@@ -1610,6 +1683,8 @@ class MainWindow(QMainWindow):
         self._task_mtime_cache = {}
         self._task_last_sig = ""
         self._task_refresh_sig.connect(self._refresh_task_center)
+        self._toast_sig.connect(self._show_toast)
+        self._toast_stack = _ToastStack(self)
         self._task_tmr = QTimer(self)
         self._task_tmr.timeout.connect(self._check_task_files)
         self._task_tmr.start(5000)  # 1500→5000ms fallback; event-driven bypass
@@ -2793,6 +2868,14 @@ class MainWindow(QMainWindow):
             if hasattr(self, "_chat_scroll"):
                 QTimer.singleShot(50, lambda: self._chat_scroll.verticalScrollBar().setValue(self._chat_scroll.verticalScrollBar().maximum()))
 
+    def _show_toast(self, message: str, kind: str = "info"):
+        if hasattr(self, "_toast_stack"):
+            self._toast_stack.show(message, kind)
+
+    def show_toast(self, message: str, kind: str = "info"):
+        """Thread-safe: show a toast notification."""
+        self._toast_sig.emit(message[:120], kind)
+
     def _navigate(self, name: str):
         for nav_name, button in self._nav_buttons.items():
             active = nav_name == name
@@ -3118,6 +3201,10 @@ class JarvisUI:
     def notify_task_changed(self):
         """Thread-safe: event-driven task refresh — ana dongu sinyal yayinlayinca tetiklenir."""
         self._win._task_refresh_sig.emit()
+
+    def show_toast(self, message: str, kind: str = "info"):
+        """Thread-safe: show a toast notification."""
+        self._win.show_toast(message, kind)
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
