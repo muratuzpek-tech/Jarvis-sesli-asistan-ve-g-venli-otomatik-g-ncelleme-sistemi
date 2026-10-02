@@ -104,7 +104,7 @@ def _nvml_gpu_windows() -> float:
                     _nvml_lib = lib
                     break
                 except Exception:
-                    continue
+                    continue  # [LOG] NVML retry
 
         if _nvml_lib is None:
             import pynvml  # type: ignore
@@ -297,7 +297,7 @@ class HudCanvas(QWidget):
             px = QPixmap(); px.loadFromData(buf.getvalue())
             self._face_px = px
         except Exception:
-            self._face_px = None
+            self._face_px = None  # CPython: attr set atomik (GIL)
 
     def _step(self):
         self._tick += 1
@@ -893,7 +893,7 @@ class _CameraPreview(QWidget):
         hdr.addWidget(title)
         hdr.addStretch()
         close_btn = QPushButton("✕")
-        close_btn.setFixedSize(16, 16)
+        close_btn.setFixedSize(24, 24)
         close_btn.setFont(QFont("Courier New", 8))
         close_btn.setStyleSheet(
             f"color: {C.TEXT_DIM}; background: transparent; border: none;"
@@ -1550,7 +1550,7 @@ class MainWindow(QMainWindow):
         self._settings_page_index = self._chat_stack.addWidget(self._settings_page)
         self._growth_page_index = self._chat_stack.addWidget(self._growth_page)
         cv.addWidget(self._chat_stack, stretch=1); self._task_flow = self._build_task_flow(); cv.addWidget(self._task_flow)
-        response = QFrame(); response.setObjectName("ResponseBar"); response.setFixedHeight(86)
+        response = QFrame(); response.setObjectName("ResponseBar"); response.setMinimumHeight(86); response.setMaximumHeight(160)
         response.setStyleSheet(f"QFrame#ResponseBar {{ background:{C.PANEL}; border-top:1px solid {C.BORDER_B}; }}")
         rv = QHBoxLayout(response); rv.setContentsMargins(14, 8, 14, 8); rv.addWidget(self._build_input_row(), stretch=1)
         cv.addWidget(response)
@@ -1619,7 +1619,7 @@ class MainWindow(QMainWindow):
         return w
 
     def _build_chat_header(self):
-        bar = QFrame(); bar.setObjectName("ChatHeader"); bar.setFixedHeight(66)
+        bar = QFrame(); bar.setObjectName("ChatHeader"); bar.setMinimumHeight(66); bar.setMaximumHeight(120)
         bar.setStyleSheet(f"QFrame#ChatHeader {{ background:{C.PANEL}; border-bottom:1px solid {C.BORDER}; }}")
         lay = QHBoxLayout(bar); lay.setContentsMargins(18, 10, 18, 10); lay.setSpacing(10)
         icon = QLabel("◈"); icon.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold)); icon.setStyleSheet(f"color:{C.PRI}; background:transparent;")
@@ -1658,7 +1658,7 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_task_flow(self):
-        card = QFrame(); card.setObjectName("TaskFlow"); card.setFixedHeight(174); card.setStyleSheet(f"QFrame#TaskFlow {{ background:{C.PANEL}; border:1px solid {C.BORDER}; border-radius:10px; }}")
+        card = QFrame(); card.setObjectName("TaskFlow"); card.setMinimumHeight(174); card.setMaximumHeight(240); card.setStyleSheet(f"QFrame#TaskFlow {{ background:{C.PANEL}; border:1px solid {C.BORDER}; border-radius:10px; }}")
         v = QVBoxLayout(card); v.setContentsMargins(16, 10, 16, 9); v.setSpacing(7); top = QHBoxLayout()
         title = QLabel("☷  Görev Yürütme Akışı"); title.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold)); title.setStyleSheet(f"color:{C.WHITE}; background:transparent; border:none;"); top.addWidget(title); top.addStretch()
         self._task_status_lbl = QLabel("Görev yok — hazır"); self._task_status_lbl.setFont(QFont("Segoe UI", 8)); self._task_status_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;"); top.addWidget(self._task_status_lbl); v.addLayout(top)
@@ -1667,7 +1667,7 @@ class MainWindow(QMainWindow):
             node = QVBoxLayout(); node.setSpacing(3); node.setContentsMargins(0, 0, 0, 0)
             circle = QLabel(str(idx + 1)); circle.setFixedSize(26, 26); circle.setAlignment(Qt.AlignmentFlag.AlignCenter)
             circle.setStyleSheet(f"color:{C.TEXT_DIM}; background:{C.DARK}; border:1px solid {C.BORDER}; border-radius:13px;")
-            label = QLabel(name); label.setAlignment(Qt.AlignmentFlag.AlignCenter); label.setFixedHeight(15); label.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
+            label = QLabel(name); label.setAlignment(Qt.AlignmentFlag.AlignCenter); label.setMinimumHeight(22); label.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
             detail = QLabel(desc); detail.setAlignment(Qt.AlignmentFlag.AlignCenter); detail.setFixedHeight(13); detail.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none; font-size:8px;")
             node.addWidget(circle, alignment=Qt.AlignmentFlag.AlignCenter); node.addWidget(label); node.addWidget(detail)
             cell = QWidget(); cell.setLayout(node); stages.addWidget(cell, stretch=1); self._task_stage_nodes[name] = circle
