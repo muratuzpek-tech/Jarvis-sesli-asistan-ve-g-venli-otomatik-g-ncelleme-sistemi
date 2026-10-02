@@ -1684,6 +1684,7 @@ class MainWindow(QMainWindow):
         self._task_last_sig = ""
         self._task_refresh_sig.connect(self._refresh_task_center)
         self._toast_sig.connect(self._show_toast)
+        self._prev_task_state = None
         self._toast_stack = _ToastStack(self)
         self._task_tmr = QTimer(self)
         self._task_tmr.timeout.connect(self._check_task_files)
@@ -1944,6 +1945,9 @@ class MainWindow(QMainWindow):
             self._task_detail_lbl.setText(goal[:150])
             if status == "pending":
                 self._set_task_stages("Planner", ())
+                if self._prev_task_state != "started":
+                    self._prev_task_state = "started"
+                    self._toast_sig.emit("\U0001F504 G\u00f6rev ba\u015flat\u0131ld\u0131 \u2014 plan haz\u0131rlan\u0131yor...", "info")
             elif status == "running":
                 self._set_task_stages("Research", ("Planner",))
             else:
@@ -1961,6 +1965,9 @@ class MainWindow(QMainWindow):
             self._task_detail_lbl.setText(str(latest.get("goal", latest.get("name", "Görev")))[:150])
             if latest_status in ("completed", "done"):
                 self._set_task_stages(None, ("Planner", "Research", "Security", "Auditor"))
+                if self._prev_task_state != "done":
+                    self._prev_task_state = "done"
+                    self._toast_sig.emit("\u2705 G\u00f6rev ba\u015far\u0131yla tamamland\u0131!", "success")
             elif latest_status == "failed":
                 self._set_task_stages("Auditor", ("Planner", "Research", "Security"))
             else:
@@ -2354,6 +2361,7 @@ class MainWindow(QMainWindow):
                 desk.chmod(desk.stat().st_mode | 0o755)
 
             self._log.append_log("SYS: Masaüstü kısayolu oluşturuldu.")
+            self._toast_sig.emit("Desktop shortcut hazir!", "success")
         except Exception as e:
             self._log.append_log(f"ERR: Shortcut failed — {e}")
             _log.error("Shortcut creation failed: %s", e)
@@ -2627,6 +2635,7 @@ class MainWindow(QMainWindow):
         self._connection_rows["microphone"].setText("Bekleniyor"); self._connection_rows["speaker"].setText("Bekleniyor"); lay.addWidget(conn)
         section("Dosya Eki", "▣"); files = QFrame(); files.setObjectName("AttachmentPanel"); files.setStyleSheet(f"QFrame#AttachmentPanel {{ background:#0a2038; border:1px solid {C.BORDER}; border-radius:14px; }}")
         fv = QVBoxLayout(files); fv.setContentsMargins(12, 9, 12, 9); self._drop_zone = FileDropZone(); self._drop_zone.setFocusPolicy(Qt.FocusPolicy.StrongFocus); self._drop_zone.file_selected.connect(self._on_file_selected); self._file_hint = QLabel("Dosya seçin veya sürükleyin; burada onay işlemi yapılmaz."); self._file_hint.setWordWrap(True); self._file_hint.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;"); fv.addWidget(self._drop_zone); fv.addWidget(self._file_hint); lay.addWidget(files)
+        self._toast_sig.emit("Dosya secildi", "info")
         section("Aktivite Akışı", "☷"); self._log = LogWidget(); self._log.setMinimumHeight(105); lay.addWidget(self._log, stretch=1)
         self._task_running_lbl = QLabel("RUNNING       --"); self._task_pending_lbl = QLabel("PENDING       --"); self._task_waiting_lbl = QLabel("APPROVAL      --"); self._task_completed_lbl = QLabel("COMPLETED     --")
         for label in (self._task_running_lbl, self._task_pending_lbl, self._task_waiting_lbl, self._task_completed_lbl): label.hide()
