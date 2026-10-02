@@ -28,7 +28,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QSizePolicy, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from jarvis.core.secure_config import get_gemini_api_key, load_config, save_config, api_keys_path
@@ -67,6 +67,7 @@ class C:
     GREEN     = "#11cfb2"
     GREEN_D   = "#00aa55"
     RED       = "#ff3355"
+    GOLD  = '#ffc44d'
     MUTED_C   = "#ff3366"
     TEXT      = "#d7edff"
     TEXT_DIM  = "#6ca6d2"
@@ -1381,9 +1382,10 @@ class VoiceHudWidget(QWidget):
         self._detail = "Dinliyor"
         self._transcript = ""
         self._volume = 0.0
+        self._volume_peak = 0.0
         self._phase = 0.0
         self.setMinimumWidth(238)
-        self.setFixedHeight(42)
+        self.setFixedHeight(52)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._animate)
         self._timer.start(40)
@@ -1403,11 +1405,15 @@ class VoiceHudWidget(QWidget):
             self._volume = max(0.0, min(1.0, float(value)))
         except (TypeError, ValueError):
             self._volume = 0.0
+        self._volume_peak = max(self._volume_peak * 0.97, self._volume)
         self.update()
 
     def _animate(self):
-        if self._state in {"USER_SPEAKING", "SPEAKING", "THINKING"}:
+        if self._volume > 0.02 or self._state in {"USER_SPEAKING", "SPEAKING", "THINKING", "LISTENING"}:
             self._phase += 0.18
+            self.update()
+        elif self._state not in {"MUTED", "SLEEPING", "ERROR"}:
+            self._phase += 0.06
             self.update()
 
     def paintEvent(self, _):
@@ -1451,11 +1457,29 @@ class VoiceHudWidget(QWidget):
         p.drawText(QRectF(27, 21, 112, 13), Qt.AlignmentFlag.AlignLeft, detail[:24])
 
         mid = self.height() / 2
-        for i in range(10):
-            x = 151 + i * 7
-            amp = 3 + 11 * max(self._volume, 0.18) * (0.45 + 0.55 * abs(math.sin(self._phase + i * 0.7)))
-            p.setPen(QPen(qcol(C.PRI if i % 2 == 0 else C.ACC2), 2))
+        n_bars = 20
+        bar_spacing = min(7, (self.width() - 148) / n_bars) if self.width() > 148 else 5
+        for i in range(n_bars):
+            x = 148 + i * bar_spacing
+            if x > self.width() - 4:
+                break
+            vol_factor = max(self._volume, 0.15)
+            wave = (0.45 + 0.55 * abs(math.sin(self._phase + i * 0.7)))
+            amp = 3 + 16 * vol_factor * wave
+            if self._volume > 0.75:
+                col = C.RED
+            elif self._volume > 0.45:
+                col = C.GOLD
+            else:
+                col = C.PRI if i % 2 == 0 else C.ACC2
+            p.setPen(QPen(qcol(col), max(1, int(bar_spacing - 3))))
             p.drawLine(QPointF(x, mid - amp), QPointF(x, mid + amp))
+        # peak hold marker
+        if self._volume_peak > 0.1 and self.width() > 200:
+            peak_amp = 3 + 16 * self._volume_peak
+            pk_x = self.width() - 8
+            p.setPen(QPen(qcol(C.GOLD), 1))
+            p.drawLine(QPointF(pk_x, mid - peak_amp), QPointF(pk_x, mid + peak_amp))
 
 
 class MainWindow(QMainWindow):
@@ -1643,21 +1667,23 @@ class MainWindow(QMainWindow):
     def _bubble(self, speaker: str, text: str, jarvis: bool = False):
         box = QFrame(); box.setObjectName("ChatBubble"); box.setStyleSheet(f"QFrame#ChatBubble {{ background:{'#0b2948' if not jarvis else '#0a3150'}; border:1px solid {C.BORDER}; border-radius:10px; }}")
         v = QVBoxLayout(box); v.setContentsMargins(14, 10, 14, 10); v.setSpacing(5)
-        head = QLabel(f"{speaker}   {time.strftime('%H:%M')}"); head.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold)); head.setStyleSheet(f"color:{C.PRI if jarvis else C.TEXT_MED}; background:transparent;")
-        body = QLabel(text); body.setWordWrap(True); body.setFont(QFont("Segoe UI", 10)); body.setStyleSheet(f"color:{C.WHITE}; background:transparent; line-height:140%;")
+        avatar = "🤖" if jarvis else "👤"
+        head = QLabel(f"{avatar} {speaker}   {time.strftime('%H:%M')}"); head.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold)); head.setStyleSheet(f"color:{C.PRI if jarvis else C.TEXT_MED}; background:transparent;")
+        body = QLabel(text); body.setWordWrap(True); body.setFont(QFont("Segoe UI", 10)); body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse); body.setStyleSheet(f"color:{C.WHITE}; background:transparent; line-height:140%;")
         v.addWidget(head); v.addWidget(body)
-        if jarvis:
-            foot = QLabel("Backend yanıtı")
-            foot.setFont(QFont("Segoe UI", 8)); foot.setStyleSheet(f"color:{C.ACC}; background:transparent; border:none;"); v.addWidget(foot)
         return box
 
     def _build_chat_panel(self):
         panel = QWidget(); panel.setStyleSheet(f"background:{C.BG};")
         v = QVBoxLayout(panel); v.setContentsMargins(18, 18, 18, 12); v.setSpacing(12)
         self._chat_messages_layout = QVBoxLayout(); self._chat_messages_layout.setSpacing(8)
-        self._chat_empty_lbl = QLabel("Henüz mesaj yok. Backend bağlantısı kurulunca konuşmalar burada görünür.")
+        self._chat_empty_lbl = QLabel("Henüz mesaj yok. Sohbet başlayınca mesajlar burada görünür.")
         self._chat_empty_lbl.setWordWrap(True); self._chat_empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter); self._chat_empty_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none; padding:24px;")
-        self._chat_messages_layout.addWidget(self._chat_empty_lbl); v.addLayout(self._chat_messages_layout)
+        self._chat_messages_layout.addWidget(self._chat_empty_lbl)
+        msg_container = QWidget(); msg_container.setLayout(self._chat_messages_layout); msg_container.setStyleSheet("background: transparent;")
+        self._chat_scroll = QScrollArea(); self._chat_scroll.setWidgetResizable(True); self._chat_scroll.setWidget(msg_container)
+        self._chat_scroll.setStyleSheet(f"QScrollArea {{ background: transparent; border: none; }} QScrollArea > QWidget > QWidget {{ background: transparent; }}"); self._chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        v.addWidget(self._chat_scroll, stretch=1)
         self._waveform = WaveformWidget(); v.addWidget(self._waveform); v.addStretch()
         return panel
 
@@ -2744,7 +2770,18 @@ class MainWindow(QMainWindow):
             if not body:
                 return
             self._chat_empty_lbl.hide()
-            self._chat_messages_layout.addWidget(self._bubble(speaker, body, speaker == "JARVIS"))
+            msg = self._bubble(speaker, body, speaker == "JARVIS")
+            row = QHBoxLayout()
+            row.addStretch() if speaker != "JARVIS" else row.addSpacing(0)
+            row.addWidget(msg, stretch=2) if speaker != "JARVIS" else row.addWidget(msg, stretch=2)
+            row.addStretch() if speaker == "JARVIS" else row.addSpacing(0)
+            row_widget = QWidget(); row_widget.setLayout(row); row_widget.setStyleSheet("background: transparent;")
+            self._chat_messages_layout.addWidget(row_widget)
+            while self._chat_messages_layout.count() > 51:  # 1 empty + 50 messages
+                item = self._chat_messages_layout.takeAt(1)
+                if item and item.widget(): item.widget().deleteLater()
+            if hasattr(self, "_chat_scroll"):
+                QTimer.singleShot(50, lambda: self._chat_scroll.verticalScrollBar().setValue(self._chat_scroll.verticalScrollBar().maximum()))
 
     def _navigate(self, name: str):
         for nav_name, button in self._nav_buttons.items():
