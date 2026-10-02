@@ -50,6 +50,15 @@ _RIGHT_W = 340
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 
+try:
+    from jarvis.logger import get_logger
+except ImportError:
+    import logging
+    def get_logger(name):
+        return logging.getLogger(f"jarvis.{name}")
+
+_log = get_logger("ui")
+
 class C:
     # Premium workstation palette — cyan is the primary navigation/action
     # colour, with violet reserved for secondary system information.
@@ -143,8 +152,8 @@ class _SysMetrics:
         while self._running:
             try:
                 self._update()
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug("Stats poll error: %s", e)
             time.sleep(1.5)
 
     def stop(self):
@@ -1697,14 +1706,14 @@ class MainWindow(QMainWindow):
             node = QVBoxLayout(); node.setSpacing(3); node.setContentsMargins(0, 0, 0, 0)
             circle = QLabel(str(idx + 1)); circle.setFixedSize(26, 26); circle.setAlignment(Qt.AlignmentFlag.AlignCenter)
             circle.setStyleSheet(f"color:{C.TEXT_DIM}; background:{C.DARK}; border:1px solid {C.BORDER}; border-radius:13px;")
-            label = QLabel(name); label.setAlignment(Qt.AlignmentFlag.AlignCenter); label.setMinimumHeight(22); label.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
-            detail = QLabel(desc); detail.setAlignment(Qt.AlignmentFlag.AlignCenter); detail.setFixedHeight(13); detail.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none; font-size:8px;")
+            label = QLabel(name); label.setAlignment(Qt.AlignmentFlag.AlignCenter); label.setMinimumHeight(26); label.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
+            detail = QLabel(desc); detail.setAlignment(Qt.AlignmentFlag.AlignCenter); detail.setMinimumHeight(18); detail.setMaximumHeight(24); detail.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none; font-size:8px;")
             node.addWidget(circle, alignment=Qt.AlignmentFlag.AlignCenter); node.addWidget(label); node.addWidget(detail)
             cell = QWidget(); cell.setLayout(node); stages.addWidget(cell, stretch=1); self._task_stage_nodes[name] = circle
             if idx < 3:
                 line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); line.setFixedWidth(35); line.setStyleSheet(f"color:{C.BORDER}; background:{C.BORDER}; border:none;"); stages.addWidget(line, alignment=Qt.AlignmentFlag.AlignCenter)
         v.addLayout(stages)
-        self._task_detail_lbl = QLabel("Yeni dosya veya komut gönderildiğinde görev akışı burada gösterilir."); self._task_detail_lbl.setFont(QFont("Segoe UI", 8)); self._task_detail_lbl.setMinimumHeight(18); self._task_detail_lbl.setMaximumHeight(22); self._task_detail_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;"); v.addWidget(self._task_detail_lbl)
+        self._task_detail_lbl = QLabel("Yeni dosya veya komut gönderildiğinde görev akışı burada gösterilir."); self._task_detail_lbl.setFont(QFont("Segoe UI", 8)); self._task_detail_lbl.setMinimumHeight(18); self._task_detail_lbl.setMaximumHeight(36); self._task_detail_lbl.setWordWrap(True); self._task_detail_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;"); v.addWidget(self._task_detail_lbl)
         return card
 
     def _set_task_stages(self, active: str | None = None, completed: tuple[str, ...] = ()):
@@ -2002,7 +2011,7 @@ class MainWindow(QMainWindow):
                     self._cam_frame_sig.emit(buf.tobytes())
             cap.release()
         except Exception as e:
-            print(f"[Camera] Stream error: {e}")
+            _log.error("Camera stream error: %s", e)
         finally:
             self._cam_stream_sig.emit(False)
 
@@ -2109,7 +2118,7 @@ class MainWindow(QMainWindow):
             )
             return True
         except Exception as e:
-            print(f"[Shortcut] ⚠️  Icon generation failed: {e}")
+            _log.warning("Icon generation failed: %s", e)
             return False
 
     @staticmethod
@@ -2272,6 +2281,7 @@ class MainWindow(QMainWindow):
             self._log.append_log("SYS: Masaüstü kısayolu oluşturuldu.")
         except Exception as e:
             self._log.append_log(f"ERR: Shortcut failed — {e}")
+            _log.error("Shortcut creation failed: %s", e)
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
