@@ -46,16 +46,55 @@ _last_user_turn_at: float | None = None
 USER_TURN_GRACE_S = 1.5
 
 
-def note_user_turn(now: float | None = None) -> None:
+# Onay kodundan SONRA gelen kullanici metni (ses parcalari dahil). Murat@goxs
+# 2026-09-29: kullanici "Program yazma, onay adımı, güvenlik kafesi, kabul testi"
+# yazdi (bir listeden kopyaladigi satir) — onay DEGILDI, ama "bir kullanici turu
+# geldi" sayildigi icin proje basladi. Artik metin de bakilir.
+_user_texts: list[tuple[float, str]] = []
+_AFFIRM = re.compile(r"^(evet|evt|onay\w*|tamam\w*|olur|peki|ba[sş]la\w*|devam|yap|yaz|kabul\w*|yes|ok|okay|sure)$")
+_NEGATE = re.compile(r"\b(hay[iı]r|iptal\w*|dur|durdur\w*|vazge[cç]\w*|istemiyorum|yapma|yazma|onaylam\w*|"
+                     r"ba[sş]lama|bekle|no|cancel|stop)\b")
+
+
+def note_user_turn(now: float | None = None, text: str = "") -> None:
     """Kullanicidan gercek bir girdi (ses veya yazi) geldigini kaydeder."""
     global _last_user_turn_at
     _last_user_turn_at = time.monotonic() if now is None else now
+    if text and text.strip():
+        _user_texts.append((_last_user_turn_at, text.strip()))
+        del _user_texts[:-50]
+
+
+def is_affirmative(text: str) -> bool:
+    """Açık bir 'evet' mi? İlk kelime onay olmalı (ya da çok kısa bir cevapta
+    onay kelimesi geçmeli) ve hiçbir olumsuzluk olmamalı."""
+    t = text.casefold().replace("i\u0307", "i")
+    if _NEGATE.search(t):
+        return False
+    words = re.findall(r"\w+", t)
+    if not words:
+        return False
+    return bool(_AFFIRM.match(words[0])) or (len(words) <= 3 and any(_AFFIRM.match(w) for w in words))
 
 
 def _user_confirmed_after(issued_at: float) -> bool:
     if _last_user_turn_at is None:
         return True
-    return _last_user_turn_at >= issued_at + USER_TURN_GRACE_S
+    if _last_user_turn_at < issued_at + USER_TURN_GRACE_S:
+        return False
+    after = [(ts, t) for ts, t in _user_texts if ts >= issued_at + USER_TURN_GRACE_S]
+    # Metin kaydı olmayan arayüzler (eski çağıranlar) için eski davranış.
+    if not after:
+        return True
+    # Yalnız SON söz (ses parçaları 3 sn içinde birleşir) değerlendirilir: önce
+    # "hayır, şunu da ekle" deyip sonra "evet" diyen kullanıcı onaylamış olur.
+    last = [after[-1]]
+    for ts, t in reversed(after[:-1]):
+        if last[0][0] - ts > 3.0:
+            break
+        last.insert(0, (ts, t))
+    # Ses-yazı parçaları kelimeyi bölebilir ("Ev" + "et"): iki birleştirme de denenir.
+    return is_affirmative(" ".join(t for _, t in last)) or is_affirmative("".join(t for _, t in last))
 
 
 def confirmation_problem(confirm_code: str) -> str | None:
@@ -68,7 +107,8 @@ def confirmation_problem(confirm_code: str) -> str | None:
         print("[DevAgent] ⛔ confirm_code kullanıcı cevap vermeden kullanıldı — reddedildi.")
         return (
             "ONAY HENÜZ ALINMADI — proje BAŞLATILMADI. Onay kodu verildikten sonra kullanıcıdan "
-            "hiç cevap gelmedi. Kullanıcıya ne yapılacağını anlat ve SUS; kullanıcı açıkça "
+            "açık bir 'evet' gelmedi (cevap yok ya da cevap onay değil). Kullanıcıya ne yapılacağını "
+            "kısaca anlat, 'Onaylıyor musunuz?' diye sor ve SUS; kullanıcı açıkça "
             "'evet/onaylıyorum' dedikten SONRA aynı confirm_code ile tekrar çağır."
         )
     return None
@@ -91,10 +131,263 @@ def _ollama_options() -> dict:
             return float(os.environ.get(name, "") or default)
         except ValueError:
             return default
-    return {"num_ctx": int(_num("JARVIS_OLLAMA_CTX", 8192)), "temperature": _num("JARVIS_OLLAMA_TEMP", 0.2)}
+    return {"num_ctx": int(_num("JARVIS_OLLAMA_CTX", 32768)), "temperature": _num("JARVIS_OLLAMA_TEMP", 0.2)}
 
 
-def _get_model(model_name: str):
+# ── Ücretsiz bulut modeli (Murat'ın kararı 2026-09-29: Groq) ────────────────
+# Gemini CLI'ın ücretsiz kişisel kullanımı 18 Haziran 2026'da kapandı. Groq gibi
+# kart gerektirmeyen OpenAI uyumlu servisler kod yazımı için kullanılır; anahtar
+# yoksa, kota dolduysa ya da istek fazla büyükse yerel modele düşülür.
+CLOUD_LLM_DEFAULT_URL = "https://api.groq.com/openai/v1"
+CLOUD_LLM_DEFAULT_MODEL = "openai/gpt-oss-120b"
+# Canlı test 2026-09-30: günlük 200K token 12 görevin 6.'sında bitti; kalan görevler
+# zayıf yerel modelle yazıldı ve 3'ü kaldı. Groq'ta her modelin GÜNLÜK sınırı AYRIDIR:
+# biri dolunca sıradakine geçilir (Groq model listesi 2026-09-30). Hepsi dolunca yerel.
+CLOUD_LLM_MODEL_CHAIN = ("openai/gpt-oss-120b", "qwen/qwen3.8-27b", "llama-3.3-70b-versatile",
+                         "openai/gpt-oss-20b")
+# Arka plan işleri (sohbet, keşif) küçük modeli kullanır; büyük modelin kotası koda kalır.
+CLOUD_LLM_BACKGROUND_MODEL = "openai/gpt-oss-20b"
+_CLOUD_OFF_UNTIL = 0.0
+_CLOUD_MODEL_OFF: dict[str, float] = {}
+
+
+def _cloud_models(cfg: dict, url: str) -> list[str]:
+    chain = os.environ.get("JARVIS_CLOUD_LLM_MODELS") or cfg.get("cloud_llm_models") or ""
+    if isinstance(chain, str):
+        chain = [m.strip() for m in chain.split(",") if m.strip()]
+    if chain:
+        return [str(m) for m in chain]
+    explicit = os.environ.get("JARVIS_CLOUD_LLM_MODEL") or cfg.get("cloud_llm_model") or ""
+    if url != CLOUD_LLM_DEFAULT_URL:                 # başka sağlayıcı: Groq model adları geçersiz
+        return [str(explicit or CLOUD_LLM_DEFAULT_MODEL)]
+    if explicit:
+        return [str(explicit)] + [m for m in CLOUD_LLM_MODEL_CHAIN if m != explicit]
+    return list(CLOUD_LLM_MODEL_CHAIN)
+
+
+def _cloud_llm(prefer: "str | None" = None) -> "tuple[str, str, str] | None":
+    """(url, model, key) ya da None. JARVIS_DEVAGENT_BACKEND=local ile kapanır.
+    Günlük sınırı dolmuş modeller atlanır; hepsi doluysa None (yerel model)."""
+    if os.environ.get("JARVIS_DEVAGENT_BACKEND", "").strip().lower() == "local":
+        return None
+    if time.time() < _CLOUD_OFF_UNTIL:
+        return None
+    try:
+        from jarvis.core.secure_config import get_cloud_llm_key, load_config
+        key = get_cloud_llm_key()
+        cfg = load_config()
+    except Exception:  # noqa: BLE001
+        return None
+    if not key:
+        return None
+    url = (os.environ.get("JARVIS_CLOUD_LLM_URL") or cfg.get("cloud_llm_url") or CLOUD_LLM_DEFAULT_URL).rstrip("/")
+    models = _cloud_models(cfg, url)
+    if prefer and prefer in models:
+        models = [prefer] + [m for m in models if m != prefer]
+    now = time.time()
+    for model in models:
+        if now >= _CLOUD_MODEL_OFF.get(model, 0.0):
+            return url, model, key
+    return None
+
+
+class _CloudLLM:
+    """OpenAI uyumlu /chat/completions. Günlük sınır dolarsa 6 saat, geçici hatada
+    10 dk denenmez; istek çok büyükse (ücretsiz planda dakikada 8K token) yalnız o
+    istek yerel modelle yapılır. Anahtar hiçbir çıktıya yazılmaz."""
+
+    def __init__(self, url: str, model: str, key: str, fallback=None, timeout: int = 180):
+        self.url, self.model, self._key, self.fallback, self.timeout = url, model, key, fallback, timeout
+
+    def generate_content(self, contents):
+        prompt = contents if isinstance(contents, str) else str(contents)
+        try:
+            return _GeminiCliResponse(self._call(prompt))
+        except Exception as e:  # noqa: BLE001
+            global _CLOUD_OFF_UNTIL
+            msg = str(e).replace(self._key, "***")
+            too_big = any(k in msg for k in ("413", "too large", "Request too large", "context_length"))
+            daily = any(k in msg for k in ("per day", "RPD", "TPD", "insufficient_quota"))
+            gone = any(k in msg for k in ("model_not_found", "decommissioned", "does not exist"))
+            if daily or gone:
+                # Yalnız BU modeli kapat; sıradaki Groq modelinin günlük sınırı ayrıdır.
+                _CLOUD_MODEL_OFF[self.model] = time.time() + (24 if gone else 6) * 3600
+                nxt = _cloud_llm()
+                if nxt and nxt[1] != self.model:
+                    why = "günlük sınırı doldu" if daily else "artık sunulmuyor"
+                    print(f"[DevAgent] ☁️ {self.model} {why}; {nxt[1]} modeline geçiliyor.")
+                    return _CloudLLM(*nxt, fallback=self.fallback, timeout=self.timeout).generate_content(contents)
+                _CLOUD_OFF_UNTIL = time.time() + 6 * 3600
+                why = "günlük ücretsiz sınır doldu (6 saat yerel model)"
+            elif too_big:
+                why = "istek ücretsiz plan için fazla büyük (bu istek yerel modelle)"
+            else:
+                _CLOUD_OFF_UNTIL = time.time() + 600
+                why = f"ulaşılamadı: {msg[:160]} (10 dk yerel model)"
+            print(f"[DevAgent] ℹ️ Bulut modeli kullanılamadı — {why}.")
+            if self.fallback is None:
+                raise
+            return self.fallback.generate_content(contents)
+
+    def _call(self, prompt: str) -> str:
+        import requests as _requests
+        body = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": _ollama_options().get("temperature", 0.2),
+            "max_tokens": int(os.environ.get("JARVIS_CLOUD_LLM_MAX_TOKENS", "16384") or 16384),
+        }
+        headers = {"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"}
+        # Canlı deneme 2026-09-30: ücretsiz planda DAKİKADA 8K token; ardışık dosya
+        # yazımında 3. dosyada 429 alındı ve 10 dk yerel modele düşüldü. Dakikalık
+        # sınırda Groq'un söylediği kadar (en fazla 65 sn) beklenip 4 kez denenir.
+        for attempt in range(5):
+            resp = _requests.post(f"{self.url}/chat/completions", json=body, headers=headers, timeout=self.timeout)
+            if resp.status_code == 429 and attempt < 4:
+                text = resp.text
+                if "per day" in text or "TPD" in text or "RPD" in text:
+                    raise RuntimeError(f"429 per day: {text[:200]}")
+                m = re.search(r"try again in\s+(?:(\d+)m)?([\d.]+)s", text)
+                if m:
+                    wait = int(m.group(1) or 0) * 60 + float(m.group(2))
+                else:
+                    wait = float(resp.headers.get("retry-after", "10") or 10)
+                wait = min(65.0, wait + 1.0)
+                print(f"[DevAgent] ⏳ Bulut modeli dakikalık sınırda; {wait:.0f} sn bekleniyor…")
+                time.sleep(wait)
+                continue
+            if resp.status_code >= 400:
+                raise RuntimeError(f"{resp.status_code}: {resp.text[:300]}")
+            data = resp.json()
+            text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.S)   # düşünen modeller (qwen3)
+            if not text.strip():
+                raise RuntimeError("boş cevap")
+            return text
+        raise RuntimeError("429: dakikalık sınır aşıldı")
+
+
+# ── Gemini CLI (Murat'ın kararı 2026-09-29) ─────────────────────────────────
+# Kişisel Google hesabıyla giriş yapılan Gemini CLI'ın ücretsiz kotası günde 1000
+# istek (API anahtarıyla yalnızca 20). Kod YAZIMI buraya gider; kontroller, kabul
+# testi ve güvenlik kafesi aynen çalışır. Gemini CLI yoksa/giriş yapılmamışsa/kota
+# dolmuşsa yerel Ollama modeli kullanılır. JARVIS_DEVAGENT_BACKEND=local ile kapanır.
+_GEMINI_CLI_OFF_UNTIL = 0.0
+_GEMINI_CLI_RULES = (
+    "You are used as a plain text generator by another program. Do NOT use any tools, do NOT read, "
+    "create or edit files and do NOT run commands. Reply ONLY with the requested text.\n\n"
+)
+
+
+def _gemini_cli_path() -> "str | None":
+    if os.environ.get("JARVIS_DEVAGENT_BACKEND", "").strip().lower() == "local":
+        return None
+    if time.time() < _GEMINI_CLI_OFF_UNTIL:
+        return None
+    import shutil
+    explicit = os.environ.get("JARVIS_GEMINI_CLI", "").strip()
+    if explicit:
+        return explicit if os.access(explicit, os.X_OK) else None
+    found = shutil.which("gemini")
+    if found:
+        return found
+    for cand in (Path.home() / ".npm-global" / "bin" / "gemini", Path.home() / ".local" / "bin" / "gemini",
+                 Path("/usr/local/bin/gemini")):
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
+
+
+class _GeminiCliResponse:
+    def __init__(self, text: str):
+        self.text = text
+
+
+class _GeminiCli:
+    """Gemini CLI'ı başsız (headless) çalıştırır: istem stdin'den, cevap JSON.
+    Boş bir geçici klasörde çalışır (proje dosyalarını görmez); araç kullanmaması
+    istemde açıkça söylenir ve --yolo verilmez (yazma/komut araçları onaysız çalışmaz)."""
+
+    def __init__(self, path: str, fallback=None, timeout: int = 300):
+        self.path, self.fallback, self.timeout = path, fallback, timeout
+
+    def generate_content(self, contents):
+        prompt = contents if isinstance(contents, str) else str(contents)
+        try:
+            return _GeminiCliResponse(self._run(prompt))
+        except Exception as e:  # noqa: BLE001
+            global _GEMINI_CLI_OFF_UNTIL
+            msg = str(e)
+            quota = any(k in msg for k in ("429", "RESOURCE_EXHAUSTED", "quota", "Quota"))
+            auth = any(k in msg.lower() for k in ("login", "auth", "credential", "sign in"))
+            _GEMINI_CLI_OFF_UNTIL = time.time() + (6 * 3600 if quota or auth else 600)
+            why = ("günlük kota doldu" if quota else "giriş yapılmamış olabilir (terminalde 'gemini' çalıştırıp "
+                   "Google ile giriş yapın)" if auth else f"çalışmadı: {msg[:160]}")
+            print(f"[DevAgent] ℹ️ Gemini CLI kullanılamadı ({why}); yerel model kullanılıyor.")
+            if self.fallback is None:
+                raise
+            return self.fallback.generate_content(contents)
+
+    def _run(self, prompt: str) -> str:
+        import json as _json
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="jarvis-gemini-") as work:
+            proc = subprocess.run(
+                [self.path, "--output-format", "json"],
+                input=_GEMINI_CLI_RULES + prompt, capture_output=True, text=True,
+                timeout=self.timeout, cwd=work, check=False,
+            )
+        out, err = proc.stdout.strip(), proc.stderr.strip()
+        data = None
+        if out.startswith("{"):
+            try:
+                data = _json.loads(out)
+            except ValueError:
+                data = None
+        if isinstance(data, dict):
+            if data.get("error"):
+                raise RuntimeError(f"Gemini CLI hata: {data['error']}")
+            text = data.get("response") or ""
+        else:
+            text = out
+        if proc.returncode != 0 or not text.strip():
+            raise RuntimeError(f"Gemini CLI çıkış kodu {proc.returncode}: {(err or out)[-400:]}")
+        return text
+
+
+_REMOTE_STATE: dict = {"checked_at": -1e9, "result": None}
+
+
+def _remote_ollama() -> "tuple[str, str] | None":
+    """Kiralık GPU sunucusu (Murat'ın kararı 2026-09-29: saatlik kiralama).
+    JARVIS_REMOTE_OLLAMA_URL (ör. SSH tüneli: http://localhost:11435) ayarlıysa
+    ve sunucu cevap verip model yüklüyse (url, model) döner; değilse None →
+    yerel model. Sunucu kapatılınca JARVIS kendiliğinden yerel modele döner.
+    Sonuç 60 sn önbelleklenir (her dosya yazımında yeniden sorulmaz)."""
+    url = os.environ.get("JARVIS_REMOTE_OLLAMA_URL", "").strip().rstrip("/")
+    if not url:
+        return None
+    now = time.monotonic()
+    if now - _REMOTE_STATE["checked_at"] < 60:
+        return _REMOTE_STATE["result"]
+    model = os.environ.get("JARVIS_REMOTE_MODEL", "").strip() or "devstral:24b"
+    result = None
+    try:
+        import requests as _requests
+        tags = _requests.get(f"{url}/api/tags", timeout=3).json()
+        names = {m.get("name", "") for m in tags.get("models", [])}
+        if model in names or f"{model}:latest" in names:
+            result = (url, model)
+        else:
+            print(f"[DevAgent] ⚠️ Kiralık sunucuda '{model}' yüklü değil; yerel model kullanılıyor.")
+    except Exception:  # noqa: BLE001
+        print("[DevAgent] ℹ️ Kiralık sunucuya ulaşılamadı (kapalı ya da tünel yok); yerel model kullanılıyor.")
+    _REMOTE_STATE.update(checked_at=now, result=result)
+    return result
+
+
+def _get_model(model_name: str, prefer: str = ""):
     """Once yerel Ollama'yi (qwen2.5-coder) dener - Google Gemini kesintilerinde
     bile calisir. Ollama kapaliysa/kurulu degilse otomatik olarak Gemini'ye
     (orijinal davranis) duser."""
@@ -105,6 +398,9 @@ def _get_model(model_name: str):
     # birakti (todo_app, CodeReviewProgram). Varsayilan 14b; kurulu degilse
     # 7b'ye duser. JARVIS_DEVAGENT_MODEL ile degistirilebilir.
     OLLAMA_MODEL = os.environ.get("JARVIS_DEVAGENT_MODEL", "").strip() or "qwen2.5-coder:14b"
+    remote = _remote_ollama()
+    if remote and not (prefer or "").strip():
+        OLLAMA_URL, OLLAMA_MODEL = f"{remote[0]}/api/generate", remote[1]
 
     class _OllamaResponse:
         def __init__(self, text):
@@ -126,15 +422,35 @@ def _get_model(model_name: str):
     # Ollama gercekten calisiyor mu, hizli bir saglik kontrolu (1sn)
     # JARVIS_DEVAGENT_PREFER=gemini: yerel model yerine doğrudan Gemini (daha güçlü,
     # ama kota tüketir). Varsayılan: önce yerel Ollama.
-    prefer_gemini = os.environ.get("JARVIS_DEVAGENT_PREFER", "").strip().lower() == "gemini"
+    prefer_gemini = (prefer or os.environ.get("JARVIS_DEVAGENT_PREFER", "")).strip().lower() == "gemini"
+    cloud = None if (remote and not (prefer or "").strip()) else _cloud_llm()
+    if cloud and prefer_gemini:
+        # Test/hakem: önce ücretsiz bulut modeli; hata olursa _judge_generate yerel modele düşer.
+        return _CloudLLM(*cloud, fallback=None)
+    if cloud and not prefer_gemini:
+        print(f"[DevAgent] ☁️ Ücretsiz bulut modeli kullanılıyor: {cloud[1]} "
+              f"(ulaşılamazsa yerel model: {OLLAMA_MODEL}).")
+        return _CloudLLM(*cloud, fallback=_OllamaWrapper())
+    cli = _gemini_cli_path()
+    if cli and prefer_gemini:
+        # Test/hakem (prefer="gemini"): önce Gemini CLI (günde 1000 ücretsiz istek);
+        # hata olursa çağıran taraf (_judge_generate) yerel modele düşer.
+        return _GeminiCli(cli, fallback=None)
     try:
         if prefer_gemini:
             raise RuntimeError("Gemini tercih edildi")
+        if remote and OLLAMA_URL.startswith(remote[0]):
+            print(f"[DevAgent] ☁️ Kiralık sunucu kullanılıyor: {OLLAMA_MODEL}")
+            return _OllamaWrapper()
         tags = _requests.get("http://localhost:11434/api/tags", timeout=5).json()
         installed = {m.get("name", "") for m in tags.get("models", [])}
         if OLLAMA_MODEL not in installed and "qwen2.5-coder:7b" in installed and not os.environ.get("JARVIS_DEVAGENT_MODEL"):
             print(f"[DevAgent] ⚠️ {OLLAMA_MODEL} kurulu değil, qwen2.5-coder:7b kullanılıyor.")
             OLLAMA_MODEL = "qwen2.5-coder:7b"
+        if cli:
+            print("[DevAgent] ✨ Gemini CLI kullanılıyor (ulaşılamazsa yerel model: "
+                  f"{OLLAMA_MODEL}).")
+            return _GeminiCli(cli, fallback=_OllamaWrapper())
         print(f"[DevAgent] Yerel Ollama kullaniliyor: {OLLAMA_MODEL} (Gemini'ye bagimli degil).")
         return _OllamaWrapper()
     except Exception:
@@ -202,15 +518,47 @@ SOFT_QUALITY_CODES = frozenset({"UNUSED-DEFINITION"})
 SOFT_QUALITY_ROUNDS = 1
 
 
+_JUDGE_GEMINI_OFF_UNTIL = 0.0
+
+
+def _judge_generate(prompt: str, log=print):
+    """Kabul testini YAZMA ve HAKEMLİK işi (kod yazımı değil) için model.
+
+    Canlı test 7282da2: yerel 14b model kendi örnek dosyasındaki kelimeleri,
+    durum kodlarını, satır numaralarını yanlış saydı ve hakem olarak da doğru
+    programları haksız buldu (3 görev 'doğru ama reddetti'). Murat'ın kararıyla
+    (2026-09-29) bu küçük istemler Gemini'ye gider; kod yazımı yerelde kalır.
+    JARVIS_DEVAGENT_JUDGE=local ile kapatılır. Gemini'ye ulaşılamazsa yerel
+    modele düşer — kabul testi hiçbir zaman yüzünden engellenmez."""
+    global _JUDGE_GEMINI_OFF_UNTIL
+    if (os.environ.get("JARVIS_DEVAGENT_JUDGE", "gemini").strip().lower() != "local"
+            and time.time() >= _JUDGE_GEMINI_OFF_UNTIL):
+        try:
+            text = _get_model(MODEL_PLANNER, prefer="gemini").generate_content(prompt).text
+            if text and text.strip():
+                log("🧠 Test/hakem: Gemini kullanıldı.")
+                return text
+        except Exception as e:  # noqa: BLE001
+            # Canlı test 41dc3e7: ücretsiz Gemini kotası günde 20 istek; dolunca her
+            # görevde ~60 sn yeniden deneme boşa gitti. Kota dolunca gün boyu,
+            # yoğunlukta (503) 10 dk Gemini hiç denenmez.
+            msg = f"{type(e).__name__}: {e}"
+            quota = any(k in msg for k in ("429", "RESOURCE_EXHAUSTED", "quota"))
+            _JUDGE_GEMINI_OFF_UNTIL = time.time() + (6 * 3600 if quota else 600)
+            why = "günlük kota doldu" if quota else "Gemini şu an yoğun/ulaşılamıyor"
+            log(f"ℹ️ Test/hakem için Gemini kullanılamadı ({why}); "
+                f"{'6 saat' if quota else '10 dakika'} boyunca yerel model kullanılacak.")
+    return _get_model(MODEL_PLANNER).generate_content(prompt).text
+
+
 def _acceptance_expectation_wrong(description: str, spec: dict, problems: list[str], output: str,
                                   program_text: str = "") -> tuple[bool, str]:
     """Hakem: kabul testindeki beklenti mi yanlış, program mı? Her hatada ve
     hakem kendi hesabıyla çelişkiliyse (False, ...) — şüphede program suçlu."""
     try:
         from jarvis.actions.devkit.acceptance import build_dispute_prompt, dispute_is_consistent, parse_dispute
-        response = _get_model(MODEL_PLANNER).generate_content(
-            build_dispute_prompt(description, spec, problems, output))
-        wrong, reason, values = parse_dispute(response.text)
+        wrong, reason, values = parse_dispute(_judge_generate(
+            build_dispute_prompt(description, spec, problems, output)))
         if not wrong:
             return False, reason
         missing = [t for m in re.finditer(r"İÇERMİYOR: (\[.*?\])\.", "\n".join(problems))
@@ -219,6 +567,74 @@ def _acceptance_expectation_wrong(description: str, spec: dict, problems: list[s
         return (True, reason) if ok else (False, f"hakem kararı reddedildi: {why}")
     except Exception as e:  # noqa: BLE001
         return False, f"hakem çalışmadı: {type(e).__name__}"
+
+
+MAX_ROLLBACKS = 2
+
+
+def _restore_codes(project_dir: Path, current: dict[str, str], stable: dict[str, str]) -> None:
+    """Dosyaları çökmeyen son sürüme döndürür; bozuk sürüm .jarvis/backups'a kaydedilir."""
+    backup_dir = project_dir / ".jarvis" / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for rel, code in current.items():
+        if stable.get(rel) != code:
+            (backup_dir / f"{rel.replace('/', '__')}.bozuk.{stamp}.bak").write_text(code, encoding="utf-8")
+    for rel, code in stable.items():
+        target = project_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(code, encoding="utf-8")
+    for rel in set(current) - set(stable):
+        (project_dir / rel).unlink(missing_ok=True)
+
+
+SAMPLE_INPUT_DIR = "ornek_girdi"
+
+
+def _with_sample_input(run_command: str, project_dir: Path, spec: dict, log=print) -> str:
+    """Görevde girdi klasörü/dosyası VERİLMEMİŞSE (ör. "bir klasördeki resimleri
+    aylara ayıran program yaz") program argümansız çalıştırılıyor, 'Kullanım:
+    python main.py <girdi_klasörü>' deyip çıkıyor ve 5 deneme boşa gidiyordu
+    (Murat@goxs 2026-09-29, image_sorter). Kabul testinin örnek dosyaları proje
+    içindeki ornek_girdi/ klasörüne yazılır ve program onunla çalıştırılır;
+    kullanıcı da programın nasıl çalıştığını bu örnekle görür."""
+    from jarvis.actions.devkit.acceptance import PLACEHOLDER, URL_PLACEHOLDER
+    try:
+        parts = shlex.split(run_command or "", posix=os.name != "nt")
+    except ValueError:
+        return run_command
+    args = spec.get("args") or []
+    if not args or any(URL_PLACEHOLDER in a for a in args) or not any(PLACEHOLDER in a for a in args):
+        return run_command
+    if len(parts) > 2:
+        # Windows testi 2026-09-30 (kelime_sayaci): plan 'python main.py input.txt' dedi ama
+        # input.txt HİÇ yoktu; 5 tur 'Dosya bulunamadı' ile boşa gitti. Ek argümanlar yalnızca
+        # proje klasöründe VAR OLMAYAN göreli dosya adlarıysa (uydurma örnek girdi) örnekle
+        # değiştirilir; gerçek/mutlak yollar ve seçenekler (-x) hiç değiştirilmez.
+        extra = parts[2:]
+        if not all(not a.startswith("-") and not os.path.isabs(a) and "://" not in a
+                   and not (project_dir / a).exists() for a in extra):
+            return run_command
+        log(f"ℹ️ Plandaki girdi {extra} proje klasöründe yok (uydurma); yerine örnek girdi kullanılacak.")
+        run_command = " ".join(parts[:2])
+    sample = project_dir / SAMPLE_INPUT_DIR
+    try:
+        for fx in spec["fixtures"]:
+            target = (sample / fx["path"]).resolve()
+            target.relative_to(sample.resolve())
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(fx["content"], encoding="utf-8")
+            if fx.get("mtime"):
+                from datetime import datetime
+                ts = datetime.fromisoformat(fx["mtime"].replace(" ", "T")).timestamp()
+                os.utime(target, (ts, ts))
+    except (OSError, ValueError) as exc:
+        log(f"ℹ️ Örnek girdi hazırlanamadı ({exc}); program argümansız çalıştırılacak.")
+        return run_command
+    new_args = [a.replace(PLACEHOLDER, str(sample), 1) for a in args]
+    new_cmd = " ".join([run_command.strip(), *(_shell_quote(a) for a in new_args)])
+    log(f"ℹ️ Görevde girdi klasörü verilmedi; program örnek girdiyle denenecek: {new_cmd}")
+    return new_cmd
 
 
 def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
@@ -232,14 +648,14 @@ def _plan_acceptance(description: str, plan: dict, log=print) -> "dict | None":
         return None
     try:
         from jarvis.actions.devkit.acceptance import build_prompt, parse_spec, validate_spec
-        response = _get_model(MODEL_PLANNER).generate_content(build_prompt(description, plan))
-        spec, reason = validate_spec(parse_spec(response.text))
+        spec, reason = validate_spec(parse_spec(_judge_generate(build_prompt(description, plan), log)))
     except Exception as e:  # noqa: BLE001
         log(f"ℹ️ Kabul testi hazırlanamadı ({type(e).__name__}); yalnızca kalite kapısı kullanılacak.")
         return None
     if spec is None:
         log(f"ℹ️ Kabul testi uygulanmayacak: {reason}")
         return None
+    spec["task"] = description   # görevde açıkça istenen etiketler uydurma sayılmasın
     tokens = sum(len(e["contains"]) for e in spec["expect"])
     log(f"🧪 Kabul testi hazır: {len(spec['fixtures'])} örnek dosya, {tokens} beklenen ifade.")
     return spec
@@ -256,12 +672,47 @@ _SELENIUM_HINT = (
 )
 
 
+_DIGITS_ONLY_NUMBER = re.compile(r"filter\(\s*str\.isdigit|if\s+\w+\.isdigit\(\)\s*\)|\.isdigit\(\)\s*\]\s*\)")
+
+
+def _known_code_hint(file_codes: dict[str, str]) -> str:
+    """Kodda bilinen SESSİZ hata kalıpları (program çökmez, sonuç yanlış olur).
+    Murat@goxs 2026-09-29 (book_scraper): fiyat ''.join(filter(str.isdigit, '51.77'))
+    ile okundu → 5177; hiçbir kitap '20 £'dan ucuz' olmadı, 5 denemede de fark edilmedi."""
+    hints = []
+    for path, code in file_codes.items():
+        if _DIGITS_ONLY_NUMBER.search(code or ""):
+            hints.append(
+                f"{path}: a number is built by keeping ONLY DIGITS (str.isdigit). That DELETES the decimal point "
+                "and minus sign: '£51.77' becomes 5177, so every price looks huge and filters like '< 20' match "
+                "nothing. Parse with a regex that keeps the decimal part, e.g. "
+                "float(re.search(r'\\d+(?:\\.\\d+)?', text).group()). If the text shows 'Â£', pass "
+                "resp.content (bytes) to BeautifulSoup instead of resp.text.")
+    return ("\n\nKNOWN SILENT BUG IN THE CODE (fix this first):\n- " + "\n- ".join(hints)) if hints else ""
+
+
 _STRPTIME_MISMATCH = re.compile(r"time data '([^']*)' does not match format '([^']*)'")
 
 
 def _known_error_hint(output: str) -> str:
     """Sık görülen, modelin tekrar tekrar göremediği hatalar için kesin ipucu."""
-    m = _STRPTIME_MISMATCH.search(output or "")
+    out = output or ""
+    if ("partially initialized module" in out and "circular import" in out) or \
+            re.search(r"cannot import name '(\w+)' from '\1'", out) or \
+            "'function' object has no attribute 'run'" in out:
+        # Canlı test 2026-09-30 (flask_todo): app/__init__.py ↔ routes.py döngüsel
+        # import, 'from create_app import create_app' ve create_app.run() — 5 tur.
+        return (
+            "\n\nROOT CAUSE (Flask project layout): the modules import each other in a circle, or a FUNCTION "
+            "is imported as if it were a module. Use this exact, standard layout:\n"
+            "- app/__init__.py: `from flask import Flask` and `def create_app(): app = Flask(__name__); "
+            "from .routes import bp; app.register_blueprint(bp); return app` (import routes INSIDE the function).\n"
+            "- app/routes.py: `from flask import Blueprint, ...`; `bp = Blueprint('main', __name__)`; decorate "
+            "views with `@bp.route(...)`. routes.py must NOT import `app` or `create_app`.\n"
+            "- main.py: `from app import create_app` then `app = create_app()` and `app.run(...)` — call the "
+            "function first; never `create_app.run()` and never `from create_app import ...`."
+        )
+    m = _STRPTIME_MISMATCH.search(out)
     if m:
         # Canlı test 2026-09-29 (hata_saatleri): satır boşluktan bölünüp YALNIZ
         # tarih parçası tam biçimle çözülmeye çalışıldı; 5 tur aynı hata.
@@ -312,6 +763,87 @@ def _selenium_instead_of_playwright(file_codes: dict[str, str], dependencies) ->
                 )
                 break
     return found
+
+
+def _call_mismatches(file_codes: dict[str, str]) -> dict[str, list[dict]]:
+    """Dosyalar arası çağrı/imza uyuşmazlığı (modelden bağımsız, çalıştırmadan).
+    Murat@goxs 2026-09-30: main.py 'generate_chart()' diye argümansız çağırdı, core/
+    report.py 'generate_chart(stats, ...)' tanımladı; traceback en içteki dosyayı
+    gösterdiği için 5 denemede hep report.py düzeltildi, çağıran main.py'ye hiç
+    dokunulmadı. Yalnız 'from paket.modul import f' ile alınan üst düzey fonksiyonlar
+    denetlenir; emin olunamayan (*args, **kwargs, *liste) çağrılar atlanır."""
+    import ast
+    sigs: dict[tuple[str, str], tuple[list[str], int, bool, bool, list[str]]] = {}
+    trees: dict[str, ast.AST] = {}
+    for path, code in file_codes.items():
+        if not path.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        trees[path] = tree
+        mod = path[:-3].replace("/", ".").removesuffix(".__init__")
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                a = node.args
+                pos = [x.arg for x in (*a.posonlyargs, *a.args)]
+                n_req = len(pos) - len(a.defaults)
+                kw_req = [k.arg for k, d in zip(a.kwonlyargs, a.kw_defaults, strict=True) if d is None]
+                kwonly = [k.arg for k in a.kwonlyargs]
+                sigs[(mod, node.name)] = (pos, n_req, a.vararg is not None, a.kwarg is not None, kw_req + ["\0"] + kwonly)
+    found: dict[str, list[dict]] = {}
+    for path, tree in trees.items():
+        local: dict[str, tuple[str, str]] = {}
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                for al in node.names:
+                    if (node.module, al.name) in sigs:
+                        local[al.asname or al.name] = (node.module, al.name)
+        if not local:
+            continue
+        for call in ast.walk(tree):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in local):
+                continue
+            if any(isinstance(x, ast.Starred) for x in call.args) or any(k.arg is None for k in call.keywords):
+                continue
+            mod, name = local[call.func.id]
+            pos, n_req, has_var, has_kw, kw_info = sigs[(mod, name)]
+            kw_req, kwonly = kw_info[:kw_info.index("\0")], kw_info[kw_info.index("\0") + 1:]
+            given_kw = {k.arg for k in call.keywords}
+            n = len(call.args)
+            problems = []
+            missing = [p for p in pos[n:n_req] if p not in given_kw] + [k for k in kw_req if k not in given_kw]
+            if missing:
+                problems.append(f"missing required argument(s): {', '.join(missing)}")
+            if n > len(pos) and not has_var:
+                problems.append(f"passes {n} positional arguments but it accepts at most {len(pos)}")
+            unknown = [k for k in given_kw if k not in pos and k not in kwonly]
+            if unknown and not has_kw:
+                problems.append(f"unknown keyword argument(s): {', '.join(sorted(unknown))}")
+            if problems:
+                where = mod.replace(".", "/") + ".py"
+                found.setdefault(path, []).append({
+                    "code": "CALL-SIGNATURE-MISMATCH",
+                    "message": (f"{name}() is called here but {where} defines {name}({', '.join(pos)}"
+                                f"{', *, ' + ', '.join(kwonly) if kwonly else ''}): {'; '.join(problems)}. "
+                                f"Make THIS call match the definition (or change the definition and every caller "
+                                f"consistently); pass the real data the function needs."),
+                    "line": call.lineno, "col": call.col_offset,
+                })
+    return found
+
+
+def _call_mismatch_hint(file_codes: dict[str, str]) -> str:
+    try:
+        found = _call_mismatches(file_codes)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not found:
+        return ""
+    lines = [f"- {fp}:{it['line']}: {it['message']}" for fp, items in found.items() for it in items]
+    return ("\n\nCALL/DEFINITION MISMATCHES found by static analysis (fix the CALLING file too, not only "
+            "the file in the traceback):\n" + "\n".join(lines[:10]))
 
 
 def _recipes_for_fix(description: str, language: str) -> str:
@@ -456,6 +988,49 @@ def _classify_error(output: str, project_dir: Path | None = None) -> str:
     return "none"
 
 
+def _input_sample_hint(run_command: str, project_dir: Path, max_files: int = 3, max_lines: int = 3) -> str:
+    """Çıktı BOŞ çıktığında modele girdinin gerçek satırlarını, boşlukla bölünmüş
+    alan numaralarıyla gösterir (canlı test 2026-09-29 hata_saatleri: satır
+    '2026-09-01 09:15:00 ERROR ...' iken program parts[3] == 'ERROR' diye baktı;
+    model yalnızca 'çıktı boş' duyduğu için 5 denemede de hatayı görmedi)."""
+    try:
+        args = shlex.split(run_command or "", posix=os.name != "nt")[1:]
+    except ValueError:
+        return ""
+    files: list[Path] = []
+    for a in args:
+        p = Path(a) if os.path.isabs(a) else project_dir / a
+        try:
+            if p.is_file():
+                files.append(p)
+            elif p.is_dir():
+                files.extend(sorted(q for q in p.rglob("*") if q.is_file())[:20])
+        except OSError:
+            continue
+    blocks: list[str] = []
+    for f in files:
+        if len(blocks) >= max_files:
+            break
+        try:
+            raw = f.read_bytes()[:4000]
+        except OSError:
+            continue
+        if b"\0" in raw:
+            continue
+        lines = [ln for ln in raw.decode("utf-8", "replace").splitlines() if ln.strip()][:max_lines]
+        if not lines:
+            continue
+        shown = "\n".join(
+            f"    {ln[:160]!r}\n      split() → " + " ".join(f"[{i}]{w!r}" for i, w in enumerate(ln.split()[:8]))
+            for ln in lines)
+        blocks.append(f"  {f.name}:\n{shown}")
+    if not blocks:
+        return ""
+    return ("\n\nThe output has NO data rows, so your filter/parse condition never matched. REAL input lines "
+            "(with the index of each whitespace-separated field) — check every index and string you compare "
+            "against:\n" + "\n".join(blocks))
+
+
 def _has_error(output: str, run_command: str) -> bool:
     
     low = output.lower()
@@ -489,12 +1064,14 @@ Return ONLY valid JSON — no markdown, no explanation:
     {{
       "path": "main.py",
       "description": "Entry point — what it does and which modules it imports",
-      "imports": ["utils.helpers", "core.database"]
+      "imports": ["utils.helpers", "core.database"],
+      "exports": ["main() -> None"]
     }},
     {{
       "path": "utils/helpers.py",
       "description": "Helper utilities — what functions it exposes",
-      "imports": []
+      "imports": [],
+      "exports": ["helper_fn(arg1: str) -> int"]
     }}
   ],
   "run_command": "python main.py",
@@ -517,7 +1094,8 @@ Critical rules:
 7. CRITICAL for correctness: if two or more files exchange a data structure (a dict, a class instance, a tuple shape) — even files that never import each other, because the data actually flows through a third file like main.py — describe its EXACT shape ONCE in "shared_data_contracts" (field names, types, whether it's a dict or a specific class). Every file that touches this data MUST use the identical shape. This is the most common source of real bugs: e.g. one file builds {{"amount": ..., "category": ...}} while another expects an object with .amount/.category attributes.
 8. If running the entry point is supposed to durably create or update a file (a database, a report, an exported document, a log, a generated image, etc.), list each such file's relative path in "expected_outputs" with a one-line description of what a CORRECT result looks like inside it. If the result is a FOLDER TREE (files copied/moved/sorted into sub-folders), list that output folder's relative path (e.g. "sorted") instead of guessing individual file names. Leave this list EMPTY only for purely interactive/display-only programs that persist nothing (e.g. a calculator, a GUI that only shows numbers on screen). This is critical: a program can run to completion with NO Python error while silently producing nothing real (a network call that fails silently, a thread that never runs, wrong file path) — "expected_outputs" is what lets that be caught instead of wrongly reported as a success.
 9. This is a completely standalone, independent project with NO relationship to any AI assistant framework. NEVER plan a file path or an import under a top-level name "jarvis" (e.g. "jarvis/core/engine.py", or importing "jarvis.anything") — that name does not exist for this project and is never a real requirement, no matter what the description mentions.
-10. If the task needs content that appears only after JavaScript runs (infinite scroll, "load more" buttons, dynamic pages, "wait until the page is fully loaded"), plain HTTP clients (requests/httpx/urllib) are WRONG: use Playwright and list "playwright" in dependencies. If the task works on a web page, take the URL from the command line (sys.argv[1]) and put the real URL from the description into run_command.
+10. The "exports" field is MANDATORY for every file: list every public function signature, class name, and module-level constant this file provides with EXACT parameter names, types, and return type. Example: "save_result(url: str, title: str, paragraph: str, status: str, attempts: int, error: str) -> None". Other files will import these EXACT names. Cross-file imports MUST match these exports character-for-character. If a file provides no public API, use [].
+11. If the task needs content that appears only after JavaScript runs (infinite scroll, "load more" buttons, dynamic pages, "wait until the page is fully loaded"), plain HTTP clients (requests/httpx/urllib) are WRONG: use Playwright and list "playwright" in dependencies. If the task works on a web page, take the URL from the command line (sys.argv[1]) and put the real URL from the description into run_command.
 
 JSON:"""
 
@@ -535,7 +1113,8 @@ JSON:"""
                     "görev JavaScript ile yüklenen içerik istiyor (kaydırma/'daha fazla yükle') ama planlayıcı "
                     "iki denemede de tarayıcı (Playwright) kullanmadı; requests ile bu içerik alınamaz."
                 )
-        return _ensure_url_in_run_command(plan, description)
+        return _ensure_described_outputs(
+            _ensure_paths_in_run_command(_ensure_url_in_run_command(plan, description), description), description)
     except json.JSONDecodeError as e:
         raise ValueError(f"Planner returned invalid JSON: {e}\nRaw: {response.text[:300]}") from e
     except Exception as e:
@@ -558,6 +1137,100 @@ def _ensure_url_in_run_command(plan: dict, description: str) -> dict:
         url = urls[0].rstrip(".,;:!?")
         plan["run_command"] = f"{cmd} {url}"
         print(f"[DevAgent] 🔧 run_command'a görevdeki URL eklendi: {plan['run_command']}")
+    return plan
+
+
+_ABS_PATH_IN_TEXT = re.compile(r"(?<![\w:/.~-])(/[^\s'\"<>()\[\],;`]+|[A-Za-z]:[\\/][^\s'\"<>()\[\],;`]+)")
+
+
+def _shell_quote(arg: str) -> str:
+    """Komut satırına eklenecek bir yol/argüman. Windows'ta shlex.quote tek tırnak koyar;
+    Windows komut satırı tek tırnağı tanımaz, program yolu tırnaklarıyla birlikte alırdı
+    (Windows testi 2026-09-30). Windows'ta çift tırnak (list2cmdline) kullanılır."""
+    return subprocess.list2cmdline([arg]) if os.name == "nt" else shlex.quote(arg)
+
+
+def _ensure_paths_in_run_command(plan: dict, description: str) -> dict:
+    """Görevde VAR OLAN girdi dosya/klasör yolları verilmiş ama run_command bunları
+    içermiyorsa ekler (canlı test 2026-09-30, csv_birlestir: görev iki CSV yolu verdi,
+    plan 'python main.py' dedi; JARVIS 'girdi verilmedi' sanıp kendi örnek verisiyle
+    çalıştırdı, gerçek dosyalara hiç dokunmadı ve 'çalışıyor' dedi → YALANCI BAŞARI)."""
+    cmd = str(plan.get("run_command") or "")
+    if not cmd:
+        return plan
+    found: list[str] = []
+    for m in _ABS_PATH_IN_TEXT.finditer(description or ""):
+        path = m.group(1).rstrip(".,;:!?'\"")
+        if path not in found and path not in cmd and os.path.exists(path):
+            found.append(path)
+    if found:
+        plan["run_command"] = " ".join([cmd, *(_shell_quote(p) for p in found)])
+        print(f"[DevAgent] 🔧 run_command'a görevdeki girdi yolları eklendi: {plan['run_command']}")
+    return plan
+
+
+_OUTPUT_NAME = re.compile(
+    r"(?<![/\\\w.-])([\w-]+\.(?:txt|csv|json|md|html|db|sqlite|png|jpg|zip|log|xlsx|pptx|pdf))\b", re.IGNORECASE)
+
+
+def described_output_names(description: str, run_command: str = "") -> list[str]:
+    """Görev metninde AÇIKÇA adı verilen çıktı dosyaları. Girdi yolları
+    ('/.../satislar.csv' gibi eğik çizgiyle başlayanlar), URL'ler ve
+    run_command'daki argümanlar hariç."""
+    text = _URL_IN_TEXT.sub(" ", description or "")
+    names = []
+    for m in _OUTPUT_NAME.finditer(text):
+        name = m.group(1)
+        if name.lower() in {"main.py"} or name in (run_command or "") or name in names:
+            continue
+        # Yalnızca YAZILACAK dosyalar: adın hemen ardından bir yazma fiili gelmeli
+        # ("linkler.txt dosyasına yaz", "rapor.zip içine koy"); "notlar.txt'yi oku" sayılmaz.
+        after = re.split(r"[;.\n]|\b(?:oku|okuyup|read)\b", text[m.end():m.end() + 45].lower(), maxsplit=1)[0]
+        nxt = _OUTPUT_NAME.search(after)
+        after = after[:nxt.start()] if nxt else after
+        before = text[max(0, m.start() - 30):m.start()].lower()
+        if _WRITE_VERB.search(after) or re.search(r"(çalışma|calisma|working)\s+(klasör|klasor|folder)", before):
+            names.append(name)
+    return names
+
+
+_WRITE_VERB = re.compile(r"\b(yaz|kaydet|oluştur|olustur|çiz|ciz|koy|üret|uret|write|save|export|create|dump)",
+                         re.IGNORECASE)
+
+
+def _ensure_described_outputs(plan: dict, description: str) -> dict:
+    """Görevin adını verdiği çıktı dosyası plandaki expected_outputs'ta yoksa
+    ekler. (Canlı test 2026-09-29: link_kontrol'de plan linkler.txt'yi
+    listelemedi; dosya hiç yazılmadığı hâlde 'çalışıyor' denildi → YALANCI
+    BAŞARI. Dış analiz raporu da bu çapraz kontrolü önermişti.)"""
+    outs = plan.get("expected_outputs")
+    if not isinstance(outs, list):
+        outs = []
+    described = described_output_names(description, str(plan.get("run_command") or ""))
+    if described:
+        # Planlayıcı görevdeki adı "çevirip" başka ad uydurduysa (tablo.html → table.html,
+        # canlı test 2026-09-29) o uydurma beklenti atılır: aynı uzantılı, görevde hiç
+        # geçmeyen bir ad, doğru çalışan programı 'oluşturulmadı' diye reddettiriyordu.
+        exts = {Path(n).suffix.lower() for n in described}
+        low_desc = (description or "").lower()
+        kept = []
+        for o in outs:
+            nm = Path(str(o.get("path", "") if isinstance(o, dict) else o)).name
+            if Path(nm).suffix.lower() in exts and nm.lower() not in low_desc:
+                print(f"[DevAgent] 🔧 Görevde geçmeyen beklenen çıktı atıldı: {nm} (görevin istediği: {described})")
+                continue
+            kept.append(o)
+        outs = kept
+        plan["expected_outputs"] = outs
+    have = {Path(str(o.get("path", "") if isinstance(o, dict) else o)).name.lower() for o in outs}
+    added = []
+    for name in described:
+        if name.lower() not in have:
+            outs.append({"path": name, "description": "the task explicitly asks for this output file"})
+            added.append(name)
+    if added:
+        plan["expected_outputs"] = outs
+        print(f"[DevAgent] 🔧 Görevde adı geçen çıktı dosyaları beklenenlere eklendi: {added}")
     return plan
 
 
@@ -1011,6 +1684,19 @@ def _write_file(
             code_snippet = already_written[dep_path][:2000]
             dependency_context += f"\n\n--- {dep_path} (you must import from this) ---\n{code_snippet}"
 
+    # INTERFACE CONTRACT - cross-file export signatures
+    exports_block = ""
+    for af in all_files:
+        for exp in af.get("exports", []):
+            exports_block += "  " + af["path"] + " -> " + exp + "\n"
+    if exports_block:
+        exports_block = (
+            "\nINTERFACE CONTRACT \u2014 EXACT public API of every project file.\n"
+            "When importing from another project file, you MUST use EXACTLY these names.\n"
+            "NEVER rename, shorten, or invent alternative names:\n"
+            + exports_block
+        )
+
     lang_rules = ""
     if language.lower() == "python":
         lang_rules = """
@@ -1054,6 +1740,8 @@ Complete project file structure (in dependency order):
 
 {f"Dependencies this file must import from other project files:{dependency_context}" if dependency_context else ""}
 
+{exports_block}
+
 {shared_contracts_block}
 
 {expected_outputs_block}
@@ -1081,6 +1769,7 @@ General rules:
 - NEVER call a blocking modal dialog function (tkinter's messagebox.showinfo/showerror/showwarning/askyesno/askokcancel/etc., or simpledialog.ask...) from the automatic startup path — these open a real window and block execution until a human clicks it, and this program will be run and observed automatically with no human available to click anything. Print results to the console or a log widget instead; only show such a dialog in direct response to a real user-initiated action (e.g. inside a button's own callback), never unconditionally on startup or at the end of automatic processing.
 - If a GUI file (Tkinter, etc.) is one of this project's OTHER files, and the description calls for a graphical interface, the entry point must actually instantiate and run that GUI (create its window class and call its mainloop) — never write a separate headless/console version of the same logic in the entry point that ignores the GUI file, leaving it unused.
 - EVERY network call (requests.get/post/put/delete/patch, a requests.Session's own get/post/etc., urllib, httpx, etc.) MUST include an explicit timeout (e.g. requests.get(url, timeout=10)). Never call a network function with no timeout — a single slow or unresponsive server then blocks the whole program indefinitely with no Python error at all, which will be reported as a silent failure, not a crash.
+- If a function uses input() for interactive mode, ALSO provide a way to run it non-interactively (e.g. CLI arguments, stdin piping, or a --auto / --demo flag that pre-fills values and prints results without prompting). This ensures automated testing can verify the output.
 - If the description asks for parallel/concurrent/threaded work (e.g. "N paralel thread"), the entry point must actually use the threaded/concurrent implementation — never write a second, sequential version of the same logic and call that one instead, leaving the real parallel implementation unused.
 
 Code for {file_path}:"""
@@ -1321,6 +2010,149 @@ def _read_partial_timeout_output(out_path: Path, err_path: Path, max_chars: int 
     )
 
 
+_DATA_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".csv", ".json")
+
+
+def _clear_data_outputs(project_dir: Path, expected_outputs: list) -> None:
+    """Her yeni denemeden önce beklenen VERİ çıktıları (db/csv/json) silinir: bir
+    önceki denemenin kayıtları yenisine eklenip çift kayıt oluşmasın (Murat@goxs
+    2026-09-30: iki deneme sonrası veritabanında her kitap iki kez vardı)."""
+    for output in expected_outputs or []:
+        rel = output.get("path") if isinstance(output, dict) else str(output)
+        target = _safe_project_path(project_dir, rel)
+        if target and target.is_file() and target.suffix.lower() in _DATA_SUFFIXES:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+
+
+_WEB_APP = re.compile(r"\bFlask\s*\(|\bapp\.run\s*\(|http\.server|HTTPServer\s*\(|\buvicorn\.run\s*\(|\bFastAPI\s*\(")
+
+
+def _is_web_app(file_codes: dict[str, str]) -> bool:
+    return any(_WEB_APP.search(code or "") for code in file_codes.values())
+
+
+_COUNT_NOUN = (r"(?:kitab\w*|kitap\w*|ürün\w*|urun\w*|satır\w*|satir\w*|kayıt\w*|kayit\w*|"
+               r"haber\w*|film\w*|şehir\w*|sehir\w*|items?|books?|products?|rows?|records?)")
+_REQUESTED_COUNT = [
+    re.compile(r"\b(?:en\s+\w+|ilk|son|top|first|cheapest|best|latest)\s+(\d{1,3})\b"
+               r"(?!\s*(?:sayfa|page|sn\b|saniye|dakika|gün|gun|mb\b|gb\b|£|\$|€|tl\b|sterlin|pound|dolar|euro|%)"
+               r"|['’]?(?:den|dan|ten|tan)\b)", re.I),
+    re.compile(r"\b(\d{1,3})\s+(?:tane\s+|adet\s+)?(?:en\s+\w+\s+)?" + _COUNT_NOUN, re.I),
+]
+_HTTP_FAIL = re.compile(
+    r"[^\n]*(?:\b(?:403|404|410|429|5\d\d)\b[^\n]{0,60}(?:Client Error|Server Error|Not Found|Forbidden)"
+    r"|Failed to fetch|Sayfa alınamadı)[^\n]*", re.I)
+
+
+def _requested_count(description: str) -> "int | None":
+    """Görev kaç satır/kayıt istiyor? ('en ucuz 5 kitap' → 5, 'ilk 10 haber' → 10).
+    Birden çok sayı varsa ('toplam 100 kitap topla, en düşük 10 kitabı göster') EN KÜÇÜĞÜ
+    alınır: gösterilen tablo toplanandan büyük olamaz; fazlasını istemek yanlış alarm olur.
+    Emin değilse None — o zaman sayı denetlenmez (yanlış alarm yerine sessizlik)."""
+    found = [int(m.group(1)) for rx in _REQUESTED_COUNT for m in rx.finditer(description or "")]
+    found = [n for n in found if 1 <= n <= 200]
+    return min(found) if found else None
+
+
+def _speakable(text: str) -> str:
+    """Sesli okumada 'http://127.0.0.1:5000/' parçalanıyordu ('… 0.0.1:5000');
+    yerel adresi okunur hâle getirir. Yazılı mesaj tam adresi korur."""
+    return re.sub(r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0)(?::(\d{2,5}))?/?",
+                  lambda m: f"yerel adres, {m.group(1)} numaralı port" if m.group(1) else "yerel adres", text)
+
+
+def _probe_web_app(run_command: str, project_dir: Path, file_codes: dict[str, str],
+                   wait_s: float = 25.0, min_rows: "int | None" = None,
+                   prior_output: str = "") -> "tuple[bool, str]":
+    """Sürekli çalışan bir WEB SUNUCUSUNU gerçekten doğrular (Murat@goxs 2026-09-30:
+    'en ucuz 5 kitabı web sayfası tablosu olarak göster' → Flask sunucusu; JARVIS
+    '90 sn'de tamamlanamadı, elle kontrol edin' dedi). Program kafeste yeniden
+    başlatılır, yerel adresi bulunana kadar denenir, sayfa indirilir, içinde tablo
+    satırı aranır, sonra süreç ağacı öldürülür. (başarılı mı, açıklama)."""
+    import tempfile
+    import urllib.request
+    code = "\n".join(file_codes.values())
+    ports = [int(p) for p in re.findall(r"port\s*=\s*(\d{2,5})", code)]
+    ports += [5000, 8000, 8080]
+    try:
+        parts = shlex.split(run_command, posix=(os.name != "nt"))
+    except ValueError:
+        return False, "komut ayrıştırılamadı"
+    if parts and parts[0].lower() == "python":
+        parts[0] = sys.executable
+    from jarvis.actions.devkit import sandbox
+    parts, run_env, sb_state = sandbox.wrap(parts, project_dir, log=lambda m: None)
+    if sb_state.startswith("REFUSED"):
+        return False, sb_state
+    # Sayfalardan biri alınamadıysa (404…) tablo EKSİK veriyle dolu olabilir (Murat@goxs
+    # 2026-09-30: '…/catalogue/catalogue/page-2.html' 404, 3 sayfa yerine 1 sayfa kazındı,
+    # tabloda 3 satır vardı ve başarı sayıldı).
+    failed = _HTTP_FAIL.search(prior_output or "")
+    if failed:
+        return False, f"programın çıktısında sayfa alınamadı hatası var: {failed.group(0).strip()[:200]}"
+    tmp = tempfile.mkdtemp(prefix="jarvis-web-")
+    out_path = Path(tmp) / "out.log"
+    proc = None
+    last_note = ""
+    try:
+        with open(out_path, "w", encoding="utf-8") as out_f:
+            proc = subprocess.Popen(parts, stdout=out_f, stderr=subprocess.STDOUT, cwd=str(project_dir),
+                                    env=run_env, start_new_session=(os.name != "nt"))
+            deadline = time.time() + wait_s
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    tail = out_path.read_text(encoding="utf-8", errors="replace")[-300:]
+                    return False, f"sunucu hemen kapandı: {tail!r}"
+                log_text = out_path.read_text(encoding="utf-8", errors="replace")
+                failed = _HTTP_FAIL.search(log_text)
+                if failed:
+                    return False, f"sayfa alınamadı hatası: {failed.group(0).strip()[:200]}"
+                printed = re.findall(r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d{2,5})", log_text)
+                for port in dict.fromkeys([*map(int, printed), *ports]):
+                    url = f"http://127.0.0.1:{port}/"
+                    try:
+                        with urllib.request.urlopen(url, timeout=3) as resp:  # nosec B310: sabit yerel adres
+                            html = resp.read(500_000).decode("utf-8", "replace")
+                    except Exception:  # noqa: BLE001
+                        continue
+                    rows = len(re.findall(r"<tr[\s>]", html, re.I))
+                    data_rows = rows - 1
+                    if "<table" in html.lower() and data_rows >= max(1, min_rows or 1):
+                        return True, f"{url} çalışıyor; sayfadaki tabloda {data_rows} veri satırı var"
+                    if "<table" in html.lower() and data_rows >= 1:
+                        # Arka planda veri hâlâ geliyor olabilir: süre dolana kadar tekrar bak.
+                        last_note = (f"{url} açıldı ama tabloda yalnız {data_rows} veri satırı var; "
+                                     f"görev {min_rows} istiyor (veri eksik toplanmış olabilir)")
+                        break
+                    if "<table" in html.lower():
+                        last_note = f"{url} açıldı ama tablo BOŞ (veri satırı yok)"
+                        break
+                    return True, f"{url} çalışıyor (sayfa {len(html)} karakter; tablo yok)"
+                time.sleep(1.0)
+        return False, last_note or f"{wait_s:.0f} sn içinde yerel adreste cevap veren bir sayfa bulunamadı"
+    finally:
+        if proc is not None and proc.poll() is None:
+            _kill_process_tree(proc)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _output_preview(output: str) -> str:
+    """Logdaki önizleme. Yalnız ilk 150 karakter yazılınca Python hatalarının asıl
+    satırı ('TypeError: ...') hiç görünmüyordu (Murat@goxs 2026-09-30: 5 deneme
+    'main.py, line 32' diye kesildi, neyin bozuk olduğu logdan anlaşılamadı).
+    Hata varsa son 6 satır da eklenir."""
+    text = output or ""
+    head = text[:150]
+    if "Traceback" in text or "Error" in text[150:]:
+        tail = "\n".join(text.strip().splitlines()[-6:])
+        if tail and tail not in head:
+            return f"{head}\n  …\n{tail[-600:]}"
+    return head
+
+
 def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
     print(f"[DevAgent] 🚀 Running: {run_command}")
 
@@ -1339,6 +2171,18 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
             return "Run error: planner returned an empty run_command."
         if parts[0].lower() == "python":
             parts[0] = sys.executable
+
+        # GÜVENLİK KAFESİ (2026-09-29): üretilen program kullanıcının hesabıyla
+        # tam erişimle çalışmasın — bkz. devkit/sandbox.py.
+        from jarvis.actions.devkit import sandbox
+        gui = "--headless-test" not in parts and sandbox.project_uses_gui(project_dir)
+        parts, run_env, sb_state = sandbox.wrap(parts, project_dir, gui=gui,
+                                                log=lambda m: print(f"[DevAgent] {m}"))
+        if sb_state.startswith("REFUSED"):
+            print(f"[DevAgent] 🛑 {sb_state}")
+            return sb_state
+        if sb_state == "kafes":
+            print("[DevAgent] 🔒 Güvenlik kafesinde çalışıyor (yalnız proje klasörü yazılabilir, ev klasörü görünmez).")
 
         # NOT: cikti dogrudan PIPE'a degil, gercek bir dosyaya yaziliyor ve
         # surecin sadece KENDI CIKISI (Popen.wait) bekleniyor - subprocess.run(
@@ -1380,6 +2224,8 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
                     parts,
                     stdout=out_f, stderr=err_f,
                     cwd=str(project_dir),
+                    env=run_env,
+                    start_new_session=(os.name != "nt"),
                 )
                 disk_problem = _wait_with_disk_guard(proc, timeout, project_dir, (out_path, err_path))
                 if disk_problem == "timeout":
@@ -1493,7 +2339,13 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
                 capture_output=True, timeout=10,
             )
         else:
-            proc.kill()
+            # start_new_session=True ile başlatıldıysa tüm süreç grubunu (torunlar
+            # dahil: Flask reloader, Playwright tarayıcısı) öldür.
+            import signal
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
     except Exception:
         pass
     try:
@@ -2348,8 +3200,43 @@ _IMPORT_TO_PYPI = {
 }
 
 
-def _try_auto_install(error_output: str, project_dir: Path) -> bool:
-    """ModuleNotFoundError varsa eksik paketi otomatik kurmaya çalışır."""
+# Planda olmasa da düzeltme sırasında kurulabilecek, bilinen yaygın paketler.
+# Bunların DIŞINDAKİ bir isim (modelin uydurduğu 'create_app' gibi) PyPI'dan
+# kurulmaz: pip install, paketin kurulum kodunu korumalı alan DIŞINDA çalıştırır
+# (canlı test 2026-09-30 flask_todo: 'create_app' adlı yabancı bir paket JARVIS'in
+# kendi .venv'ine kuruldu).
+_WELL_KNOWN_IMPORTS = frozenset({
+    "requests", "flask", "numpy", "pandas", "matplotlib", "seaborn", "plotly", "scipy", "lxml",
+    "openpyxl", "xlsxwriter", "tqdm", "rich", "click", "typer", "fastapi", "uvicorn", "jinja2",
+    "sqlalchemy", "pydantic", "httpx", "aiohttp", "psutil", "pygame", "playwright", "selenium",
+    "dateutil", "pytz", "tabulate", "colorama", "feedparser", "markdown", "reportlab", "qrcode",
+    "pyperclip", "watchdog", "schedule", "networkx", "sympy", "werkzeug", "flask_sqlalchemy",
+    "chardet", "emoji", "faker", "pyfiglet", "termcolor", "wordcloud", "nltk", "textblob",
+})
+_IMPORT_TO_PYPI_EXTRA = {"dateutil": "python-dateutil", "flask_sqlalchemy": "Flask-SQLAlchemy"}
+
+
+def _local_project_names(project_dir: Path) -> set[str]:
+    """Projedeki dosya/klasör adları ve tanımlı fonksiyon/sınıf adları (küçük harf)."""
+    names: set[str] = set()
+    try:
+        for f in project_dir.rglob("*"):
+            if ".jarvis" in f.parts or ".venv" in f.parts:
+                continue
+            names.add(f.stem.lower())
+            if f.suffix == ".py" and f.is_file() and f.stat().st_size < 500_000:
+                names.update(n.lower() for n in re.findall(
+                    r"^\s*(?:def|class)\s+(\w+)|^(\w+)\s*=", f.read_text(encoding="utf-8", errors="replace"),
+                    re.M) for n in n if n)
+    except OSError:
+        pass
+    return names
+
+
+def _try_auto_install(error_output: str, project_dir: Path, planned: "list[str] | tuple" = ()) -> bool:
+    """ModuleNotFoundError varsa eksik paketi otomatik kurmaya çalışır — yalnızca
+    planda onaylanmış ya da bilinen yaygın bir paketse; projenin kendi dosya /
+    fonksiyon adlarını (ör. 'create_app') ve tanınmayan isimleri ASLA kurmaz."""
     pattern = re.compile(
         r"No module named ['\"]([a-zA-Z0-9_\-\.]+)['\"]", re.IGNORECASE
     )
@@ -2386,7 +3273,18 @@ def _try_auto_install(error_output: str, project_dir: Path) -> bool:
         print(f"[DevAgent] ⚠️ '{module_name}' zaten Python standart kütüphanesinin bir parçası (pip'te böyle bir paket yok, ayrıca kurulmasına gerek yok) - kurulum denenmeyecek.")
         return False
 
-    pkg = _IMPORT_TO_PYPI.get(module_name.lower(), module_name.replace("_", "-"))
+    low = module_name.lower()
+    if low in _local_project_names(project_dir):
+        print(f"[DevAgent] ⚠️ '{module_name}' bu projenin kendi dosyası/fonksiyonu — dış paket değil, "
+              "kurulmayacak; import satırı düzeltilecek.")
+        return False
+    planned_low = {re.split(r"[<>=!~\[ ;]", str(d).strip(), maxsplit=1)[0].lower().replace("-", "_")
+                   for d in planned or ()}
+    if not (low in _WELL_KNOWN_IMPORTS or low in _IMPORT_TO_PYPI or low.replace("-", "_") in planned_low):
+        print(f"[DevAgent] ⚠️ '{module_name}' planda yok ve bilinen bir paket değil — güvenlik için "
+              "internetten KURULMAYACAK; import satırı düzeltilecek.")
+        return False
+    pkg = _IMPORT_TO_PYPI.get(low) or _IMPORT_TO_PYPI_EXTRA.get(low) or module_name.replace("_", "-")
     print(f"[DevAgent] 🔧 Auto-installing missing package: {pkg} (import: {module_name})")
     try:
         result = subprocess.run(
@@ -2747,6 +3645,16 @@ def _fix_files(
     else:
         files_to_fix.append(entry_point)
 
+    # Çağrı/imza uyuşmazlığı varsa ÇAĞIRAN dosya da düzeltilecekler arasına girer
+    # (traceback yalnız tanımın olduğu dosyayı gösterebilir).
+    if error_type != "lint_error":
+        try:
+            for fp in _call_mismatches(file_codes):
+                if fp not in files_to_fix:
+                    files_to_fix.append(fp)
+        except Exception:  # noqa: BLE001
+            pass
+
     undefined_note = _undefined_name_note(error_output, file_codes)
     if undefined_note:
         # Canlı test 2026-09-29 (tarihe_gore_ayir): "Hata: name 'src' is not
@@ -3056,6 +3964,7 @@ def _build_project(
     if acceptance_spec:
         from jarvis.actions.devkit.acceptance import contract_text
         shared_contracts_text = (shared_contracts_text + "\n- " + contract_text(acceptance_spec)).strip()
+        run_command = _with_sample_input(run_command, project_dir, acceptance_spec, log)
 
     # Aynı proje adıyla yapılan tekrar denemelerde eski database.db/report
     # dosyası yeni çalışmanın sonucu gibi görünmemeli. Yalnızca planner'ın
@@ -3181,6 +4090,13 @@ def _build_project(
     # 2026-09-28: 5 denemenin hepsinde Selenium'un Chrome hatası yamalandı.)
     for _fp, _issues in _selenium_instead_of_playwright(file_codes, dependencies).items():
         lint_issues.setdefault(_fp, []).extend(_issues)
+
+    # Dosyalar arası çağrı/imza uyuşmazlığı (2026-09-30, grafik görevi).
+    try:
+        for _fp, _issues in _call_mismatches(file_codes).items():
+            lint_issues.setdefault(_fp, []).extend(_issues)
+    except Exception:  # noqa: BLE001
+        pass
 
     if lint_issues:
         affected = ", ".join(sorted(lint_issues.keys()))
@@ -3314,12 +4230,21 @@ def _build_project(
     timeout_extended = False
     current_timeout  = timeout
     previous_fix_error_output: str | None = None
+    # GERİ ALMA (Murat@goxs 2026-09-29, file_cleaner_report): ilk sürüm çalışıp
+    # rapor üretti; model "düzeltirken" programı bozdu ('root' is not defined) ve
+    # kalan 4 deneme bu yeni hatayla harcandı. Çökmeyen son sürüm saklanır; bir
+    # düzeltme onu çökertirse o sürüme dönülür ve bozan değişiklik modele söylenir.
+    stable_codes: dict[str, str] | None = None
+    rollbacks = 0
+    revert_note = ""
 
     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
+        if attempt > 1:
+            _clear_data_outputs(project_dir, expected_outputs)
         log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
         run_started_at = time.time()
         last_output = _run_project(run_command, project_dir, current_timeout)
-        log(f"Output preview: {last_output[:150]}")
+        log(f"Output preview: {_output_preview(last_output)}")
 
         if last_output.startswith("REFUSED:"):
             # Bu bir kod hatasi degil, bir GUVENLIK reddi - self-fix dongusune
@@ -3335,7 +4260,7 @@ def _build_project(
 
         is_timeout = last_output.startswith("Timed out")
 
-        if is_timeout and not timeout_extended and attempt < MAX_FIX_ATTEMPTS:
+        if is_timeout and not timeout_extended and attempt < MAX_FIX_ATTEMPTS and not _is_web_app(file_codes):
             # _has_error() timeout'u kasitli olarak hata SAYMIYOR (bir sunucu/
             # GUI kasitli olarak surekli calisabilir), AMA bu hicbir sey
             # DOGRULANMADI demektir - antivirus/soguk-import gecikmesi ya da
@@ -3351,6 +4276,24 @@ def _build_project(
             continue
 
         has_crash_error = _has_error(last_output, run_command)
+        if not has_crash_error and not is_timeout:
+            stable_codes = dict(file_codes)
+        elif (has_crash_error and stable_codes is not None and rollbacks < MAX_ROLLBACKS
+              and stable_codes != file_codes and attempt < MAX_FIX_ATTEMPTS):
+            rollbacks += 1
+            _restore_codes(project_dir, file_codes, stable_codes)
+            file_codes.clear()
+            file_codes.update(stable_codes)
+            crash_tail = last_output.strip()[-500:]
+            revert_note = (
+                "\n\nIMPORTANT: a previous fix attempt BROKE the program (it crashed with the error below) and "
+                "was REVERTED — you are looking at the last version that ran without crashing. Do NOT repeat "
+                "that change; make a smaller, careful fix for the ORIGINAL problem above.\n"
+                f"Crash caused by the reverted fix:\n{crash_tail}"
+            )
+            previous_fix_error_output = None
+            log("↩️ Son düzeltme çalışan programı bozdu; önceki çalışan sürüme geri dönüldü.")
+            continue
 
         # DUZELTME (2026-09-23, web_scraper canli testi): "cokmedi" ile
         # "gercekten dogru calisti" AYNI SEY DEGIL. O testte program hicbir
@@ -3397,11 +4340,16 @@ def _build_project(
             # olusan rapor varsa proje BASARILI SAYILMAZ; duzeltme turuna girer.
             quality = _python_quality_issues(file_codes)
             from jarvis.actions.devkit.python_quality import (
+                empty_data_outputs,
                 header_only_outputs,
                 placeholder_data_outputs,
                 truncated_value_outputs,
             )
             header_problems = header_only_outputs(project_dir, expected_outputs)
+            for _p in empty_data_outputs(project_dir, expected_outputs):
+                quality.setdefault(entry_point, []).append(
+                    {"code": "OUTPUT-EMPTY-DATA", "message": _p, "line": 0, "col": 0}
+                )
             for _p in truncated_value_outputs(project_dir, expected_outputs):
                 quality.setdefault(entry_point, []).append(
                     {"code": "OUTPUT-TRUNCATED", "message": _p, "line": 0, "col": 0}
@@ -3414,6 +4362,17 @@ def _build_project(
                 quality.setdefault(entry_point, []).extend(
                     {"code": "OUTPUT-HEADER-ONLY", "message": p, "line": 0, "col": 0} for p in header_problems
                 )
+            _empty = [i for i in quality.get(entry_point, []) if i["code"] in ("OUTPUT-EMPTY-DATA", "OUTPUT-HEADER-ONLY")]
+            if _empty:
+                _hint = _input_sample_hint(run_command, project_dir)
+                if _hint:
+                    _empty[0]["message"] += _hint
+                # Boş çıktının nedeni çoğu zaman ayrıştırmayı yapan YARDIMCI dosyadadır
+                # (hata_saatleri: parts[3] utils/helpers.py'deydi, ama yalnız main.py
+                # düzeltmeye gönderildiği için 5 denemede de dokunulmadı).
+                for _fp in file_codes:
+                    if _fp != entry_point and _fp.endswith(".py"):
+                        quality.setdefault(_fp, []).extend(dict(i) for i in _empty)
             if quality and all(i["code"] in SOFT_QUALITY_CODES for iss in quality.values() for i in iss):
                 # Canlı test 2026-09-29 (kitap_raporu): çıktısı doğru program yalnızca
                 # "kullanılmayan fonksiyon" yüzünden 3 tur reddedildi. Tek başına
@@ -3437,7 +4396,7 @@ def _build_project(
                         error_output=(
                             "The program ran without crashing, but an automated quality gate found that it "
                             "does NOT really do its job (see per-file findings). Fix every finding."
-                        ),
+                        ) + revert_note,
                         project_description=description,
                         all_files=files,
                         file_codes=file_codes,
@@ -3490,7 +4449,11 @@ def _build_project(
                     # sorulmadı. Artık AYNI başarısızlık ikinci kez görülünce sorulur;
                     # hakem yalnızca örnek girdiden kendi hesabıyla karar verir.
                     if (acc_last and acc_last[0] == acc_sig and not acc_judged
-                            and not any("oluşturulmadı" in pr or "hata koduyla" in pr for pr in acc_problems)):
+                            and not any("oluşturulmadı" in pr or "hata koduyla" in pr or "BİÇİM:" in pr
+                                        for pr in acc_problems)):
+                        # "BİÇİM:" = görevin istediği yapı kesin olarak farklı (ör. nesne yerine
+                        # liste); bu bir sayım anlaşmazlığı değil, hakeme gidilmez (canlı test
+                        # 2026-09-29: hakem görevde olmayan bir biçimi "istenen" sandı).
                         acc_judged = True
                         run_dir = project_dir / ".jarvis" / "acceptance" / "run"
                         prog_text = acc_output + "\n" + "\n".join(
@@ -3524,7 +4487,7 @@ def _build_project(
                     }
                     try:
                         fixed = _fix_files(
-                            error_output=last_output[:2500],
+                            error_output=last_output[:2500] + revert_note,
                             project_description=description,
                             all_files=files,
                             file_codes=file_codes,
@@ -3547,6 +4510,57 @@ def _build_project(
                     continue
                 if not acceptance_disputed:
                     log("✅ Kabul testi geçti (örnek girdide beklenen sonuçlar üretildi).")
+            web_ok, web_note = None, ""
+            if is_timeout and _is_web_app(file_codes):
+                _clear_data_outputs(project_dir, expected_outputs)   # doğrulama çalıştırması çift kayıt yazmasın
+                web_ok, web_note = _probe_web_app(run_command, project_dir, file_codes,
+                                                  min_rows=_requested_count(description),
+                                                  prior_output=last_output)
+            if web_ok is False and attempt < MAX_FIX_ATTEMPTS:
+                log(f"❌ Web sunucusu doğrulanamadı: {web_note} — düzeltiliyor...")
+                want = _requested_count(description)
+                last_output = (f"The program is a web server, but an automated check FAILED: {web_note}. "
+                               f"Make the page at '/' render an HTML <table> with the real data rows"
+                               + (f" (the task asks for {want} rows)" if want else "") + ". "
+                               f"If a page could not be fetched (404), the page URL was built wrongly: do NOT "
+                               f"append a fixed path like 'catalogue/page-2.html' to a start URL that may already "
+                               f"contain a path; follow the page's own 'next' link and resolve it with "
+                               f"urljoin(CURRENT_PAGE_URL, href). Never skip a failed page silently.\n\n"
+                               f"Program output:\n{last_output}")
+                try:
+                    file_codes.update(_fix_files(
+                        error_output=last_output + revert_note, project_description=description,
+                        all_files=files, file_codes=file_codes, language=language, project_dir=project_dir,
+                        entry_point=entry_point, shared_contracts=shared_contracts_text,
+                        expected_outputs=expected_outputs_text, known_error_type="output_missing",
+                        repeat_of_previous=(previous_fix_error_output == last_output),
+                    ))
+                    previous_fix_error_output = last_output
+                except RateLimitError:
+                    msg = "Rate limit reached during fix. Project saved, check it manually in VSCode."
+                    if speak: speak(msg)
+                    return msg
+                continue
+            if web_ok:
+                log(f"🌐 Web sunucusu doğrulandı: {web_note}")
+                msg = (
+                    f"'{proj_name}' projesi çalışıyor, efendim. Bu bir web sunucusu: {web_note}. "
+                    f"Açmak için proje klasöründe '{run_command}' çalıştırıp tarayıcıda bu adrese gidin. "
+                    f"Dosyalar: {project_dir}"
+                )
+                if speak: speak(_speakable(msg))
+                return f"{msg}\n\nOutput:\n{last_output}"
+            if web_ok is False:
+                # Son denemede de doğrulanamadı: 'beklenen çıktılar doğrulandı' gibi YALANCI
+                # bir başarı cümlesi kurulmaz, sorun olduğu gibi söylenir.
+                log(f"❌ Web sunucusu son denemede de doğrulanamadı: {web_note}")
+                msg = (
+                    f"'{proj_name}' projesini {MAX_FIX_ATTEMPTS} denemede düzgün çalıştıramadım, efendim. "
+                    f"Web sunucusu açılıyor ama kontrol başarısız: {web_note}. "
+                    f"Dosyalar {project_dir} içinde duruyor."
+                )
+                if speak: speak(_speakable(msg))
+                return f"{msg}\n\nOutput:\n{last_output}"
             if is_timeout:
                 if expected_outputs:
                     verified_note = f" Beklenen çıktılar gerçekten doğrulandı ({', '.join(str(o.get('path', o)) if isinstance(o, dict) else str(o) for o in expected_outputs)})."
@@ -3595,7 +4609,7 @@ def _build_project(
                 continue
 
         if error_type == "dependency_error" and auto_installs < 3:
-            installed = _try_auto_install(last_output, project_dir)
+            installed = _try_auto_install(last_output, project_dir, dependencies)
             if installed:
                 auto_installs += 1
                 log("Missing dependency installed, retrying...")
@@ -3631,20 +4645,31 @@ def _build_project(
         try:
             _sel = _selenium_instead_of_playwright(file_codes, dependencies)
             _extra = ((("\n\n" + _SELENIUM_HINT) if _sel else "") + _bare_filename_hint(last_output, run_command)
-                      + _known_error_hint(last_output))
-            updated = _fix_files(
-                error_output=last_output + _extra,
-                project_description=description,
-                all_files=files,
-                file_codes=file_codes,
-                language=language,
-                project_dir=project_dir,
-                entry_point=entry_point,
-                shared_contracts=shared_contracts_text,
-                expected_outputs=expected_outputs_text,
-                known_error_type=error_type,
-                repeat_of_previous=repeat_of_previous,
-            )
+                      + _known_error_hint(last_output) + _known_code_hint(file_codes)
+                      + _call_mismatch_hint(file_codes))
+            # Aynı hata tekrarlıyorsa düşük sıcaklıktaki model aynı (yanlış) kodu yeniden
+            # üretiyor: bu turda daha yüksek sıcaklıkla FARKLI bir çözüm denenir.
+            _diversify = repeat_of_previous and "JARVIS_OLLAMA_TEMP" not in os.environ
+            if _diversify:
+                os.environ["JARVIS_OLLAMA_TEMP"] = "0.7"
+                log("🎲 Aynı hata tekrarladı: bu düzeltmede farklı bir çözüm aranıyor (sıcaklık 0.7).")
+            try:
+                updated = _fix_files(
+                    error_output=last_output + _extra + revert_note,
+                    project_description=description,
+                    all_files=files,
+                    file_codes=file_codes,
+                    language=language,
+                    project_dir=project_dir,
+                    entry_point=entry_point,
+                    shared_contracts=shared_contracts_text,
+                    expected_outputs=expected_outputs_text,
+                    known_error_type=error_type,
+                    repeat_of_previous=repeat_of_previous,
+                )
+            finally:
+                if _diversify:
+                    os.environ.pop("JARVIS_OLLAMA_TEMP", None)
             file_codes.update(updated)
             previous_fix_error_output = last_output
             time.sleep(1)
@@ -3705,7 +4730,9 @@ def dev_agent(
         return (
             f"ONAY GEREKLİ: \"{description}\" açıklamasıyla yeni bir {language} projesi "
             f"oluşturulacak. Bu adım gerekli paketleri {installer} ile kurar ve üretilen kodu "
-            f"gerçekten çalıştırır. Kullanıcıya bunu tarif et; kullanıcı SESLİ/YAZILI olarak "
+            f"gerçekten çalıştırır. Kullanıcıya bunu kısaca tarif et ve yalnızca 'Onaylıyor musunuz?' "
+            f"diye sor. Onay kodunu kullanıcıya SÖYLEME, kullanıcıdan kod YAZMASINI İSTEME — kod senin "
+            f"iç kullanımın içindir; kullanıcının 'evet' demesi yeter. Kullanıcı SESLİ/YAZILI olarak "
             f"açıkça onaylarsa (bir sonraki mesajında), dev_agent'ı aynı description/language/"
             f"project_name ile ve confirm_code='{code}' parametresiyle TEKRAR çağır. "
             f"Kullanıcı onaylamadan bu kodu kendi kendine kullanma."

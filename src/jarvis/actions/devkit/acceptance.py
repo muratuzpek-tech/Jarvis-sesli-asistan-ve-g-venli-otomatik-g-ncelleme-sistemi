@@ -57,8 +57,15 @@ If applicable, create a small sample input ("fixtures") whose correct result you
 and list short tokens that ANY correct output must contain regardless of formatting:
 identifiers (function names), file names, or numbers — NOT full sentences, NOT line formats.
 Every token must be justified by the fixtures. Include at least one token per requested feature.
+Make the fixtures REALISTIC and include at least one tricky edge case that a naive implementation of
+THIS input format typically gets wrong (something that looks like the target but must be ignored, an
+empty or malformed line, a nested/sub-folder item, a duplicate), and make the expectations prove it
+is handled. The edge case must follow ONLY the rules written in the task — never invent an extra rule
+(e.g. words to ignore, a required output wording) that the task does not state.
 Never use a bare small number as a token ("7", "2"): write it WITH its label as the program would print it
 ("satir: 3", "line 4"), and count it yourself carefully from the fixture text.
+Never use a bare label with no value ("files_found:", "total_size:") — a label is output WORDING, which the
+task does not fix; the value (a file name, a number) is what proves correctness.
 If the result depends on file DATES (modification time), give EVERY fixture an "mtime": "YYYY-MM-DD" —
 otherwise fixtures are created with today's date and date-based expectations cannot hold.
 
@@ -259,10 +266,15 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
     fixture_url = f"http://127.0.0.1:{server.server_address[1]}" if server else ""
     args = [a.replace(URL_PLACEHOLDER, fixture_url, 1).replace(PLACEHOLDER, str(fixture.resolve()), 1)
             for a in spec["args"]]
-    entry = (project_dir / entry_point).resolve()
+    entry = project_dir / entry_point  # .resolve() yok: kafes projeyi verilen yolla bağlar
     before = _output_snapshot(project_dir, spec)
     try:
-        proc = subprocess.run([python or sys.executable, str(entry), *args], cwd=str(run_dir),
+        from jarvis.actions.devkit import sandbox
+        cmd, env, sb_state = sandbox.wrap([python or sys.executable, str(entry), *args], project_dir,
+                                          cwd=run_dir, log=lambda m: None)
+        if sb_state.startswith("REFUSED"):
+            return [sb_state], ""
+        proc = subprocess.run(cmd, cwd=str(run_dir), env=env,
                               capture_output=True, text=True, timeout=timeout, check=False)
         output = (proc.stdout + ("\n" + proc.stderr if proc.stderr else "")).strip()
         code = proc.returncode
@@ -274,7 +286,9 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
             server.server_close()
     problems: list[str] = []
     if code != 0:
-        problems.append(f"Program kabul testinde hata koduyla bitti ({code}).")
+        tail = output.strip()[-400:]
+        problems.append(f"Program kabul testinde hata koduyla bitti ({code})."
+                        + (f" Son çıktı: {tail!r}" if tail else " Hiç çıktı yok (hata sessizce sys.exit(1) ile mi bitiyor?)."))
     for ex in spec["expect"]:
         if ex["output"] == "STDOUT":
             text, label = output, "program çıktısı (stdout)"
@@ -315,6 +329,10 @@ def run_acceptance(project_dir: Path, entry_point: str, spec: dict, timeout: flo
         own_path = ex["output"].lower()
         missing = [t for t in ex["contains"] if not (_token_found(t, low) or t.lower() in own_path)]
         if missing:
+            missing = _drop_miscounted(missing, text, spec["fixtures"])
+        if missing and not _is_structured(ex["output"], text):
+            missing = _drop_invented_labels(missing, text, spec["fixtures"], spec.get("task", ""))
+        if missing:
             problems.append(f"{label} şu beklenen ifadeleri İÇERMİYOR: {missing}. İçerik (ilk 800 karakter): {text[:800]!r}"
                             + _json_shape_hint(text, missing))
     return problems, output[:2000]
@@ -338,7 +356,8 @@ WHAT THE PROGRAM ACTUALLY PRODUCED / PROBLEMS:
 
 Work it out yourself from the SAMPLE INPUT FILES, step by step (count every line/item carefully and
 follow every rule in the task). Then decide which is correct.
-Return ONLY JSON: {{"correct": "program" | "expectation", "reason": "short explanation with your own count",
+Return ONLY JSON: {{"program_output_is_correct": true | false, "expectation_is_correct": true | false,
+ "reason": "short explanation with your own count",
  "correct_values": ["2-5 short exact lines/values the CORRECT output must contain, by your own count"]}}
 JSON:"""
 
@@ -357,6 +376,12 @@ def parse_dispute(text: str) -> tuple[bool, str, list[str]]:
         return False, "hakem cevabı anlaşılamadı", []
     reason = str(data.get("reason", ""))[:300]
     values = [str(v).strip() for v in (data.get("correct_values") or []) if str(v).strip()][:5]
+    # İki ayrı evet/hayır: tek alanlı "correct": "expectation" cevabı hem "beklenti
+    # doğru" hem "sorun beklentide" diye okunabiliyordu (canlı test 2026-09-29).
+    if "program_output_is_correct" in data or "expectation_is_correct" in data:
+        prog_ok = data.get("program_output_is_correct") is True
+        exp_ok = data.get("expectation_is_correct")
+        return prog_ok and exp_ok is False, reason, values
     return str(data.get("correct", "")).strip().lower() == "program", reason, values
 
 
@@ -418,6 +443,116 @@ def _token_found(token: str, low_text: str) -> bool:
     lt = _loose(t)
     return bool(lt) and re.search(rf"(?<![\w.]){re.escape(lt)}(?![\w.])"
                                   if lt[0].isalnum() and lt[-1].isalnum() else re.escape(lt), _loose(low_text)) is not None
+
+
+_KEYED_COUNT = re.compile(r'^"?([\w.\-/]{1,40})"?\s*[:=]\s*(\d{1,6})$')
+_LABEL_VALUE = re.compile(r"^([^\W\d_][^\W\d ]*(?: [^\W\d_]+){0,3})\s*[:=]\s*(\d{1,6})$")
+_BARE_LABEL = re.compile(r"^([^\W\d][\w ]{0,40}?)\s*[:=]\s*$")
+
+
+def _fold(text: str) -> str:
+    return text.casefold().translate(str.maketrans("ıİşğüöç", "iisguoc"))
+
+
+def _drop_miscounted(missing: list[str], output_text: str, fixtures: list[dict]) -> list[str]:
+    """'"200": 4' bekleniyor, program 7 diyor: örnek dosyalarda '200' geçen satırları
+    KODLA sayarız. Program sayısı bu gerçek sayımla birebir aynıysa yanlış olan
+    beklentidir (canlı test 2026-09-29 log_analizi: örnek logda 7 tane 200 vardı,
+    kabul testi 4 bekledi, yerel hakem de beklentiyi haklı buldu → doğru program
+    5 tur reddedildi). Yalnızca programla bağımsız sayım UYUŞURSA düşürülür."""
+    corpus = "\n".join(fx["content"] for fx in fixtures)
+    keep: list[str] = []
+    for tok in missing:
+        m = _KEYED_COUNT.match(tok.strip())
+        if m:
+            key, expected = m.group(1), int(m.group(2))
+            real = _metric(key, fixtures)
+            if real is None:
+                # Geçiş SAYISI (satır değil): canlı test 7282da2 kelime_sayici'de satır
+                # sayımı, 'world' bir satırda iki kez geçtiği için doğru beklentiyi düşürdü.
+                real = len(re.findall(rf"(?<![\w.]){re.escape(key)}(?![\w.])", corpus, re.I))
+            got = re.search(rf'(?<![\w.])"?{re.escape(key)}"?\s*[:=,]\s*(\d+)(?:\.0+)?(?![\d.])', output_text, re.I)
+            if real and real != expected and got and int(got.group(1)) == real:
+                print(f"[DevAgent] 🔧 Kabul testi yanlış saymış: {tok!r} — örnekte gerçekte {real}, "
+                      f"program da {real} buldu; bu beklenti düşürüldü.")
+                continue
+        keep.append(tok)
+    return keep
+
+
+_METRICS = {
+    "words": {"kelime", "kelimeler", "kelime_sayisi", "kelime_sayısı", "word", "words", "word_count"},
+    "lines": {"satir", "satır", "satirlar", "satır_sayısı", "satir_sayisi", "line", "lines", "line_count"},
+    "chars": {"karakter", "karakter_sayisi", "karakter_sayısı", "char", "chars", "characters", "char_count"},
+}
+
+
+def _metric(key: str, fixtures: list[dict]) -> int | None:
+    """'kelime', 'satir', 'karakter' gibi iyi tanımlı ölçüler tek bir düz metin
+    örnek dosyada kodla hesaplanır (canlı test 7282da2 metin_istatistigi: 15
+    kelimelik metin için kabul testi 'kelime: 11' bekledi, program 15 dedi)."""
+    k = key.casefold()
+    kind = next((name for name, names in _METRICS.items() if k in names), None)
+    texts = [fx["content"] for fx in fixtures if fx["path"].lower().endswith(_TEXT_FIXTURE_SUFFIXES)]
+    if not kind or len(texts) != 1 or len(fixtures) != 1:
+        return None
+    text = texts[0]
+    if kind == "words":
+        return len(text.split())
+    if kind == "lines":
+        return len(text.splitlines())
+    return len(text)
+
+
+def _is_structured(output_name: str, text: str) -> bool:
+    if output_name.lower().endswith((".json", ".csv", ".tsv")):
+        return True
+    try:
+        json.loads(text)
+        return True
+    except ValueError:
+        return False
+
+
+def _drop_invented_labels(missing: list[str], output_text: str, fixtures: list[dict],
+                          task: str = "") -> list[str]:
+    """'satir: 4', 'toplam not sayisi: 8' gibi beklentilerde ETİKET görevin değil,
+    testi yazan modelin uydurduğu biçimdir (canlı test 2026-09-29 yapilacaklar_raporu:
+    görev biçim belirtmiyordu; program 'ana.py:4' yazdığı için 5 tur reddedildi ve
+    biçime uymaya çalışırken satır içi TODO'ları bulamaz hale geldi). Etiket örnek
+    girdilerde HİÇ geçmiyorsa (yani veri değil biçimse) yalnızca SAYI aranır: çıktıda
+    o sayı, beklendiği kadar kez tek başına geçmeli. Metin/Markdown çıktılar içindir."""
+    corpus = _fold("\n".join(fx["content"] for fx in fixtures))
+    # Değersiz çıplak etiket ('files_found:', 'total_size:') yalnız BİÇİMDİR: görevde
+    # ya da örnek girdide geçmiyorsa aranmaz (canlı test 2026-09-30 gereksiz dosya
+    # bulucu: yerel model bu İngilizce etiketleri uydurdu; Türkçe rapor yazan
+    # program reddedildi).
+    task_f = _fold(task)
+    bare = [t for t in missing if (m := _BARE_LABEL.match(t.strip()))
+            and not any(v in corpus or v in task_f
+                        for v in {_fold(m.group(1)), _fold(m.group(1)).replace("_", " ")})]
+    if bare:
+        print(f"[DevAgent] ℹ️ Kabul testindeki değersiz uydurma etiketler yok sayıldı: {bare}")
+        missing = [t for t in missing if t not in bare]
+    numbers = re.findall(r"(?<![\w.])(\d+)(?![\w.])", output_text)
+    need: dict[str, int] = {}
+    relaxed: list[str] = []
+    keep: list[str] = []
+    for tok in missing:
+        m = _LABEL_VALUE.match(tok.strip())
+        if m and _fold(m.group(1)) not in corpus:
+            need[m.group(2)] = need.get(m.group(2), 0) + 1
+            relaxed.append(tok)
+        else:
+            keep.append(tok)
+    for tok in relaxed:
+        value = _LABEL_VALUE.match(tok.strip()).group(2)
+        if numbers.count(value) < need[value]:
+            keep.append(tok)
+    if len(keep) < len(missing):
+        print(f"[DevAgent] ℹ️ Kabul testindeki uydurma etiketler yok sayıldı (yalnız sayılar arandı): "
+              f"{[t for t in missing if t not in keep]}")
+    return keep
 
 
 def _loose(text: str) -> str:

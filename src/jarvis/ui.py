@@ -20,7 +20,7 @@ else:
 
 from PyQt6.QtCore import (
     QPointF, QRectF, Qt,
-    QTimer, pyqtSignal,
+    QObject, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QDragEnterEvent, QDropEvent, QFont, QKeySequence, QLinearGradient, QPainter, QPen, QPixmap,
@@ -28,7 +28,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QSizePolicy, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from jarvis.core.secure_config import get_gemini_api_key, load_config, save_config, api_keys_path
@@ -50,6 +50,15 @@ _RIGHT_W = 340
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 
+try:
+    from jarvis.logger import get_logger
+except ImportError:
+    import logging
+    def get_logger(name):
+        return logging.getLogger(f"jarvis.{name}")
+
+_log = get_logger("ui")
+
 class C:
     # Premium workstation palette — cyan is the primary navigation/action
     # colour, with violet reserved for secondary system information.
@@ -67,6 +76,7 @@ class C:
     GREEN     = "#11cfb2"
     GREEN_D   = "#00aa55"
     RED       = "#ff3355"
+    GOLD  = '#ffc44d'
     MUTED_C   = "#ff3366"
     TEXT      = "#d7edff"
     TEXT_DIM  = "#6ca6d2"
@@ -104,7 +114,7 @@ def _nvml_gpu_windows() -> float:
                     _nvml_lib = lib
                     break
                 except Exception:
-                    continue
+                    continue  # [LOG] NVML retry
 
         if _nvml_lib is None:
             import pynvml  # type: ignore
@@ -142,8 +152,8 @@ class _SysMetrics:
         while self._running:
             try:
                 self._update()
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug("Stats poll error: %s", e)
             time.sleep(1.5)
 
     def stop(self):
@@ -297,7 +307,7 @@ class HudCanvas(QWidget):
             px = QPixmap(); px.loadFromData(buf.getvalue())
             self._face_px = px
         except Exception:
-            self._face_px = None
+            self._face_px = None  # CPython: attr set atomik (GIL)
 
     def _step(self):
         self._tick += 1
@@ -893,7 +903,7 @@ class _CameraPreview(QWidget):
         hdr.addWidget(title)
         hdr.addStretch()
         close_btn = QPushButton("✕")
-        close_btn.setFixedSize(16, 16)
+        close_btn.setFixedSize(24, 24)
         close_btn.setFont(QFont("Courier New", 8))
         close_btn.setStyleSheet(
             f"color: {C.TEXT_DIM}; background: transparent; border: none;"
@@ -1381,9 +1391,10 @@ class VoiceHudWidget(QWidget):
         self._detail = "Dinliyor"
         self._transcript = ""
         self._volume = 0.0
+        self._volume_peak = 0.0
         self._phase = 0.0
         self.setMinimumWidth(238)
-        self.setFixedHeight(42)
+        self.setFixedHeight(52)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._animate)
         self._timer.start(40)
@@ -1403,11 +1414,15 @@ class VoiceHudWidget(QWidget):
             self._volume = max(0.0, min(1.0, float(value)))
         except (TypeError, ValueError):
             self._volume = 0.0
+        self._volume_peak = max(self._volume_peak * 0.97, self._volume)
         self.update()
 
     def _animate(self):
-        if self._state in {"USER_SPEAKING", "SPEAKING", "THINKING"}:
+        if self._volume > 0.02 or self._state in {"USER_SPEAKING", "SPEAKING", "THINKING", "LISTENING"}:
             self._phase += 0.18
+            self.update()
+        elif self._state not in {"MUTED", "SLEEPING", "ERROR"}:
+            self._phase += 0.06
             self.update()
 
     def paintEvent(self, _):
@@ -1451,11 +1466,101 @@ class VoiceHudWidget(QWidget):
         p.drawText(QRectF(27, 21, 112, 13), Qt.AlignmentFlag.AlignLeft, detail[:24])
 
         mid = self.height() / 2
-        for i in range(10):
-            x = 151 + i * 7
-            amp = 3 + 11 * max(self._volume, 0.18) * (0.45 + 0.55 * abs(math.sin(self._phase + i * 0.7)))
-            p.setPen(QPen(qcol(C.PRI if i % 2 == 0 else C.ACC2), 2))
+        n_bars = 20
+        bar_spacing = min(7, (self.width() - 148) / n_bars) if self.width() > 148 else 5
+        for i in range(n_bars):
+            x = 148 + i * bar_spacing
+            if x > self.width() - 4:
+                break
+            vol_factor = max(self._volume, 0.15)
+            wave = (0.45 + 0.55 * abs(math.sin(self._phase + i * 0.7)))
+            amp = 3 + 16 * vol_factor * wave
+            if self._volume > 0.75:
+                col = C.RED
+            elif self._volume > 0.45:
+                col = C.GOLD
+            else:
+                col = C.PRI if i % 2 == 0 else C.ACC2
+            p.setPen(QPen(qcol(col), max(1, int(bar_spacing - 3))))
             p.drawLine(QPointF(x, mid - amp), QPointF(x, mid + amp))
+        # peak hold marker
+        if self._volume_peak > 0.1 and self.width() > 200:
+            peak_amp = 3 + 16 * self._volume_peak
+            pk_x = self.width() - 8
+            p.setPen(QPen(qcol(C.GOLD), 1))
+            p.drawLine(QPointF(pk_x, mid - peak_amp), QPointF(pk_x, mid + peak_amp))
+
+
+class ToastNotification(QFrame):
+    """Slide-in toast — disappears after _MS ms."""
+
+    def __init__(self, message: str, kind: str = "info", duration_ms: int = 4000, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Toast")
+        colors = {"success": C.GREEN, "error": C.RED, "warning": C.GOLD, "info": C.PRI}
+        accent = colors.get(kind, C.PRI)
+        self.setStyleSheet(
+            f"QFrame#Toast {{ background:{C.PANEL2}; border:1px solid {accent}; border-radius:8px; }}"
+        )
+        lay = QHBoxLayout(self); lay.setContentsMargins(14, 10, 14, 10); lay.setSpacing(8)
+        icon = {"success": "✅", "error": "❌", "warning": "⚠️", "info": "ℹ️"}.get(kind, "ℹ️")
+        lbl = QLabel(f"{icon}  {message}")
+        lbl.setFont(QFont("Segoe UI", 9))
+        lbl.setStyleSheet(f"color:{C.WHITE}; background:transparent; border:none;")
+        lbl.setWordWrap(True)
+        lay.addWidget(lbl)
+        self.setFixedHeight(40)
+        self.setMaximumWidth(340)
+        self._duration = duration_ms
+        self._fade_tmr = QTimer(self)
+        self._fade_tmr.setSingleShot(True)
+        self._fade_tmr.timeout.connect(self._hide)
+        self._opacity = 1.0
+
+    def start(self):
+        self.show()
+        self.raise_()
+        self._fade_tmr.start(self._duration)
+
+    def _hide(self):
+        self.hide()
+
+
+class _ToastStack(QObject):
+    """Manages up to 3 stacked toasts bottom-right of parent window."""
+
+    _toast_done = pyqtSignal()
+
+    def __init__(self, parent_widget: QWidget):
+        super().__init__(parent_widget)
+        self._parent = parent_widget
+        self._toasts: list[ToastNotification] = []
+        self._toast_done.connect(self._reposition)
+
+    def show(self, message: str, kind: str = "info", duration: int = 4000):
+        # remove old toasts beyond 3
+        while len(self._toasts) >= 3:
+            old = self._toasts.pop(0)
+            old.deleteLater()
+        toast = ToastNotification(message, kind, duration, self._parent)
+        self._toasts.append(toast)
+        self._reposition()
+        toast.start()
+        QTimer.singleShot(duration + 300, lambda: self._cleanup(toast))
+
+    def _cleanup(self, toast):
+        if toast in self._toasts:
+            self._toasts.remove(toast)
+            toast.deleteLater()
+        self._reposition()
+
+    def _reposition(self):
+        pw = self._parent
+        x0 = pw.width() - 350
+        y0 = pw.height() - 50
+        for i, t in enumerate(self._toasts):
+            ty = y0 - (i + 1) * 48
+            t.move(max(8, x0), max(8, ty))
 
 
 class MainWindow(QMainWindow):
@@ -1467,6 +1572,8 @@ class MainWindow(QMainWindow):
     _content_sig = pyqtSignal(str, str)   # (title, text) — thread-safe content display
     _reconfig_sig = pyqtSignal()          # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)   # show camera frame preview (small overlay)
+    _task_refresh_sig = pyqtSignal()  # force immediate task refresh (event-driven)
+    _toast_sig = pyqtSignal(str, str)  # (message, kind) -> show toast
     _cam_stream_sig = pyqtSignal(bool)   # True=start live stream, False=stop
     _cam_frame_sig  = pyqtSignal(bytes)  # live camera frame → HUD area
     _mic_dev_sig     = pyqtSignal(str)    # active microphone device name → left panel
@@ -1550,7 +1657,7 @@ class MainWindow(QMainWindow):
         self._settings_page_index = self._chat_stack.addWidget(self._settings_page)
         self._growth_page_index = self._chat_stack.addWidget(self._growth_page)
         cv.addWidget(self._chat_stack, stretch=1); self._task_flow = self._build_task_flow(); cv.addWidget(self._task_flow)
-        response = QFrame(); response.setObjectName("ResponseBar"); response.setFixedHeight(86)
+        response = QFrame(); response.setObjectName("ResponseBar"); response.setMinimumHeight(86); response.setMaximumHeight(160)
         response.setStyleSheet(f"QFrame#ResponseBar {{ background:{C.PANEL}; border-top:1px solid {C.BORDER_B}; }}")
         rv = QHBoxLayout(response); rv.setContentsMargins(14, 8, 14, 8); rv.addWidget(self._build_input_row(), stretch=1)
         cv.addWidget(response)
@@ -1573,10 +1680,16 @@ class MainWindow(QMainWindow):
         self._metric_tmr.timeout.connect(self._update_metrics)
         self._metric_tmr.start(2000)
         self._update_metrics()
+        self._task_mtime_cache = {}
+        self._task_last_sig = ""
+        self._task_refresh_sig.connect(self._refresh_task_center)
+        self._toast_sig.connect(self._show_toast)
+        self._prev_task_state = None
+        self._toast_stack = _ToastStack(self)
         self._task_tmr = QTimer(self)
-        self._task_tmr.timeout.connect(self._refresh_task_center)
-        self._task_tmr.start(1500)
-        self._refresh_task_center()
+        self._task_tmr.timeout.connect(self._check_task_files)
+        self._task_tmr.start(5000)  # 1500→5000ms fallback; event-driven bypass
+        self._check_task_files()
 
         self._log_sig.connect(self._on_log)
         self._state_sig.connect(self._apply_state)
@@ -1619,7 +1732,7 @@ class MainWindow(QMainWindow):
         return w
 
     def _build_chat_header(self):
-        bar = QFrame(); bar.setObjectName("ChatHeader"); bar.setFixedHeight(66)
+        bar = QFrame(); bar.setObjectName("ChatHeader"); bar.setMinimumHeight(66); bar.setMaximumHeight(120)
         bar.setStyleSheet(f"QFrame#ChatHeader {{ background:{C.PANEL}; border-bottom:1px solid {C.BORDER}; }}")
         lay = QHBoxLayout(bar); lay.setContentsMargins(18, 10, 18, 10); lay.setSpacing(10)
         icon = QLabel("◈"); icon.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold)); icon.setStyleSheet(f"color:{C.PRI}; background:transparent;")
@@ -1639,26 +1752,28 @@ class MainWindow(QMainWindow):
     def _bubble(self, speaker: str, text: str, jarvis: bool = False):
         box = QFrame(); box.setObjectName("ChatBubble"); box.setStyleSheet(f"QFrame#ChatBubble {{ background:{'#0b2948' if not jarvis else '#0a3150'}; border:1px solid {C.BORDER}; border-radius:10px; }}")
         v = QVBoxLayout(box); v.setContentsMargins(14, 10, 14, 10); v.setSpacing(5)
-        head = QLabel(f"{speaker}   {time.strftime('%H:%M')}"); head.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold)); head.setStyleSheet(f"color:{C.PRI if jarvis else C.TEXT_MED}; background:transparent;")
-        body = QLabel(text); body.setWordWrap(True); body.setFont(QFont("Segoe UI", 10)); body.setStyleSheet(f"color:{C.WHITE}; background:transparent; line-height:140%;")
+        avatar = "🤖" if jarvis else "👤"
+        head = QLabel(f"{avatar} {speaker}   {time.strftime('%H:%M')}"); head.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold)); head.setStyleSheet(f"color:{C.PRI if jarvis else C.TEXT_MED}; background:transparent;")
+        body = QLabel(text); body.setWordWrap(True); body.setFont(QFont("Segoe UI", 10)); body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse); body.setStyleSheet(f"color:{C.WHITE}; background:transparent; line-height:140%;")
         v.addWidget(head); v.addWidget(body)
-        if jarvis:
-            foot = QLabel("Backend yanıtı")
-            foot.setFont(QFont("Segoe UI", 8)); foot.setStyleSheet(f"color:{C.ACC}; background:transparent; border:none;"); v.addWidget(foot)
         return box
 
     def _build_chat_panel(self):
         panel = QWidget(); panel.setStyleSheet(f"background:{C.BG};")
         v = QVBoxLayout(panel); v.setContentsMargins(18, 18, 18, 12); v.setSpacing(12)
         self._chat_messages_layout = QVBoxLayout(); self._chat_messages_layout.setSpacing(8)
-        self._chat_empty_lbl = QLabel("Henüz mesaj yok. Backend bağlantısı kurulunca konuşmalar burada görünür.")
+        self._chat_empty_lbl = QLabel("Henüz mesaj yok. Sohbet başlayınca mesajlar burada görünür.")
         self._chat_empty_lbl.setWordWrap(True); self._chat_empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter); self._chat_empty_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none; padding:24px;")
-        self._chat_messages_layout.addWidget(self._chat_empty_lbl); v.addLayout(self._chat_messages_layout)
+        self._chat_messages_layout.addWidget(self._chat_empty_lbl)
+        msg_container = QWidget(); msg_container.setLayout(self._chat_messages_layout); msg_container.setStyleSheet("background: transparent;")
+        self._chat_scroll = QScrollArea(); self._chat_scroll.setWidgetResizable(True); self._chat_scroll.setWidget(msg_container)
+        self._chat_scroll.setStyleSheet(f"QScrollArea {{ background: transparent; border: none; }} QScrollArea > QWidget > QWidget {{ background: transparent; }}"); self._chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        v.addWidget(self._chat_scroll, stretch=1)
         self._waveform = WaveformWidget(); v.addWidget(self._waveform); v.addStretch()
         return panel
 
     def _build_task_flow(self):
-        card = QFrame(); card.setObjectName("TaskFlow"); card.setFixedHeight(174); card.setStyleSheet(f"QFrame#TaskFlow {{ background:{C.PANEL}; border:1px solid {C.BORDER}; border-radius:10px; }}")
+        card = QFrame(); card.setObjectName("TaskFlow"); card.setMinimumHeight(174); card.setMaximumHeight(240); card.setStyleSheet(f"QFrame#TaskFlow {{ background:{C.PANEL}; border:1px solid {C.BORDER}; border-radius:10px; }}")
         v = QVBoxLayout(card); v.setContentsMargins(16, 10, 16, 9); v.setSpacing(7); top = QHBoxLayout()
         title = QLabel("☷  Görev Yürütme Akışı"); title.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold)); title.setStyleSheet(f"color:{C.WHITE}; background:transparent; border:none;"); top.addWidget(title); top.addStretch()
         self._task_status_lbl = QLabel("Görev yok — hazır"); self._task_status_lbl.setFont(QFont("Segoe UI", 8)); self._task_status_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;"); top.addWidget(self._task_status_lbl); v.addLayout(top)
@@ -1667,14 +1782,14 @@ class MainWindow(QMainWindow):
             node = QVBoxLayout(); node.setSpacing(3); node.setContentsMargins(0, 0, 0, 0)
             circle = QLabel(str(idx + 1)); circle.setFixedSize(26, 26); circle.setAlignment(Qt.AlignmentFlag.AlignCenter)
             circle.setStyleSheet(f"color:{C.TEXT_DIM}; background:{C.DARK}; border:1px solid {C.BORDER}; border-radius:13px;")
-            label = QLabel(name); label.setAlignment(Qt.AlignmentFlag.AlignCenter); label.setFixedHeight(15); label.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
-            detail = QLabel(desc); detail.setAlignment(Qt.AlignmentFlag.AlignCenter); detail.setFixedHeight(13); detail.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none; font-size:8px;")
+            label = QLabel(name); label.setAlignment(Qt.AlignmentFlag.AlignCenter); label.setMinimumHeight(26); label.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
+            detail = QLabel(desc); detail.setAlignment(Qt.AlignmentFlag.AlignCenter); detail.setMinimumHeight(18); detail.setMaximumHeight(24); detail.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none; font-size:8px;")
             node.addWidget(circle, alignment=Qt.AlignmentFlag.AlignCenter); node.addWidget(label); node.addWidget(detail)
             cell = QWidget(); cell.setLayout(node); stages.addWidget(cell, stretch=1); self._task_stage_nodes[name] = circle
             if idx < 3:
                 line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); line.setFixedWidth(35); line.setStyleSheet(f"color:{C.BORDER}; background:{C.BORDER}; border:none;"); stages.addWidget(line, alignment=Qt.AlignmentFlag.AlignCenter)
         v.addLayout(stages)
-        self._task_detail_lbl = QLabel("Yeni dosya veya komut gönderildiğinde görev akışı burada gösterilir."); self._task_detail_lbl.setFont(QFont("Segoe UI", 8)); self._task_detail_lbl.setMinimumHeight(18); self._task_detail_lbl.setMaximumHeight(22); self._task_detail_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;"); v.addWidget(self._task_detail_lbl)
+        self._task_detail_lbl = QLabel("Yeni dosya veya komut gönderildiğinde görev akışı burada gösterilir."); self._task_detail_lbl.setFont(QFont("Segoe UI", 8)); self._task_detail_lbl.setMinimumHeight(18); self._task_detail_lbl.setMaximumHeight(36); self._task_detail_lbl.setWordWrap(True); self._task_detail_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;"); v.addWidget(self._task_detail_lbl)
         return card
 
     def _set_task_stages(self, active: str | None = None, completed: tuple[str, ...] = ()):
@@ -1801,6 +1916,20 @@ class MainWindow(QMainWindow):
             reverse=True,
         )
 
+    def _check_task_files(self) -> None:
+        """EVENT-DRIVEN: mtime taramasi — dosya degismemisse JSON parse ATLA."""
+        parts = []
+        for _p in (memory_dir() / "agent_tasks.json", tasks_dir() / "brain_tasks.json"):
+            try:
+                parts.append(str(_p.stat().st_mtime_ns if _p.is_file() else 0))
+            except OSError:
+                parts.append("X")
+        sig = "|".join(parts)
+        if sig == self._task_last_sig:
+            return  # Degisim yok — disk I/O + repaint iptal
+        self._task_last_sig = sig
+        self._refresh_task_center()
+
     def _refresh_task_center(self):
         if not hasattr(self, "_task_status_lbl"):
             return
@@ -1816,6 +1945,9 @@ class MainWindow(QMainWindow):
             self._task_detail_lbl.setText(goal[:150])
             if status == "pending":
                 self._set_task_stages("Planner", ())
+                if self._prev_task_state != "started":
+                    self._prev_task_state = "started"
+                    self._toast_sig.emit("\U0001F504 G\u00f6rev ba\u015flat\u0131ld\u0131 \u2014 plan haz\u0131rlan\u0131yor...", "info")
             elif status == "running":
                 self._set_task_stages("Research", ("Planner",))
             else:
@@ -1833,6 +1965,9 @@ class MainWindow(QMainWindow):
             self._task_detail_lbl.setText(str(latest.get("goal", latest.get("name", "Görev")))[:150])
             if latest_status in ("completed", "done"):
                 self._set_task_stages(None, ("Planner", "Research", "Security", "Auditor"))
+                if self._prev_task_state != "done":
+                    self._prev_task_state = "done"
+                    self._toast_sig.emit("\u2705 G\u00f6rev ba\u015far\u0131yla tamamland\u0131!", "success")
             elif latest_status == "failed":
                 self._set_task_stages("Auditor", ("Planner", "Research", "Security"))
             else:
@@ -1958,7 +2093,7 @@ class MainWindow(QMainWindow):
                     self._cam_frame_sig.emit(buf.tobytes())
             cap.release()
         except Exception as e:
-            print(f"[Camera] Stream error: {e}")
+            _log.error("Camera stream error: %s", e)
         finally:
             self._cam_stream_sig.emit(False)
 
@@ -2065,7 +2200,7 @@ class MainWindow(QMainWindow):
             )
             return True
         except Exception as e:
-            print(f"[Shortcut] ⚠️  Icon generation failed: {e}")
+            _log.warning("Icon generation failed: %s", e)
             return False
 
     @staticmethod
@@ -2226,8 +2361,10 @@ class MainWindow(QMainWindow):
                 desk.chmod(desk.stat().st_mode | 0o755)
 
             self._log.append_log("SYS: Masaüstü kısayolu oluşturuldu.")
+            self._toast_sig.emit("Desktop shortcut hazir!", "success")
         except Exception as e:
             self._log.append_log(f"ERR: Shortcut failed — {e}")
+            _log.error("Shortcut creation failed: %s", e)
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
@@ -2498,6 +2635,7 @@ class MainWindow(QMainWindow):
         self._connection_rows["microphone"].setText("Bekleniyor"); self._connection_rows["speaker"].setText("Bekleniyor"); lay.addWidget(conn)
         section("Dosya Eki", "▣"); files = QFrame(); files.setObjectName("AttachmentPanel"); files.setStyleSheet(f"QFrame#AttachmentPanel {{ background:#0a2038; border:1px solid {C.BORDER}; border-radius:14px; }}")
         fv = QVBoxLayout(files); fv.setContentsMargins(12, 9, 12, 9); self._drop_zone = FileDropZone(); self._drop_zone.setFocusPolicy(Qt.FocusPolicy.StrongFocus); self._drop_zone.file_selected.connect(self._on_file_selected); self._file_hint = QLabel("Dosya seçin veya sürükleyin; burada onay işlemi yapılmaz."); self._file_hint.setWordWrap(True); self._file_hint.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;"); fv.addWidget(self._drop_zone); fv.addWidget(self._file_hint); lay.addWidget(files)
+        self._toast_sig.emit("Dosya secildi", "info")
         section("Aktivite Akışı", "☷"); self._log = LogWidget(); self._log.setMinimumHeight(105); lay.addWidget(self._log, stretch=1)
         self._task_running_lbl = QLabel("RUNNING       --"); self._task_pending_lbl = QLabel("PENDING       --"); self._task_waiting_lbl = QLabel("APPROVAL      --"); self._task_completed_lbl = QLabel("COMPLETED     --")
         for label in (self._task_running_lbl, self._task_pending_lbl, self._task_waiting_lbl, self._task_completed_lbl): label.hide()
@@ -2726,7 +2864,26 @@ class MainWindow(QMainWindow):
             if not body:
                 return
             self._chat_empty_lbl.hide()
-            self._chat_messages_layout.addWidget(self._bubble(speaker, body, speaker == "JARVIS"))
+            msg = self._bubble(speaker, body, speaker == "JARVIS")
+            row = QHBoxLayout()
+            row.addStretch() if speaker != "JARVIS" else row.addSpacing(0)
+            row.addWidget(msg, stretch=2) if speaker != "JARVIS" else row.addWidget(msg, stretch=2)
+            row.addStretch() if speaker == "JARVIS" else row.addSpacing(0)
+            row_widget = QWidget(); row_widget.setLayout(row); row_widget.setStyleSheet("background: transparent;")
+            self._chat_messages_layout.addWidget(row_widget)
+            while self._chat_messages_layout.count() > 51:  # 1 empty + 50 messages
+                item = self._chat_messages_layout.takeAt(1)
+                if item and item.widget(): item.widget().deleteLater()
+            if hasattr(self, "_chat_scroll"):
+                QTimer.singleShot(50, lambda: self._chat_scroll.verticalScrollBar().setValue(self._chat_scroll.verticalScrollBar().maximum()))
+
+    def _show_toast(self, message: str, kind: str = "info"):
+        if hasattr(self, "_toast_stack"):
+            self._toast_stack.show(message, kind)
+
+    def show_toast(self, message: str, kind: str = "info"):
+        """Thread-safe: show a toast notification."""
+        self._toast_sig.emit(message[:120], kind)
 
     def _navigate(self, name: str):
         for nav_name, button in self._nav_buttons.items():
@@ -3049,6 +3206,14 @@ class JarvisUI:
             self._win._voice_volume_sig.emit(float(value))
         except (TypeError, ValueError):
             pass
+
+    def notify_task_changed(self):
+        """Thread-safe: event-driven task refresh — ana dongu sinyal yayinlayinca tetiklenir."""
+        self._win._task_refresh_sig.emit()
+
+    def show_toast(self, message: str, kind: str = "info"):
+        """Thread-safe: show a toast notification."""
+        self._win.show_toast(message, kind)
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)

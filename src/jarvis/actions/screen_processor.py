@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from jarvis.core.bg_tasks import keep as keep_task
 import base64
 import io
 import re
@@ -362,7 +363,7 @@ class _VisionSession:
                                 self._player.stop_camera_stream()
                             except Exception:
                                 pass
-                        asyncio.create_task(_deferred_close())
+                        keep_task(asyncio.create_task(_deferred_close()))
 
         except Exception as e:
             print(f"[Vision] ⚠️  Recv error: {e}")

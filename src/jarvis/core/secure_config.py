@@ -128,6 +128,18 @@ def get_gemini_api_key() -> str:
     )
 
 
+def get_cloud_llm_key() -> str:
+    """Ücretsiz bulut modeli (Groq vb., OpenAI uyumlu) anahtarı; yoksa "".
+
+    Anahtar yalnızca ortam değişkeninden ya da kullanıcının yerel ayar
+    dosyasından okunur; hiçbir yere yazdırılmaz."""
+    for env in ("JARVIS_CLOUD_LLM_KEY", "GROQ_API_KEY"):
+        key = _usable_secret(os.getenv(env, ""))
+        if key:
+            return key
+    return _usable_secret(load_config().get("cloud_llm_api_key"))
+
+
 def tls_paths() -> tuple[Path, Path]:
     """Dashboard TLS key/certificate paths in the user data directory."""
     d = data_dir() / "config" / "certs"

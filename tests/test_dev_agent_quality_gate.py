@@ -310,7 +310,9 @@ class DisputeModel(AcceptanceModel):
         if prompt.startswith("A program was tested on a small sample input"):
             self.prompts.append(prompt)
             r = R()
-            r.text = json.dumps({"correct": self.verdict, "reason": "elma 3 kez geçiyor; TOPLAM görevde yok",
+            r.text = json.dumps({"program_output_is_correct": self.verdict == "program",
+                                 "expectation_is_correct": self.verdict != "program",
+                                 "reason": "elma 3 kez geçiyor; TOPLAM görevde yok",
                                  "correct_values": self.values})
             return r
         return super().generate_content(prompt)
@@ -365,3 +367,20 @@ def test_judge_that_contradicts_the_program_output_is_ignored(env, monkeypatch):
     monkeypatch.setattr(da, "_get_model", lambda name: model)
     result = da._build_project("kelime sayici", "python", "", 10, player=None, speak=None)
     assert "is working" not in result, result
+
+
+WC_CRASH = WC_REAL.replace("counts = collections.Counter(text.split())", "counts = collections.Counter(root.split())")
+
+
+def test_fix_that_crashes_a_working_program_is_rolled_back(env, monkeypatch):
+    """Murat@goxs 2026-09-29 (file_cleaner_report): çalışan ilk sürüm, 'düzeltme'
+    sonrası NameError ile çöktü ve kalan denemeler bu yeni hatayla harcandı."""
+    monkeypatch.setattr(da, "_plan_project", lambda d, lang: dict(WC_PLAN))
+    model = AcceptanceModel([WC_HARDCODED, WC_CRASH, WC_REAL])
+    monkeypatch.setattr(da, "_get_model", lambda name, prefer="": model)
+    result = da._build_project("kelime sayici", "python", "", 10, player=None, speak=None)
+    assert "is working" in result, result
+    fixes = [p for p in model.prompts if p.startswith("You are an expert python debugger")]
+    assert any("REVERTED" in p and "root" in p for p in fixes), [p[:200] for p in fixes]
+    backups = list((env / "word_counter" / ".jarvis" / "backups").glob("main.py.bozuk.*.bak"))
+    assert backups and "root.split()" in backups[0].read_text(encoding="utf-8")

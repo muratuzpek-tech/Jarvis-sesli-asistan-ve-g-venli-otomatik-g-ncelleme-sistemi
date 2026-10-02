@@ -243,6 +243,10 @@ def main() -> int:
     kok.mkdir(parents=True, exist_ok=True)
     da.PROJECTS_DIR = kok  # gerçek projelere dokunma
     os.environ.setdefault("JARVIS_DEVAGENT_OPEN_EDITOR", "0")  # her görevde VSCode açılmasın
+    from jarvis.actions.devkit import sandbox
+    kafes_ok, kafes_neden = sandbox.sandbox_works()
+    kafes = "AÇIK (bubblewrap)" if kafes_ok and sandbox.mode() != "off" else f"YOK — {kafes_neden}"
+    print(f"🔒 Güvenlik kafesi: {kafes}")
 
     sonuclar = [calistir(g, kok) for g in GOREVLER if g["no"] in secili]
     s_sonuclar = [calistir(g, kok) for g in surprizler]
@@ -254,7 +258,7 @@ def main() -> int:
 
     gecen = sum(s["durum"] == "GEÇTİ" for s in sonuclar)
     sayilan = sum(s["durum"] not in ("ATLANDI", "ALTYAPI HATASI") for s in sonuclar)
-    kayit = {"zaman": damga, "surum": _git_surum(), "gecen": gecen, "toplam": sayilan, "sonuclar": sonuclar,
+    kayit = {"zaman": damga, "surum": _git_surum(), "kafes": kafes, "gecen": gecen, "toplam": sayilan, "sonuclar": sonuclar,
              "surpriz": {"gecen": s_gecen, "toplam": s_sayilan, "sonuclar": s_sonuclar},
              "karmasik": {"gecen": k_gecen, "toplam": k_sayilan, "sonuclar": k_sonuclar}}
     onceki = None
@@ -276,7 +280,7 @@ def main() -> int:
         fh.write(json.dumps(kayit, ensure_ascii=False) + "\n")
     (kok / "SONUC.json").write_text(json.dumps(kayit, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"\n{'=' * 70}\nCANLI TEST SONUCU — sürüm {kayit['surum']}\n{'=' * 70}")
+    print(f"\n{'=' * 70}\nCANLI TEST SONUCU — sürüm {kayit['surum']} — kafes: {kafes}\n{'=' * 70}")
     for s in sonuclar:
         ek = f" — {s['neden'][:140]}" if s["durum"] != "GEÇTİ" else ""
         print(f"  {s['no']}. {s['ad']:<15} {s['durum']:<20} {s['sure_sn']:>4} sn{ek}")

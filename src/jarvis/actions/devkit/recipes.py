@@ -70,8 +70,9 @@ if __name__ == "__main__":
 
 REQUESTS_BS4 = '''
 # DÜZ SAYFA KAZIMA KALIBI — requests + BeautifulSoup (JavaScript gerekmiyorsa)
-# (Örnek konu: bir haber listesi. Seçicileri ve sütunları GÖREVİN sayfasına göre değiştir.)
-import csv, sys
+# (Örnek konu: kitap listesi, 3 sayfa. Seçicileri, sayfa adreslerini ve sütunları GÖREVE göre değiştir.)
+import csv, re, sys
+from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
@@ -80,21 +81,47 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chr
 def fetch(url: str) -> BeautifulSoup:
     resp = requests.get(url, headers=HEADERS, timeout=15)
     resp.raise_for_status()                                       # hatayı yutma, görünür olsun
-    return BeautifulSoup(resp.text, "html.parser")
+    # resp.content (bayt) ver: resp.text yanlış kodlamayla '£51.77' → 'Â£51.77' olur
+    return BeautifulSoup(resp.content, "html.parser")
+
+
+def parse_price(text: str) -> float:
+    """'£51.77', 'Â£51.77', '1.299,90 TL' → sayı. ONDALIK NOKTASINI KORU:
+    ''.join(filter(str.isdigit, ...)) '51.77'yi 5177 yapar — KULLANMA."""
+    m = re.search(r"\d+(?:[.,]\d+)*", text)
+    if not m:
+        raise ValueError(f"fiyat yok: {text!r}")
+    num = m.group(0)
+    if "," in num and "." in num:                                  # 1.299,90 → 1299.90
+        num = num.replace(".", "").replace(",", ".")
+    elif "," in num:
+        num = num.replace(",", ".")
+    return float(num)
 
 if __name__ == "__main__":
-    soup = fetch(sys.argv[1])
+    # ÇOK SAYFA: sonraki sayfanın adresini ELLE KURMA (başlangıç adresi zaten bir alt klasör
+    # içeriyorsa sabit bir göreli yol eklemek klasörü İKİ KEZ yazar → 404).
+    # Sayfadaki "sonraki" bağlantısını izle ve O ANKİ sayfa adresine göre çöz.
+    # Bir sayfa alınamazsa (404 vb.) SESSİZCE ATLAMA: fetch() hatası programı durdursun.
+    url = sys.argv[1]
     rows = []
-    for card in soup.select("div.news-card"):                     # ← sayfaya göre değiştir
-        link = card.select_one("a")
-        # Görünen metin kısaltılmış olabilir ("..."): tam değer genellikle title= özniteliğindedir
-        title = link.get("title") or link.get_text(strip=True)
-        rows.append((title, card.select_one("time").get_text(strip=True)))
+    for page in range(1, 4):                                      # görev kaç sayfa diyorsa
+        soup = fetch(url)
+        for card in soup.select("article.product_pod"):           # ← sayfaya göre değiştir
+            link = card.select_one("h3 a")
+            # Görünen metin kısaltılmış olabilir ("..."): tam değer title= özniteliğindedir
+            title = link.get("title") or link.get_text(strip=True)
+            price = parse_price(card.select_one(".price_color").get_text())
+            rows.append((title, price))
+        nxt = soup.select_one("li.next a")                        # ← sitenin "sonraki" bağlantısı
+        if nxt is None:
+            break                                                 # son sayfa
+        url = urljoin(url, nxt["href"])                           # O ANKİ sayfaya göre çöz
     if not rows:
         sys.exit("No items found - selector may be wrong")        # sessizce boş dosya yazma
     with open("news.csv", "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["title", "date"])
+        writer.writerow(["title", "price"])
         writer.writerows(rows)
 '''
 
@@ -119,6 +146,40 @@ if __name__ == "__main__":
         json.dump(result, fh, ensure_ascii=False, indent=2)
 '''
 
+DUPLICATE_FILES = '''
+# KOPYA / BOŞ DOSYA KALIBI — içerik özetiyle (hash) karşılaştır, HİÇBİR ŞEYİ SİLME
+import hashlib, sys
+from collections import defaultdict
+from pathlib import Path
+
+def file_hash(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def main() -> None:
+    root = Path(sys.argv[1])                                       # klasör komut satırından
+    files = sorted(p for p in root.rglob("*") if p.is_file())
+    empty = [p for p in files if p.stat().st_size == 0]
+    groups: dict[str, list[Path]] = defaultdict(list)
+    for p in files:
+        if p.stat().st_size > 0:
+            groups[file_hash(p)].append(p)
+    dups = [g for g in groups.values() if len(g) > 1]
+    lines = ["# Kopya dosyalar"]
+    for g in dups:
+        lines.append(" = ".join(str(p.relative_to(root)) for p in g))
+    lines += ["", "# Boş dosyalar"] + [str(p.relative_to(root)) for p in empty]
+    lines += ["", f"Toplam: {sum(len(g) - 1 for g in dups)} fazla kopya, {len(empty)} boş dosya"]
+    Path("rapor.txt").write_text("\\n".join(lines) + "\\n", encoding="utf-8")   # yalnız RAPOR yaz
+    print(f"Wrote rapor.txt ({len(dups)} kopya grubu, {len(empty)} boş)")
+
+if __name__ == "__main__":
+    main()
+'''
+
 FOLDER_WALK = '''
 # KLASÖR TARAMA KALIBI — alt klasörler dahil, yalnızca dosyalar
 # (Örnek konu: en büyük dosyaları bulmak. İşlemi GÖREVE göre değiştir.)
@@ -136,16 +197,20 @@ if __name__ == "__main__":
 '''
 
 SQLITE_STORE = '''
-# SQLITE KALIBI — tablo oluştur, parametreli ekle, kapatmayı unutma
+# SQLITE KALIBI — tablo oluştur, parametreli ekle, TEKRAR ÇALIŞINCA ÇİFT KAYIT YOK
+# Program birden çok kez çalışabilir: aynı kayıt ikinci kez EKLENMEMELİ (UNIQUE + INSERT OR IGNORE).
 import sqlite3
 
 def save(rows: list[tuple[str, float]], db_path: str = "database.db") -> int:
+    """YENİ eklenen kayıt sayısını döndürür. cursor.rowcount KULLANMA (-1 olabilir →
+    'veritabanına -1 kayıt eklendi' gibi saçma bir mesaj çıkar); total_changes farkı güvenilir."""
     con = sqlite3.connect(db_path)                             # göreli yol → çalışma klasörü
     try:
-        con.execute("CREATE TABLE IF NOT EXISTS items (name TEXT NOT NULL, price REAL)")
-        con.executemany("INSERT INTO items (name, price) VALUES (?, ?)", rows)   # ASLA f-string ile SQL
+        con.execute("CREATE TABLE IF NOT EXISTS items (name TEXT NOT NULL UNIQUE, price REAL)")
+        before = con.total_changes
+        con.executemany("INSERT OR IGNORE INTO items (name, price) VALUES (?, ?)", rows)   # ASLA f-string ile SQL
         con.commit()
-        return con.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        return con.total_changes - before
     finally:
         con.close()
 '''
@@ -199,6 +264,7 @@ _TABLE = [
     ("file_organize", _W(r"uzantı|uzanti|tarih\w*\s+g[öo]re|organize|sınıflandır|siniflandir|klasörlere ayır"
                           r"|alt klasörlere|kopyala"),
      _x.FILE_ORGANIZE),
+    ("duplicate_files", _W(r"kopya|duplicate|aynı dosya|ayni dosya|yinelenen|boş dosya|bos dosya"), DUPLICATE_FILES),
     ("csv_aggregate", _W(r"\bcsv\b"), CSV_AGGREGATE),
     ("folder_walk", _folder_scan, FOLDER_WALK),
     ("sqlite_store", _W(r"sqlite|veritaban|database|\.db\b"), SQLITE_STORE),

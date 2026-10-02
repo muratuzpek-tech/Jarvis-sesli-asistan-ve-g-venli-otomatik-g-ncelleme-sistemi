@@ -391,6 +391,37 @@ class BrainOrchestrator:
             d = description.lower()
             is_create = any(k in d for k in ("oluştur", "yarat", "create")) or not d
             action = "create_file" if is_create else "write"
+        # FIX_FN_A_PATH_CONTENT_2026_10_02
+        try:
+            if path in (".", "", None):
+                for _tok in description.split():
+                    _clean = _tok.rstrip(".:,;:!?").strip(chr(34)).strip(chr(39))
+                    if re.match(r"^~?/[^ ]+\.[A-Za-z0-9]+$", _clean):
+                        _si = _clean.rfind("/")
+                        if _si > 0:
+                            path = _clean[:_si]
+                            name = _clean[_si+1:]
+                            break
+        except Exception:
+            pass
+        _dc = description.strip().strip(chr(34)).strip(chr(39))
+        _cc = content.strip().strip(chr(34)).strip(chr(39))
+        if content and _cc == _dc:
+            content = ''
+        if not content:
+            try:
+                for _pt in (
+                    r"i.?eri.\w*\s+(.+?)(?:\s+(?:olsun|yaz\w*|olacak|ekle)\b|\.|$)",
+                    r"content\s*[:=]?\s+(.+?)(?:\.|$)",
+                ):
+                    _cm = re.search(_pt, description, re.IGNORECASE)
+                    if _cm:
+                        content = _cm.group(1).strip().strip(chr(34)).strip(chr(39))
+                        if content:
+                            break
+            except Exception:
+                pass
+        # /FIX_FN_A_PATH_CONTENT_2026_10_02
         return "file_controller", {"action": action, "path": path or base_path, "name": name, "content": content}
 
     def _infer_executor_action(self, description: str, base_path: str = ".") -> tuple[str, dict]:
@@ -445,6 +476,37 @@ class BrainOrchestrator:
         # create_folder/write/read) eşleniyor - önceden hiçbiri
         # tanınmıyordu, hepsi sessizce salt-okunur 'info'ya düşüyordu.
         name, content = _extract_quoted(description)
+        # FIX_ABS_PATH_CONTENT_2026_10_02
+        try:
+            if base_path in (".", "", None):
+                for _tok in description.split():
+                    _clean = _tok.rstrip(".:,;:!?").strip(chr(34)).strip(chr(39))
+                    if re.match(r"^~?/[^ ]+\.[A-Za-z0-9]+$", _clean):
+                        _si = _clean.rfind("/")
+                        if _si > 0:
+                            base_path = _clean[:_si]
+                            name = _clean[_si+1:]
+                            break
+        except Exception:
+            pass
+        _dc = description.strip().strip(chr(34)).strip(chr(39))
+        _cc = content.strip().strip(chr(34)).strip(chr(39))
+        if content and _cc == _dc:
+            content = ''
+        if not content:
+            try:
+                for _pt in (
+                    r"i.?eri.\w*\s+(.+?)(?:\s+(?:olsun|yaz\w*|olacak|ekle)\b|\.|$)",
+                    r"content\s*[:=]?\s+(.+?)(?:\.|$)",
+                ):
+                    _cm = re.search(_pt, description, re.IGNORECASE)
+                    if _cm:
+                        content = _cm.group(1).strip().strip(chr(34)).strip(chr(39))
+                        if content:
+                            break
+            except Exception:
+                pass
+        # /FIX_ABS_PATH_CONTENT_2026_10_02
         is_create = any(k in d for k in ("oluştur", "yarat", "create"))
         is_write = ("write" in d) or ("yaz" in d and "yazılım" not in d and "yazar" not in d)
         is_read = ("oku" in d) or ("read" in d)
@@ -485,11 +547,44 @@ class BrainOrchestrator:
             and file_mod.get("name")
         ):
             action = "file_controller"
+            # FIX_FILE_MOD_PATH_CONTENT_2026_10_02
+            _desc = step.get("description", "") or task.get("description", "") or task.get("task", "")
+            _fm_path = file_mod.get("path") or base_path
+            _fm_content = file_mod.get("content", "")
+            _fm_name = file_mod.get("name")
+            try:
+                if _fm_path in (".", "", None) and _desc:
+                    for _tok in _desc.split():
+                        _clean = _tok.rstrip(".:,;:!?").strip(chr(34)).strip(chr(39))
+                        if re.match(r"^~?/[^ ]+\.[A-Za-z0-9]+$", _clean):
+                            _si = _clean.rfind("/")
+                            if _si > 0:
+                                _fm_path = _clean[:_si]
+                                _fm_name = _clean[_si+1:]
+                                break
+                if _fm_content and _desc:
+                    _dc = _desc.strip().strip(chr(34)).strip(chr(39))
+                    _cc = _fm_content.strip().strip(chr(34)).strip(chr(39))
+                    if _cc == _dc:
+                        _fm_content = ""
+                if not _fm_content and _desc:
+                    for _pt in (
+                        r"i.?eri.\w*\s+(.+?)(?:\s+(?:olsun|yaz\w*|olacak|ekle)\b|\.|$)",
+                        r"content\s*[:=]?\s+(.+?)(?:\.|$)",
+                    ):
+                        _cm = re.search(_pt, _desc, re.IGNORECASE)
+                        if _cm:
+                            _fm_content = _cm.group(1).strip().strip(chr(34)).strip(chr(39))
+                            if _fm_content:
+                                break
+            except Exception:
+                pass
+            # /FIX_FILE_MOD_PATH_CONTENT_2026_10_02
             params = {
                 "action": file_mod.get("action"),
-                "path": file_mod.get("path") or base_path,
-                "name": file_mod.get("name"),
-                "content": file_mod.get("content", ""),
+                "path": _fm_path,
+                "name": _fm_name,
+                "content": _fm_content,
             }
             if file_mod.get("action") == "write":
                 params["append"] = bool(file_mod.get("append", False))
@@ -908,6 +1003,15 @@ class BrainOrchestrator:
                 actual = target.read_text(encoding="utf-8")
                 content = params.get("content", "")
                 ok = actual.endswith(content) if (inner == "write" and params.get("append")) else (actual == content)
+                # FIX_HONEST_VERIFY_2026_10_02
+                if ok and not content and step.get("description"):
+                    try:
+                        if re.search(r'i.?eri.\w*\s+|content\s*[:=]', step.get("description", ""), re.IGNORECASE):
+                            ok = False
+                            evidence["error"] = "Description claims content but content param is empty - lost upstream."
+                    except Exception:
+                        pass
+                # /FIX_HONEST_VERIFY_2026_10_02
                 evidence["content_matches"] = ok
                 if not ok:
                     evidence["error"] = f"'{target}' içeriği beklenenle eşleşmiyor."
@@ -966,7 +1070,7 @@ class BrainOrchestrator:
             passed = bool(audit_result.get("passed"))
 
             if file_evidence is not None:
-                verified_ok = bool(file_evidence.get("exists")) and file_evidence.get("content_matches") is not False
+                verified_ok = bool(file_evidence.get("exists")) and (file_evidence.get("content_matches") is True or file_evidence.get("content_matches") is None)
                 if verified_ok and not passed:
                     passed = True
                     audit_result = {

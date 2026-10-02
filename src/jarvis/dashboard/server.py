@@ -9,6 +9,7 @@ Install deps:  pip install fastapi "uvicorn[standard]" cryptography
 """
 
 import asyncio
+from jarvis.core.bg_tasks import keep as keep_task
 import base64
 import hashlib
 import os
@@ -546,9 +547,9 @@ class DashboardServer:
                 tok = self._issue_token(entered)
                 if self._connect_callback:
                     self._connect_callback()
-                asyncio.create_task(self.broadcast(
+                keep_task(asyncio.create_task(self.broadcast(
                     {"type": "sys", "text": "Remote connection established."}
-                ))
+                )))
                 # Basarili giris - bu IP'nin basarisiz deneme gecmisini temizle.
                 self._login_attempts.pop(client_ip, None)
                 # Bearer token in response body — no cookies needed (works on any browser/HTTP)
@@ -583,9 +584,9 @@ class DashboardServer:
 
             if self._connect_callback:
                 self._connect_callback()
-            asyncio.create_task(self.broadcast(
+            keep_task(asyncio.create_task(self.broadcast(
                 {"type": "sys", "text": "Remote connection established via QR code."}
-            ))
+            )))
 
             # DUZELTME (2026-09-28, CodeQL: reflected XSS bulgusu): asagidaki
             # degerler daha once duz '{{deger}}' seklinde JS string'ine
@@ -633,9 +634,9 @@ class DashboardServer:
             tok = self._issue_token(session_key)
             if self._connect_callback:
                 self._connect_callback()
-            asyncio.create_task(self.broadcast(
+            keep_task(asyncio.create_task(self.broadcast(
                 {"type": "sys", "text": "Known device reconnected automatically."}
-            ))
+            )))
             return JSONResponse({"ok": True, "token": tok, "key": session_key})
 
         @app.post("/api/revoke-devices")
@@ -696,9 +697,9 @@ class DashboardServer:
                 await websocket.close(code=4001)
                 return
             await websocket.accept()
-            asyncio.create_task(self.broadcast(
+            keep_task(asyncio.create_task(self.broadcast(
                 {"type": "sys", "text": "Phone microphone live."}
-            ))
+            )))
             try:
                 while True:
                     data = await websocket.receive_bytes()
@@ -714,9 +715,9 @@ class DashboardServer:
             except WebSocketDisconnect:
                 pass
             finally:
-                asyncio.create_task(self.broadcast(
+                keep_task(asyncio.create_task(self.broadcast(
                     {"type": "sys", "text": "Phone microphone stopped."}
-                ))
+                )))
 
         # ── File sharing ──────────────────────────────────────────────────────
 
@@ -793,11 +794,11 @@ class DashboardServer:
                         except OSError:
                             pass
 
-                asyncio.create_task(self.broadcast({
+                keep_task(asyncio.create_task(self.broadcast({
                     "type": "file_received",
                     "name": dest.name,
                     "size": size,
-                }))
+                })))
                 return JSONResponse({"ok": True, "name": dest.name, "size": size})
         else:
             @app.post("/api/upload")
@@ -917,7 +918,7 @@ class DashboardServer:
         ssl_key, ssl_cert = tls_paths()
 
         if use_ssl:
-            asyncio.create_task(self._serve_alias())
+            keep_task(asyncio.create_task(self._serve_alias()))
 
         cfg = uvicorn.Config(
             self.app, host=os.environ.get("JARVIS_DASHBOARD_HOST", "127.0.0.1"), port=PORT, log_level="warning",

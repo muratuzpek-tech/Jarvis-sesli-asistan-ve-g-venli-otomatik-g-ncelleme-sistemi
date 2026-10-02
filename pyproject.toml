@@ -51,6 +51,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6", "pyright>=1.1"]
+# Ses kapısı ("Hey Jarvis" + ses tanıma). openwakeword --no-deps kurulur: Linux'ta
+# istediği tflite-runtime Python 3.12 için yok; biz onnx ile çalıştırıyoruz.
+ses = ["onnxruntime>=1.17", "sherpa-onnx>=1.12", "scikit-learn>=1,<2", "scipy", "tqdm", "requests"]
 
 [project.scripts]
 jarvis = "jarvis.__main__:main"
