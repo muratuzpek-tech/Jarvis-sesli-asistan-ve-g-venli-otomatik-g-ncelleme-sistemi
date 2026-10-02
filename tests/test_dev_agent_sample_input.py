@@ -28,3 +28,17 @@ def test_existing_arguments_are_kept(tmp_path):
 def test_url_tasks_are_not_touched(tmp_path):
     spec = dict(SPEC, args=["{FIXTURE_URL}/index.html"])
     assert da._with_sample_input("python main.py", tmp_path, spec, log=lambda m: None) == "python main.py"
+
+
+def test_invented_relative_input_is_replaced_with_sample(tmp_path):
+    """Windows testi 2026-09-30 (kelime_sayaci): 'python main.py input.txt', input.txt yok."""
+    cmd = da._with_sample_input("python main.py input.txt", tmp_path, SPEC, log=lambda m: None)
+    assert "input.txt" not in cmd and da.SAMPLE_INPUT_DIR in cmd
+
+
+def test_existing_relative_input_is_kept(tmp_path):
+    (tmp_path / "veri.txt").write_text("x", encoding="utf-8")
+    assert da._with_sample_input("python main.py veri.txt", tmp_path, SPEC,
+                                 log=lambda m: None) == "python main.py veri.txt"
+    assert da._with_sample_input("python main.py --yok", tmp_path, SPEC,
+                                 log=lambda m: None) == "python main.py --yok"

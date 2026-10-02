@@ -251,7 +251,15 @@ def wrap(argv: list[str], project_dir: Path, *, gui: bool = False, cwd: Path | N
     if m == "required":
         return argv, None, f"REFUSED: güvenlik kafesi zorunlu (JARVIS_SANDBOX=required) ama kurulamadı: {why}"
     _warn_once(log, why)
-    return argv, None, "kafessiz"
+    return argv, _plain_env(), "kafessiz"
+
+
+def _plain_env() -> dict | None:
+    """Kafessiz çalıştırma ortamı: normal ortam; yalnız Windows'ta program çıktısı UTF-8
+    istenir (Windows testi 2026-09-30: 'Dosya bulunamad�' — Türkçe harfler bozuluyordu)."""
+    if os.name != "nt":
+        return None
+    return {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
 
 _warned = False

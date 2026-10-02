@@ -604,10 +604,19 @@ def _with_sample_input(run_command: str, project_dir: Path, spec: dict, log=prin
     except ValueError:
         return run_command
     args = spec.get("args") or []
-    if len(parts) > 2 or not args or any(URL_PLACEHOLDER in a for a in args):
+    if not args or any(URL_PLACEHOLDER in a for a in args) or not any(PLACEHOLDER in a for a in args):
         return run_command
-    if not any(PLACEHOLDER in a for a in args):
-        return run_command
+    if len(parts) > 2:
+        # Windows testi 2026-09-30 (kelime_sayaci): plan 'python main.py input.txt' dedi ama
+        # input.txt HİÇ yoktu; 5 tur 'Dosya bulunamadı' ile boşa gitti. Ek argümanlar yalnızca
+        # proje klasöründe VAR OLMAYAN göreli dosya adlarıysa (uydurma örnek girdi) örnekle
+        # değiştirilir; gerçek/mutlak yollar ve seçenekler (-x) hiç değiştirilmez.
+        extra = parts[2:]
+        if not all(not a.startswith("-") and not os.path.isabs(a) and "://" not in a
+                   and not (project_dir / a).exists() for a in extra):
+            return run_command
+        log(f"ℹ️ Plandaki girdi {extra} proje klasöründe yok (uydurma); yerine örnek girdi kullanılacak.")
+        run_command = " ".join(parts[:2])
     sample = project_dir / SAMPLE_INPUT_DIR
     try:
         for fx in spec["fixtures"]:
@@ -623,7 +632,7 @@ def _with_sample_input(run_command: str, project_dir: Path, spec: dict, log=prin
         log(f"ℹ️ Örnek girdi hazırlanamadı ({exc}); program argümansız çalıştırılacak.")
         return run_command
     new_args = [a.replace(PLACEHOLDER, str(sample), 1) for a in args]
-    new_cmd = " ".join([run_command.strip(), *(shlex.quote(a) for a in new_args)])
+    new_cmd = " ".join([run_command.strip(), *(_shell_quote(a) for a in new_args)])
     log(f"ℹ️ Görevde girdi klasörü verilmedi; program örnek girdiyle denenecek: {new_cmd}")
     return new_cmd
 
@@ -1131,7 +1140,14 @@ def _ensure_url_in_run_command(plan: dict, description: str) -> dict:
     return plan
 
 
-_ABS_PATH_IN_TEXT = re.compile(r"(?<![\w:/.~-])(/[^\s'\"<>()\[\],;`]+)")
+_ABS_PATH_IN_TEXT = re.compile(r"(?<![\w:/.~-])(/[^\s'\"<>()\[\],;`]+|[A-Za-z]:[\\/][^\s'\"<>()\[\],;`]+)")
+
+
+def _shell_quote(arg: str) -> str:
+    """Komut satırına eklenecek bir yol/argüman. Windows'ta shlex.quote tek tırnak koyar;
+    Windows komut satırı tek tırnağı tanımaz, program yolu tırnaklarıyla birlikte alırdı
+    (Windows testi 2026-09-30). Windows'ta çift tırnak (list2cmdline) kullanılır."""
+    return subprocess.list2cmdline([arg]) if os.name == "nt" else shlex.quote(arg)
 
 
 def _ensure_paths_in_run_command(plan: dict, description: str) -> dict:
@@ -1148,7 +1164,7 @@ def _ensure_paths_in_run_command(plan: dict, description: str) -> dict:
         if path not in found and path not in cmd and os.path.exists(path):
             found.append(path)
     if found:
-        plan["run_command"] = " ".join([cmd, *(shlex.quote(p) for p in found)])
+        plan["run_command"] = " ".join([cmd, *(_shell_quote(p) for p in found)])
         print(f"[DevAgent] 🔧 run_command'a görevdeki girdi yolları eklendi: {plan['run_command']}")
     return plan
 
