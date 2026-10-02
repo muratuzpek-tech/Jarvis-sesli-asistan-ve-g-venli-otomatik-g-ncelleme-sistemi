@@ -5,6 +5,7 @@ import time
 import secrets
 from pathlib import Path
 from jarvis.core.audit_log import log_action
+from jarvis.core.backup_manager import safe_modify
 
 
 def get_base_dir():
@@ -228,21 +229,15 @@ def _read_file(file_path: str) -> tuple[str, str]:
 def _save_file(path: Path, content: str) -> str:
     try:
         print(f"[Code] 🔍 TEŞHİS: path={path!r}  path.exists()={path.exists()}")
-        backup_note = ""
-        if path.exists():
-            from datetime import datetime
-            stamp  = datetime.now().strftime("%Y%m%d-%H%M%S")
-            backup = path.with_name(f"{path.stem}.{stamp}.bak{path.suffix}")
-            # DUZELTME (denetim bulgusu F-10): yedek artik BYTE duzeyinde
-            # aliniyor (read_bytes/write_bytes) - eskiden read_text(errors=
-            # "replace") kullanildigi icin bozuk/farkli kodlamali dosyalarda
-            # yedek, ORIJINALIN birebir kopyasi OLMUYORDU (sessiz veri kaybi).
-            _write_bytes_with_retry(backup, path.read_bytes())
-            backup_note = f" (yedek: {backup.name})"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _write_bytes_with_retry(path, content.encode("utf-8"))
+        # GUVENLIK (2026-10-03): Merkezi backup_manager.safe_modify() kullanilir.
+        # - Otomatik yedek (byte duzeyinde, F-10 korumasi)
+        # - Basarisiz yazmada otomatik rollback
+        # - Merkezi index + audit log
+        bm_result = safe_modify(path, content.encode("utf-8"))
+        backup_note = f" (yedek id: {bm_result['backup_id']})"
         log_action(module="code_helper", action="save_file",
-                   detail=f"path={path}", risk="medium", result="SUCCESS")
+                   detail=f"path={path} backup_id={bm_result['backup_id']}",
+                   risk="medium", result="SUCCESS")
         return f"Saved to: {path}{backup_note}"
     except Exception as e:
         log_action(module="code_helper", action="save_file",
