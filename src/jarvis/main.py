@@ -1056,6 +1056,7 @@ class JarvisLive:
         istegin kendisi gecikmeli olarak "onay" sayilabilirdi."""
         note_user_turn(text=text)  # dev_agent onay kapisi: gercek kullanici girdisi
         self._on_text_command(text)
+        self.ui.notify_task_changed()  # event-driven: komut sonrası gorev merkezini guncelle
 
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
@@ -1677,6 +1678,7 @@ class JarvisLive:
 
             elif name == "task_manager":
                 r = await loop.run_in_executor(None, lambda: task_manager(parameters=args, player=self.ui))
+                self.ui.notify_task_changed()  # event-driven UI refresh
                 result = r or "Done."
 
             elif name == "health_check":

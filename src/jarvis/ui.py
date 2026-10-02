@@ -1467,6 +1467,7 @@ class MainWindow(QMainWindow):
     _content_sig = pyqtSignal(str, str)   # (title, text) — thread-safe content display
     _reconfig_sig = pyqtSignal()          # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)   # show camera frame preview (small overlay)
+    _task_refresh_sig = pyqtSignal()  # force immediate task refresh (event-driven)
     _cam_stream_sig = pyqtSignal(bool)   # True=start live stream, False=stop
     _cam_frame_sig  = pyqtSignal(bytes)  # live camera frame → HUD area
     _mic_dev_sig     = pyqtSignal(str)    # active microphone device name → left panel
@@ -1573,10 +1574,13 @@ class MainWindow(QMainWindow):
         self._metric_tmr.timeout.connect(self._update_metrics)
         self._metric_tmr.start(2000)
         self._update_metrics()
+        self._task_mtime_cache = {}
+        self._task_last_sig = ""
+        self._task_refresh_sig.connect(self._refresh_task_center)
         self._task_tmr = QTimer(self)
-        self._task_tmr.timeout.connect(self._refresh_task_center)
-        self._task_tmr.start(1500)
-        self._refresh_task_center()
+        self._task_tmr.timeout.connect(self._check_task_files)
+        self._task_tmr.start(5000)  # 1500→5000ms fallback; event-driven bypass
+        self._check_task_files()
 
         self._log_sig.connect(self._on_log)
         self._state_sig.connect(self._apply_state)
@@ -1800,6 +1804,20 @@ class MainWindow(QMainWindow):
             key=lambda item: str(item.get("updated_at", item.get("created_at", ""))),
             reverse=True,
         )
+
+    def _check_task_files(self) -> None:
+        """EVENT-DRIVEN: mtime taramasi — dosya degismemisse JSON parse ATLA."""
+        parts = []
+        for _p in (memory_dir() / "agent_tasks.json", tasks_dir() / "brain_tasks.json"):
+            try:
+                parts.append(str(_p.stat().st_mtime_ns if _p.is_file() else 0))
+            except OSError:
+                parts.append("X")
+        sig = "|".join(parts)
+        if sig == self._task_last_sig:
+            return  # Degisim yok — disk I/O + repaint iptal
+        self._task_last_sig = sig
+        self._refresh_task_center()
 
     def _refresh_task_center(self):
         if not hasattr(self, "_task_status_lbl"):
@@ -3049,6 +3067,10 @@ class JarvisUI:
             self._win._voice_volume_sig.emit(float(value))
         except (TypeError, ValueError):
             pass
+
+    def notify_task_changed(self):
+        """Thread-safe: event-driven task refresh — ana dongu sinyal yayinlayinca tetiklenir."""
+        self._win._task_refresh_sig.emit()
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
