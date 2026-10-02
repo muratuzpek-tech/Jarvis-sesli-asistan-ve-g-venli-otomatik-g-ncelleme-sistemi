@@ -131,7 +131,7 @@ def _ollama_options() -> dict:
             return float(os.environ.get(name, "") or default)
         except ValueError:
             return default
-    return {"num_ctx": int(_num("JARVIS_OLLAMA_CTX", 8192)), "temperature": _num("JARVIS_OLLAMA_TEMP", 0.2)}
+    return {"num_ctx": int(_num("JARVIS_OLLAMA_CTX", 32768)), "temperature": _num("JARVIS_OLLAMA_TEMP", 0.2)}
 
 
 # ── Ücretsiz bulut modeli (Murat'ın kararı 2026-09-29: Groq) ────────────────
@@ -235,7 +235,7 @@ class _CloudLLM:
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": _ollama_options().get("temperature", 0.2),
-            "max_tokens": int(os.environ.get("JARVIS_CLOUD_LLM_MAX_TOKENS", "4096") or 4096),
+            "max_tokens": int(os.environ.get("JARVIS_CLOUD_LLM_MAX_TOKENS", "16384") or 16384),
         }
         headers = {"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"}
         # Canlı deneme 2026-09-30: ücretsiz planda DAKİKADA 8K token; ardışık dosya
@@ -1055,12 +1055,14 @@ Return ONLY valid JSON — no markdown, no explanation:
     {{
       "path": "main.py",
       "description": "Entry point — what it does and which modules it imports",
-      "imports": ["utils.helpers", "core.database"]
+      "imports": ["utils.helpers", "core.database"],
+      "exports": ["main() -> None"]
     }},
     {{
       "path": "utils/helpers.py",
       "description": "Helper utilities — what functions it exposes",
-      "imports": []
+      "imports": [],
+      "exports": ["helper_fn(arg1: str) -> int"]
     }}
   ],
   "run_command": "python main.py",
@@ -1083,7 +1085,8 @@ Critical rules:
 7. CRITICAL for correctness: if two or more files exchange a data structure (a dict, a class instance, a tuple shape) — even files that never import each other, because the data actually flows through a third file like main.py — describe its EXACT shape ONCE in "shared_data_contracts" (field names, types, whether it's a dict or a specific class). Every file that touches this data MUST use the identical shape. This is the most common source of real bugs: e.g. one file builds {{"amount": ..., "category": ...}} while another expects an object with .amount/.category attributes.
 8. If running the entry point is supposed to durably create or update a file (a database, a report, an exported document, a log, a generated image, etc.), list each such file's relative path in "expected_outputs" with a one-line description of what a CORRECT result looks like inside it. If the result is a FOLDER TREE (files copied/moved/sorted into sub-folders), list that output folder's relative path (e.g. "sorted") instead of guessing individual file names. Leave this list EMPTY only for purely interactive/display-only programs that persist nothing (e.g. a calculator, a GUI that only shows numbers on screen). This is critical: a program can run to completion with NO Python error while silently producing nothing real (a network call that fails silently, a thread that never runs, wrong file path) — "expected_outputs" is what lets that be caught instead of wrongly reported as a success.
 9. This is a completely standalone, independent project with NO relationship to any AI assistant framework. NEVER plan a file path or an import under a top-level name "jarvis" (e.g. "jarvis/core/engine.py", or importing "jarvis.anything") — that name does not exist for this project and is never a real requirement, no matter what the description mentions.
-10. If the task needs content that appears only after JavaScript runs (infinite scroll, "load more" buttons, dynamic pages, "wait until the page is fully loaded"), plain HTTP clients (requests/httpx/urllib) are WRONG: use Playwright and list "playwright" in dependencies. If the task works on a web page, take the URL from the command line (sys.argv[1]) and put the real URL from the description into run_command.
+10. The "exports" field is MANDATORY for every file: list every public function signature, class name, and module-level constant this file provides with EXACT parameter names, types, and return type. Example: "save_result(url: str, title: str, paragraph: str, status: str, attempts: int, error: str) -> None". Other files will import these EXACT names. Cross-file imports MUST match these exports character-for-character. If a file provides no public API, use [].
+11. If the task needs content that appears only after JavaScript runs (infinite scroll, "load more" buttons, dynamic pages, "wait until the page is fully loaded"), plain HTTP clients (requests/httpx/urllib) are WRONG: use Playwright and list "playwright" in dependencies. If the task works on a web page, take the URL from the command line (sys.argv[1]) and put the real URL from the description into run_command.
 
 JSON:"""
 
@@ -1665,6 +1668,19 @@ def _write_file(
             code_snippet = already_written[dep_path][:2000]
             dependency_context += f"\n\n--- {dep_path} (you must import from this) ---\n{code_snippet}"
 
+    # INTERFACE CONTRACT - cross-file export signatures
+    exports_block = ""
+    for af in all_files:
+        for exp in af.get("exports", []):
+            exports_block += "  " + af["path"] + " -> " + exp + "\n"
+    if exports_block:
+        exports_block = (
+            "\nINTERFACE CONTRACT \u2014 EXACT public API of every project file.\n"
+            "When importing from another project file, you MUST use EXACTLY these names.\n"
+            "NEVER rename, shorten, or invent alternative names:\n"
+            + exports_block
+        )
+
     lang_rules = ""
     if language.lower() == "python":
         lang_rules = """
@@ -1708,6 +1724,8 @@ Complete project file structure (in dependency order):
 
 {f"Dependencies this file must import from other project files:{dependency_context}" if dependency_context else ""}
 
+{exports_block}
+
 {shared_contracts_block}
 
 {expected_outputs_block}
@@ -1735,6 +1753,7 @@ General rules:
 - NEVER call a blocking modal dialog function (tkinter's messagebox.showinfo/showerror/showwarning/askyesno/askokcancel/etc., or simpledialog.ask...) from the automatic startup path — these open a real window and block execution until a human clicks it, and this program will be run and observed automatically with no human available to click anything. Print results to the console or a log widget instead; only show such a dialog in direct response to a real user-initiated action (e.g. inside a button's own callback), never unconditionally on startup or at the end of automatic processing.
 - If a GUI file (Tkinter, etc.) is one of this project's OTHER files, and the description calls for a graphical interface, the entry point must actually instantiate and run that GUI (create its window class and call its mainloop) — never write a separate headless/console version of the same logic in the entry point that ignores the GUI file, leaving it unused.
 - EVERY network call (requests.get/post/put/delete/patch, a requests.Session's own get/post/etc., urllib, httpx, etc.) MUST include an explicit timeout (e.g. requests.get(url, timeout=10)). Never call a network function with no timeout — a single slow or unresponsive server then blocks the whole program indefinitely with no Python error at all, which will be reported as a silent failure, not a crash.
+- If a function uses input() for interactive mode, ALSO provide a way to run it non-interactively (e.g. CLI arguments, stdin piping, or a --auto / --demo flag that pre-fills values and prints results without prompting). This ensures automated testing can verify the output.
 - If the description asks for parallel/concurrent/threaded work (e.g. "N paralel thread"), the entry point must actually use the threaded/concurrent implementation — never write a second, sequential version of the same logic and call that one instead, leaving the real parallel implementation unused.
 
 Code for {file_path}:"""

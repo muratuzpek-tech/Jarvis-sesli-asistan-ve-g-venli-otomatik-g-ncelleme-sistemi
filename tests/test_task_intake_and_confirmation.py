@@ -239,7 +239,7 @@ def test_existing_url_in_run_command_is_kept(monkeypatch):
 def test_ollama_options_have_large_context_and_low_temperature(monkeypatch):
     monkeypatch.delenv("JARVIS_OLLAMA_CTX", raising=False)
     monkeypatch.delenv("JARVIS_OLLAMA_TEMP", raising=False)
-    assert da._ollama_options() == {"num_ctx": 8192, "temperature": 0.2}
+    assert da._ollama_options() == {"num_ctx": 32768, "temperature": 0.2}
     monkeypatch.setenv("JARVIS_OLLAMA_CTX", "4096")
     assert da._ollama_options()["num_ctx"] == 4096
 

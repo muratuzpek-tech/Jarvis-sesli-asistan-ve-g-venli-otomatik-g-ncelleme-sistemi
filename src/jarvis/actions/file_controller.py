@@ -233,6 +233,12 @@ def _normalize_path_name(path: str, name: str) -> tuple[str, str]:
     kisayolsa, path'i kisayol + kalan kismi isim olarak boluyoruz."""
     if name:
         return path, name
+
+    # Mutlak dosya yolu geldiyse klasör ve dosya adını ayır.
+    raw_path = Path(str(path).strip()).expanduser()
+    if raw_path.is_absolute() and raw_path.name not in {"", ".", ".."}:
+        return str(raw_path.parent), raw_path.name
+
     raw = path.strip()
     for sep in ("/", "\\"):
         if sep in raw:
