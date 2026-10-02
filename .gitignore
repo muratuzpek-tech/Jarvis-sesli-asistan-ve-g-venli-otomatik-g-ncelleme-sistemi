@@ -53,3 +53,4 @@ src/jarvis/self_improvement/virtual_brain/brain_state/state.json
 .jarvis_kontrol/
 .jarvis_kontrol/
 src/jarvis/self_improvement/virtual_brain/brain_state/state.json
+tests/manual/ui_smoke.png
