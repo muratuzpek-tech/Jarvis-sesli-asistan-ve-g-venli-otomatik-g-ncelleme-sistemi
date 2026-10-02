@@ -6,6 +6,7 @@ import time
 import subprocess
 import platform
 from pathlib import Path
+from jarvis.core.audit_log import log_action
 
 try:
     from jarvis.desktop_io import gui as pyautogui
@@ -685,10 +686,20 @@ def computer_settings(
         # tespit ettikten sonra eklediği özel, dışarıdan üretilemeyen bayrağı
         # kabul et. Bu bayrak her çağrıda ana döngü tarafından tek kullanımlıktır.
         if params.get("_user_confirmation_granted") is not True:
+            log_action(module="computer_settings", action=action,
+                       detail=f"value={value}", risk="high",
+                       approval_required=True, result="DENIED")
             return (
                 f"CONFIRMATION_REQUIRED:{action}: Bu işlem bilgisayarı "
                 f"{action} yapabilir. Kullanıcıdan açık onay alınmadan işlem yapılmadı."
             )
+
+    # GUVENLIK (2026-10-03): Audit log — onayli ya da onaysiz her ayar
+    log_action(module="computer_settings", action=action,
+               detail=f"value={value}",
+               risk="high" if action in _DANGEROUS_ACTIONS else "low",
+               approval_required=action in _DANGEROUS_ACTIONS,
+               result="EXECUTING")
 
     if not _PYAUTOGUI:
         return "pyautogui is not installed. Run: pip install pyautogui"

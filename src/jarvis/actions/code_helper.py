@@ -4,6 +4,7 @@ import re
 import time
 import secrets
 from pathlib import Path
+from jarvis.core.audit_log import log_action
 
 
 def get_base_dir():
@@ -240,8 +241,12 @@ def _save_file(path: Path, content: str) -> str:
             backup_note = f" (yedek: {backup.name})"
         path.parent.mkdir(parents=True, exist_ok=True)
         _write_bytes_with_retry(path, content.encode("utf-8"))
+        log_action(module="code_helper", action="save_file",
+                   detail=f"path={path}", risk="medium", result="SUCCESS")
         return f"Saved to: {path}{backup_note}"
     except Exception as e:
+        log_action(module="code_helper", action="save_file",
+                   detail=f"path={path} err={e}", risk="medium", result="FAILED")
         print(f"[Code] 🔍 TEŞHİS hata: {type(e).__name__}: {e}")
         return f"Could not save: {e}"
 
@@ -422,6 +427,9 @@ def _build(description, language, output_path, args, timeout, speak=None, player
         last_output = _run_file(path, args, timeout)
 
         if not _has_error(last_output):
+            log_action(module="code_helper", action="build_success",
+                       detail=f"path={path} attempts={attempt}",
+                       risk="medium", result="SUCCESS")
             msg = (
                 f"Build complete, sir. "
                 f"The code is working after {attempt} attempt{'s' if attempt > 1 else ''}. "

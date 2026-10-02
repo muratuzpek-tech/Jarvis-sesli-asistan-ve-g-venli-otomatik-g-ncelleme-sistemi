@@ -52,6 +52,7 @@ from jarvis.actions.tools_kopru import (
     call_tool, is_destructive,
 )
 from jarvis.paths import memory_dir
+from jarvis.core.audit_log import log_action
 
 
 TASKS_PATH      = memory_dir() / "agent_tasks.json"
@@ -457,6 +458,9 @@ def _process_task(task: dict, tasks: list[dict]) -> None:
         task["planning_retries"] = 0
         task["history"].append({"note": step.get("note", "Tamamlandı."), "result": "done"})
         _log_event({"event": "task_done", "task_id": task["id"], "note": step.get("note", "")})
+        log_action(module="agent_loop", action="task_done",
+                   detail=f"task={task['id']} goal={task.get('goal', '')[:100]}",
+                   risk="medium", result="SUCCESS")
         return
 
     tool = step.get("tool")
@@ -467,6 +471,9 @@ def _process_task(task: dict, tasks: list[dict]) -> None:
         task["status"] = "failed"
         task["history"].append({"note": note or "Model uygun bir araç bulamadı.", "result": "no_tool"})
         _log_event({"event": "no_tool", "task_id": task["id"], "note": note})
+        log_action(module="agent_loop", action="task_failed",
+                   detail=f"task={task['id']} reason=no_tool",
+                   risk="medium", result="FAILED")
         return
 
     if tool not in ALLOWED_TOOLS:

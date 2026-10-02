@@ -14,6 +14,9 @@ import sys
 from pathlib import Path
 
 from jarvis.core.approval_service import approval_service
+import threading
+import time
+from jarvis.core.audit_log import log_action
 
 _MAX_OUTPUT = 12000
 _TIMEOUT = 30
@@ -78,12 +81,37 @@ def _preview(argv: list[str], cwd: Path) -> str:
     )
 
 
+_TERMINAL_RATE_LIMIT = 30        # max 30 komut / dakika
+_TERMINAL_CALL_TIMES: list[float] = []
+_rate_lock = threading.Lock()
+
+
+def _check_rate_limit() -> tuple[bool, str]:
+    now = time.monotonic()
+    cutoff = now - 60.0
+    with _rate_lock:
+        _TERMINAL_CALL_TIMES[:] = [t for t in _TERMINAL_CALL_TIMES if t > cutoff]
+        if len(_TERMINAL_CALL_TIMES) >= _TERMINAL_RATE_LIMIT:
+            return False, f"Rate limit: max {_TERMINAL_RATE_LIMIT} cmd/min."
+        _TERMINAL_CALL_TIMES.append(now)
+    return True, ""
+
+
 def terminal_tool(
     parameters: dict | None = None,
     *,
     application_user_confirmation: bool = False,
 ) -> str:
     params = parameters or {}
+
+    # GUVENLIK (2026-10-03): Rate limit — tum terminaller bu kontrolden gecer
+    _rl_ok, _rl_msg = _check_rate_limit()
+    if not _rl_ok:
+        log_action(module="terminal_tool", action="rate_limit_block",
+                   detail=str(params.get("command", ""))[:200],
+                   risk="medium", result="BLOCKED")
+        return _rl_msg
+
     command = str(params.get("command", "")).strip()
     if not command:
         return "Komut belirtilmedi."
@@ -108,6 +136,10 @@ def terminal_tool(
             summary,
             require_user_turn=not application_user_confirmation,
         ):
+            log_action(module="terminal_tool", action="preview_required",
+                       detail=_display_command(argv)[:200],
+                       risk="high", approval_required=True,
+                       result="AWAITING_APPROVAL")
             return _preview(argv, cwd)
 
     try:
