@@ -49,9 +49,11 @@ from jarvis.actions.browser_control import browser_control
 from jarvis.actions.file_controller import file_controller
 from jarvis.actions.code_helper import code_helper
 from jarvis.actions.dev_agent import dev_agent, note_user_turn
+from jarvis.core.approval_service import approval_service
 from jarvis.actions.web_search import web_search as web_search_action
 from jarvis.actions.computer_control import computer_control
 from jarvis.actions.game_updater import game_updater
+from jarvis.actions.terminal_tool import terminal_tool
 from jarvis.actions.system_monitor import SystemMonitor, get_system_status
 from jarvis.actions.proactive import ProactiveEngine
 from jarvis.actions.automation import task_manager, pop_due_tasks
@@ -72,7 +74,10 @@ from jarvis.actions.conversation_log import log_turn, recall_conversation
 from jarvis.actions.github_arama import github_search
 from jarvis.actions.discovered_topydo import run as discovered_topydo_run
 from jarvis.actions.discovered_jc import run as discovered_jc_run
-from jarvis.actions.intent_router import match_system_read, match_file_analysis, match_file_modification
+from jarvis.actions.intent_router import (
+    match_system_read, match_file_analysis, match_file_modification,
+    match_terminal_command,
+)
 from jarvis.core.secure_config import api_keys_path
 from jarvis.paths import asset
 
@@ -286,6 +291,23 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "terminal",
+        "description": (
+            "Runs a controlled terminal command. Read-only allowlisted commands run immediately; "
+            "other commands are previewed and require explicit user approval with confirm_code. "
+            "Never use shell syntax, pipes, redirects, sudo, shutdown, reboot, or rm commands."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "command": {"type": "STRING", "description": "Command and arguments, without shell pipes or redirects"},
+                "cwd": {"type": "STRING", "description": "Working directory inside the user's home directory"},
+                "confirm_code": {"type": "STRING", "description": "Code from a prior preview after explicit user approval"},
+            },
+            "required": ["command"]
+        }
+    },
+    {
         "name": "system_status",
         "description": (
             "Returns real-time system metrics: CPU usage, RAM, GPU load, CPU temperature, "
@@ -303,8 +325,8 @@ TOOL_DECLARATIONS = [
             "Scans every project Python module by actually importing it in an isolated "
             "subprocess to catch real runtime and missing-dependency errors, checks every "
             "pyproject.toml-declared dependency's installed version for compatibility, and "
-            "automatically installs or upgrades anything missing or incompatible via pip "
-            "without asking for confirmation. Use when the user asks to check if the system "
+            "reports missing or incompatible dependencies; package installation is disabled "
+            "unless an explicit developer environment grant is present. Use when the user asks to check if the system "
             "or project is healthy, scan for missing dependencies, or self-repair."
         ),
         "parameters": {
@@ -891,6 +913,12 @@ class JarvisLive:
         self.audio_in_queue       = None
         self.out_queue            = None
         self._loop                = None
+        # Modelin kendi ürettiği ``confirmed=yes`` güvenilir bir onay değildir.
+        # Tehlikeli işlemler yalnızca gerçek bir sonraki kullanıcı turundan
+        # gelen onayla ve tek kullanımlık olarak yetkilendirilir.
+        self._pending_dangerous_action = None
+        self._dangerous_confirmation_granted = False
+        self._pending_terminal_command: dict | None = None
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
@@ -952,11 +980,39 @@ class JarvisLive:
         router'i, tur sonunda) da cagrildigi icin isaret burada konur — aksi halde
         istegin kendisi gecikmeli olarak "onay" sayilabilirdi."""
         note_user_turn()  # dev_agent onay kapisi: gercek kullanici girdisi
+        approval_service.mark_user_turn()
         self._on_text_command(text)
 
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
             return
+        # Tehlikeli işlem onayı yalnızca kullanıcının açıkça söylediği bir
+        # sonraki turdan gelebilir; modelin tool-call argümanı onay sayılmaz.
+        normalized_text = " ".join(str(text).casefold().strip().split())
+        confirmation_words = {
+            "onaylıyorum", "onayliyorum", "evet yap", "evet, yap", "tamam onayla",
+            "tamam yap", "devam et", "approve", "approve it", "yes, do it",
+        }
+        if self._pending_dangerous_action is not None:
+            if normalized_text in confirmation_words:
+                self._dangerous_confirmation_granted = True
+            else:
+                # İlgisiz yeni bir tur, eski onayı ileride yanlışlıkla
+                # kullanılabilir bırakmamalıdır.
+                self._pending_dangerous_action = None
+                self._dangerous_confirmation_granted = False
+        if self._pending_terminal_command is not None:
+            if normalized_text in confirmation_words:
+                pending_terminal = dict(self._pending_terminal_command)
+                self._pending_terminal_command = None
+                terminal_result = terminal_tool(pending_terminal)
+                self.ui.write_log(f"[TERMINAL_APPROVED] {terminal_result}")
+                self.speak(
+                    f"[TERMINAL_SONUC] Onaylanan komutun sonucu: {terminal_result}. "
+                    "Sonucu kullanıcıya kısa ve doğal Türkçe ile özetle."
+                )
+                return
+            self._pending_terminal_command = None
         try:
             log_turn("user", text)
         except Exception as e:
@@ -1086,6 +1142,27 @@ class JarvisLive:
                 f"[AGENT_LOOP_EKLENDI] Gerçek görev kuyruğu sonucu: {result}. "
                 "Görevin arka planda işleneceğini kısa ve doğal Türkçe ile bildir; "
                 "henüz sonuç uydurma ve dosyaya doğrudan yazma."
+            )
+            return
+
+        # Common terminal requests must not fall through to code_helper. The
+        # router only creates safe tool parameters; terminal_tool owns policy,
+        # execution, output limits, and the approval gate.
+        terminal_params = match_terminal_command(text)
+        if terminal_params:
+            terminal_result = terminal_tool(terminal_params)
+            if terminal_result.startswith("ONAY GEREKLİ"):
+                code_line = next(
+                    (line for line in terminal_result.splitlines() if line.startswith("Onay kodu:")),
+                    "",
+                )
+                code = code_line.split(":", 1)[1].strip() if ":" in code_line else ""
+                if code:
+                    self._pending_terminal_command = {**terminal_params, "confirm_code": code}
+            self.ui.write_log(f"[TERMINAL_ROUTER] {terminal_result}")
+            self.speak(
+                f"[TERMINAL_SONUC] {terminal_result}. "
+                "Bunu kullanıcıya kısa ve doğal Türkçe ile özetle; komut çalıştırılmadıysa açıkça belirt."
             )
             return
 
@@ -1558,7 +1635,37 @@ class JarvisLive:
                 result = "Camera closed."
 
             elif name == "computer_settings":
-                r = await loop.run_in_executor(None, lambda: computer_settings(parameters=args, response=None, player=self.ui))
+                # Model args içine confirmed=yes koysa bile tek başına yeterli
+                # değildir; yalnızca gerçek kullanıcı onayından sonra ana
+                # döngü bu özel bayrağı ekler.
+                _computer_args = dict(args)
+                _computer_action = str(_computer_args.get("action", "")).lower().strip().replace("-", "_")
+                if not _computer_action:
+                    _computer_description = str(_computer_args.get("description", "")).casefold()
+                    if any(word in _computer_description for word in ("kapat", "poweroff", "shutdown")):
+                        _computer_action = "shutdown"
+                    elif any(word in _computer_description for word in ("yeniden başlat", "yeniden baslat", "reboot", "restart")):
+                        _computer_action = "restart"
+                if (
+                    _computer_action in {"restart", "shutdown", "lock_screen"}
+                    and self._dangerous_confirmation_granted
+                    and self._pending_dangerous_action == _computer_action
+                ):
+                    _computer_args["_user_confirmation_granted"] = True
+                r = await loop.run_in_executor(
+                    None,
+                    lambda: computer_settings(parameters=_computer_args, response=None, player=self.ui),
+                )
+                if _computer_action in {"restart", "shutdown", "lock_screen"}:
+                    if str(r).startswith("CONFIRMATION_REQUIRED:"):
+                        self._pending_dangerous_action = _computer_action
+                    else:
+                        self._pending_dangerous_action = None
+                    self._dangerous_confirmation_granted = False
+                result = r or "Done."
+
+            elif name == "terminal":
+                r = await loop.run_in_executor(None, lambda: terminal_tool(parameters=args))
                 result = r or "Done."
 
             elif name == "desktop_control":
@@ -1620,8 +1727,27 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "game_updater":
-                r = await loop.run_in_executor(None, lambda: game_updater(parameters=args, player=self.ui, speak=self.speak))
-                result = r or "Done."
+                _game_args = dict(args)
+                _game_shutdown_requested = str(_game_args.get("shutdown_when_done", "false")).lower() == "true"
+                if _game_shutdown_requested:
+                    _game_action = "game_shutdown"
+                    if not (
+                        self._dangerous_confirmation_granted
+                        and self._pending_dangerous_action == _game_action
+                    ):
+                        self._pending_dangerous_action = _game_action
+                        self._dangerous_confirmation_granted = False
+                        result = "CONFIRMATION_REQUIRED:game_shutdown: İndirme tamamlanınca bilgisayar kapatılacak. Açıkça onaylıyor musunuz?"
+                        r = None
+                    else:
+                        _game_args["_user_confirmation_granted"] = True
+                        r = await loop.run_in_executor(None, lambda: game_updater(parameters=_game_args, player=self.ui, speak=self.speak))
+                        self._pending_dangerous_action = None
+                        self._dangerous_confirmation_granted = False
+                        result = r or "Done."
+                else:
+                    r = await loop.run_in_executor(None, lambda: game_updater(parameters=_game_args, player=self.ui, speak=self.speak))
+                    result = r or "Done."
 
             elif name == "flight_finder":
                 r = await loop.run_in_executor(None, lambda: flight_finder(parameters=args, player=self.ui))
@@ -1637,17 +1763,25 @@ class JarvisLive:
                 result = str(r)
 
             elif name == "shutdown_jarvis":
-                self.ui.write_log("SYS: Shutdown requested.")
-                self.speak("Goodbye, sir.")
-                # os._exit() atexit'i atladığı için kapanma nedeni burada
-                # açıkça loglanıyor (bkz. __main__._setup_crash_logging).
-                print("[JARVIS] shutdown_jarvis aracı çağrıldı - Gemini kapatma istedi.", flush=True)
-                def _shutdown():
-                    import time
-                    import os
-                    time.sleep(1)
-                    os._exit(0)
-                threading.Thread(target=_shutdown, daemon=True).start()
+                if not (
+                    self._dangerous_confirmation_granted
+                    and self._pending_dangerous_action == "shutdown_jarvis"
+                ):
+                    self._pending_dangerous_action = "shutdown_jarvis"
+                    self._dangerous_confirmation_granted = False
+                    result = "CONFIRMATION_REQUIRED:shutdown_jarvis: JARVIS kapatılacak. Açıkça onaylıyor musunuz?"
+                else:
+                    self.ui.write_log("SYS: Shutdown requested.")
+                    self.speak("Goodbye, sir.")
+                    # os._exit() atexit'i atladığı için kapanma nedeni burada
+                    # açıkça loglanıyor (bkz. __main__._setup_crash_logging).
+                    print("[JARVIS] shutdown_jarvis aracı çağrıldı - Gemini kapatma istedi.", flush=True)
+                    def _shutdown():
+                        import time
+                        import os
+                        time.sleep(1)
+                        os._exit(0)
+                    threading.Thread(target=_shutdown, daemon=True).start()
 
             else:
                 result = f"Unknown tool: {name}"
@@ -1889,6 +2023,7 @@ class JarvisLive:
 
                                 self._last_user_speech = time.monotonic()
                                 note_user_turn()  # dev_agent onay kapisi: gercek kullanici girdisi
+                                approval_service.mark_user_turn()
 
                                 # Turn complete gelmese bile dosya komutunu yakala.
 

@@ -582,7 +582,11 @@ ACTION_MAP: dict[str, callable] = {
     "shutdown":            shutdown_computer,
 }
 
-_DANGEROUS_ACTIONS = {"restart", "shutdown"}
+_DANGEROUS_ACTIONS = {"restart", "shutdown", "lock_screen", "lock"}
+_DANGEROUS_TYPED_COMMANDS = (
+    "shutdown", "poweroff", "reboot", "systemctl poweroff", "systemctl reboot",
+    "systemctl halt", "halt", "rm -rf", "rm -fr", "sudo ",
+)
 
 
 
@@ -626,9 +630,6 @@ def computer_settings(
     player=None,
     session_memory=None,
 ) -> str:
-    if not _PYAUTOGUI:
-        return "pyautogui is not installed. Run: pip install pyautogui"
-
     params      = parameters or {}
     raw_action  = params.get("action", "").strip()
     description = params.get("description", "").strip()
@@ -679,12 +680,18 @@ def computer_settings(
         player.write_log(f"[Settings] {action}")
 
     if action in _DANGEROUS_ACTIONS:
-        confirmed = str(params.get("confirmed", "")).lower()
-        if confirmed not in ("yes", "true", "1", "confirm"):
+        # ``confirmed=yes`` model tarafından kendi kendine üretilebildiği için
+        # güvenlik sınırı olamaz. Sadece main.py'nin gerçek kullanıcı onayı
+        # tespit ettikten sonra eklediği özel, dışarıdan üretilemeyen bayrağı
+        # kabul et. Bu bayrak her çağrıda ana döngü tarafından tek kullanımlıktır.
+        if params.get("_user_confirmation_granted") is not True:
             return (
-                f"This will {action} the computer. "
-                f"Please confirm by calling again with confirmed=yes."
+                f"CONFIRMATION_REQUIRED:{action}: Bu işlem bilgisayarı "
+                f"{action} yapabilir. Kullanıcıdan açık onay alınmadan işlem yapılmadı."
             )
+
+    if not _PYAUTOGUI:
+        return "pyautogui is not installed. Run: pip install pyautogui"
 
     if action == "volume_set":
         try:
@@ -698,6 +705,16 @@ def computer_settings(
         if not text:
             return "No text provided to type."
         enter_after = str(params.get("press_enter", "false")).lower() in ("true", "1", "yes")
+        normalized_text = " ".join(text.casefold().split())
+        if enter_after and any(
+            normalized_text == command or normalized_text.startswith(command)
+            for command in _DANGEROUS_TYPED_COMMANDS
+        ):
+            return (
+                "COMMAND_BLOCKED: Tehlikeli bir terminal komutu Enter ile çalıştırılmadı. "
+                "Kapatma, yeniden başlatma, sudo veya silme komutları JARVIS tarafından "
+                "otomatik çalıştırılamaz."
+            )
         type_text(text, press_enter_after=enter_after)
         return f"Typed: {text[:80]}"
 

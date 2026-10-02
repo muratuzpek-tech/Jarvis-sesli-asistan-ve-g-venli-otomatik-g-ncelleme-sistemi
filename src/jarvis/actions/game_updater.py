@@ -945,6 +945,12 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
     minute    = int(p.get("minute", 0))
     shutdown  = str(p.get("shutdown_when_done", "false")).lower() == "true"
 
+    if shutdown and p.get("_user_confirmation_granted") is not True:
+        return (
+            "CONFIRMATION_REQUIRED:game_shutdown: İndirme tamamlanınca bilgisayarın "
+            "kapatılması isteniyor. Kullanıcı onayı olmadan otomatik kapatma başlatılmadı."
+        )
+
     results = []
 
     if action == "schedule":        return _schedule_daily_update(hour=hour, minute=minute)

@@ -914,13 +914,18 @@ class DashboardServer:
         # özel olarak üretilir (bkz. jarvis.core.secure_config).
         ensure_self_signed_cert()
         use_ssl = self._ssl_enabled()
+        host = os.environ.get("JARVIS_DASHBOARD_HOST", "127.0.0.1")
+        if not use_ssl and host not in {"127.0.0.1", "localhost", "::1"}:
+            print("[Dashboard] TLS sertifikası olmadan uzaktan HTTP erişimi devre dışı bırakıldı.")
+            print("[Dashboard] Sertifika oluşturun veya JARVIS_DASHBOARD_HOST'u localhost yapın.")
+            return
         ssl_key, ssl_cert = tls_paths()
 
         if use_ssl:
             asyncio.create_task(self._serve_alias())
 
         cfg = uvicorn.Config(
-            self.app, host=os.environ.get("JARVIS_DASHBOARD_HOST", "127.0.0.1"), port=PORT, log_level="warning",
+            self.app, host=host, port=PORT, log_level="warning",
             **({"ssl_keyfile": str(ssl_key), "ssl_certfile": str(ssl_cert)} if use_ssl else {}),
         )
 

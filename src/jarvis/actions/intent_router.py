@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from pathlib import Path
 
 # "çalışan işlemleri listele" ve çok yakın doğal dil varyasyonları.
@@ -45,6 +46,39 @@ _PROCESS_LIST_PATTERNS = [
 ]
 
 _COMPILED = [re.compile(p, re.IGNORECASE) for p in _PROCESS_LIST_PATTERNS]
+
+
+def match_terminal_command(text: str) -> dict | None:
+    """Map a small, safe set of natural-language requests to terminal argv.
+
+    This prevents common read-only requests from falling into code_helper.
+    It returns tool parameters only; execution remains in terminal_tool.py.
+    """
+    if not text:
+        return None
+    low = " ".join(text.casefold().strip().split())
+    from jarvis.paths import project_root
+    repo = str(project_root())
+
+    if ("python" in low or "python'ın" in low) and any(x in low for x in ("sürüm", "surum", "version")):
+        return {"command": "python --version"}
+    if any(x in low for x in ("bulunduğum klasör", "bulundugum klasor", "bulunduğun klasör", "bulundugun klasor", "mevcut klasör", "current directory")):
+        return {"command": "pwd"}
+    if "git" in low and any(x in low for x in ("durum", "status")):
+        return {"command": "git status", "cwd": repo}
+    if "git" in low and any(x in low for x in ("son commit", "son kayıt", "son kayit", "last commit")):
+        return {"command": "git log -1 --oneline", "cwd": repo}
+    if any(x in low for x in ("dosyaları listele", "dosyalari listele", "dosyaları göster", "dosyalari goster")):
+        return {"command": "ls"}
+    if "readme" in low and any(x in low for x in ("ilk", "satır", "satir", "göster", "goster")):
+        return {"command": "head -n 20 README.md", "cwd": repo}
+    if any(x in low for x in ("python ile ekrana", "python'la ekrana", "python ile ekranda")) and any(x in low for x in ("yazdır", "yazdir", "print")):
+        marker = "ekrana"
+        payload = low.split(marker, 1)[1]
+        payload = re.sub(r"\b(yazdır|yazdir|print)\b.*$", "", payload).strip(" .:'\"")
+        if payload:
+            return {"command": f"python -c {shlex.quote(f'print({payload!r})')}"}
+    return None
 
 
 def match_system_read(text: str) -> str | None:
@@ -346,4 +380,3 @@ def match_file_modification(text: str) -> dict | None:
         }
 
     return None
-

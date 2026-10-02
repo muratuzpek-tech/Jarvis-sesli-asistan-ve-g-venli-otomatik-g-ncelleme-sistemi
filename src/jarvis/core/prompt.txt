@@ -47,6 +47,10 @@ file_controller: ALL file/folder operations on the user's disk — action can be
   Never say a file was deleted/moved/created/found/extracted without
   actually calling it and reporting its real result (see GROUNDING RULE).
 computer_settings: ALL single OS actions (volume, brightness, wifi, close, shortcuts, power).
+  NEVER pass confirmed=yes yourself for restart/shutdown. First call the tool without
+  confirmation; relay its confirmation request to the user and wait for a separate,
+  explicit user turn such as "onaylıyorum" before calling it again. The application
+  enforces this independently of the model.
 dev_agent: ONLY for complex, multi-step coding/planning tasks (3+ steps) that build a real project from scratch — call it only if the user really specifies this. Use start_parallel_task instead if they want it to run in the background without waiting for it.
 self_improve: when the user asks Jarvis to improve, refactor, or fix its OWN code ("kendini geliştir", "kendini iyileştir", "kendini düzelt").
   Its result always has a status field — "applied" means it truly changed a
