@@ -1005,7 +1005,10 @@ class JarvisLive:
             if normalized_text in confirmation_words:
                 pending_terminal = dict(self._pending_terminal_command)
                 self._pending_terminal_command = None
-                terminal_result = terminal_tool(pending_terminal)
+                terminal_result = terminal_tool(
+                    pending_terminal,
+                    application_user_confirmation=True,
+                )
                 self.ui.write_log(f"[TERMINAL_APPROVED] {terminal_result}")
                 self.speak(
                     f"[TERMINAL_SONUC] Onaylanan komutun sonucu: {terminal_result}. "

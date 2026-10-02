@@ -47,7 +47,13 @@ class ApprovalService:
             self._pending[item.code] = item
         return item
 
-    def consume(self, code: str, action: str, summary: str | None = None) -> bool:
+    def consume(
+        self,
+        code: str,
+        action: str,
+        summary: str | None = None,
+        require_user_turn: bool = True,
+    ) -> bool:
         now = time.monotonic()
         with self._lock:
             self._purge_locked(now)
@@ -56,7 +62,7 @@ class ApprovalService:
                 return False
             if summary is not None and item.summary != summary:
                 return False
-            if self._last_user_turn <= item.issued_at:
+            if require_user_turn and self._last_user_turn <= item.issued_at:
                 return False
             del self._pending[item.code]
             return True

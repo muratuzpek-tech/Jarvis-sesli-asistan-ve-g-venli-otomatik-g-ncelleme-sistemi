@@ -78,7 +78,11 @@ def _preview(argv: list[str], cwd: Path) -> str:
     )
 
 
-def terminal_tool(parameters: dict | None = None) -> str:
+def terminal_tool(
+    parameters: dict | None = None,
+    *,
+    application_user_confirmation: bool = False,
+) -> str:
     params = parameters or {}
     command = str(params.get("command", "")).strip()
     if not command:
@@ -98,7 +102,12 @@ def terminal_tool(parameters: dict | None = None) -> str:
     confirm_code = str(params.get("confirm_code", "")).strip()
     if not _is_readonly(argv):
         summary = f"Komut: {_display_command(argv)} | Çalışma klasörü: {cwd}"
-        if not approval_service.consume(confirm_code, "terminal", summary):
+        if not approval_service.consume(
+            confirm_code,
+            "terminal",
+            summary,
+            require_user_turn=not application_user_confirmation,
+        ):
             return _preview(argv, cwd)
 
     try:
