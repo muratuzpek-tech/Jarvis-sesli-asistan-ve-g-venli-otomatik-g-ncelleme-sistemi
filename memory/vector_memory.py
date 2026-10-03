@@ -226,7 +226,7 @@ class VectorMemory:
         query: str,
         top_k: int = 5,
         category: str | None = None,
-        min_score: float = 0.3,
+        min_score: float = 0.05,
     ) -> list[SearchResult]:
         """
         Semantik arama — en alakalı anıları bul.
@@ -297,6 +297,28 @@ class VectorMemory:
                     results.append(SearchResult(entry=entry, score=score))
             except (json.JSONDecodeError, TypeError):
                 continue
+
+        # Keyword overlap fallback: cosine düşükse kelime eşleşmesi dene
+        query_words = set(query.lower().split())
+        for row in rows:
+            rid, text, cat, meta_json, ts, imp, vec_blob = row
+            if category and cat != category:
+                continue
+            # Zaten sonuç var mı bu id için?
+            existing_ids = {r.entry.id for r in results}
+            if rid in existing_ids:
+                continue
+            
+            text_words = set(text.lower().split())
+            overlap = len(query_words & text_words) / max(len(query_words), 1)
+            if overlap > 0:
+                kw_score = 0.1 + overlap * 0.4  # 0.1–0.5 arası
+                entry = MemoryEntry(
+                    id=rid, text=text, category=cat,
+                    metadata=json.loads(meta_json or "{}"),
+                    timestamp=ts, importance=imp,
+                )
+                results.append(SearchResult(entry=entry, score=kw_score))
 
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:top_k]
