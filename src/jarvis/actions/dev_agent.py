@@ -2967,6 +2967,138 @@ Fixed code for {fix_path}:"""
 
     return updated_codes
 
+def _present_plan_for_review(plan: dict, log=print) -> str:
+    """SUPERPOWERS A: PLAN-FIRST. Kod yazılmadan önce plan gösterilir."""
+    files = plan.get("files", [])
+    entry = plan.get("entry_point", "main.py")
+    deps = plan.get("dependencies", [])
+    outputs = plan.get("expected_outputs", [])
+    parts = [f"PROJE PLANI ({len(files)} dosya):"]
+    parts.append(f"  Giris: {entry}")
+    if deps:
+        shown = ", ".join(deps[:5])
+        extra = f" (+{len(deps)-5})" if len(deps) > 5 else ""
+        parts.append(f"  Bagimlilik: {shown}{extra}")
+    for i, fi in enumerate(files, 1):
+        fp = fi.get("path", "?") if isinstance(fi, dict) else str(fi)
+        purpose = fi.get("purpose", fi.get("description", "")) if isinstance(fi, dict) else ""
+        parts.append(f"  {i}. {fp}" + (f" - {purpose}" if purpose else ""))
+    if outputs:
+        parts.append("  Beklenen ciktilar:")
+        for o in outputs:
+            op = o.get("path", "?") if isinstance(o, dict) else str(o)
+            od = o.get("description", "") if isinstance(o, dict) else ""
+            parts.append(f"    * {op}" + (f": {od}" if od else ""))
+    summary = "\n".join(parts)
+    log(summary)
+    return summary
+
+
+def _generate_test_scaffold(plan: dict, project_dir: Path, log=print):
+    """SUPERPOWERS B: TDD. Testler implementation'dan ONCE yazilir."""
+    files = plan.get("files", [])
+    entry = plan.get("entry_point", "main.py")
+    outputs = plan.get("expected_outputs", [])
+
+    mods = []
+    for fi in files:
+        fp = fi.get("path", "") if isinstance(fi, dict) else str(fi)
+        if fp.endswith(".py") and not fp.startswith("test_"):
+            mod = fp.replace("/", ".").replace("\\", ".").removesuffix(".py")
+            mods.append(mod)
+
+    tests = {}
+    smoke_body = (
+        '"""TDD: Smoke test - implementation ONCESI yazildi."""\n'
+        "import importlib, os, sys\n"
+        "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))\n"
+        f"MODULES = {mods!r}\n\n"
+        "def test_imports():\n"
+        "    fails = []\n"
+        "    for m in MODULES:\n"
+        "        try:\n"
+        "            importlib.import_module(m)\n"
+        "        except Exception as e:\n"
+        "            fails.append(str(e))\n"
+        "    assert not fails, fails\n\n"
+        "def test_entry_exists():\n"
+        "    root = os.path.join(os.path.dirname(__file__), '..')\n"
+        f"    assert os.path.exists(os.path.join(root, '{entry}')), 'entry eksik'\n"
+    )
+    tests["tests/test_smoke.py"] = smoke_body
+
+    syntax_body = (
+        '"""TDD: Syntax test - her .py parse edilmeli."""\n'
+        "import ast, glob, os\n\n"
+        "def test_no_syntax_errors():\n"
+        "    root = os.path.join(os.path.dirname(__file__), '..')\n"
+        "    errs = []\n"
+        "    for fp in glob.glob(os.path.join(root, '**', '*.py'), recursive=True):\n"
+        "        if os.sep + 'tests' + os.sep in fp:\n"
+        "            continue\n"
+        "        try:\n"
+        "            with open(fp) as f:\n"
+        "                ast.parse(f.read())\n"
+        "        except SyntaxError as e:\n"
+        "            errs.append(str(e))\n"
+        "    assert not errs, errs\n"
+    )
+    tests["tests/test_syntax.py"] = syntax_body
+
+    for rp, content in tests.items():
+        tp = project_dir / rp
+        tp.parent.mkdir(parents=True, exist_ok=True)
+        tp.write_text(content, encoding="utf-8")
+
+    log(f"TDD: {len(tests)} test dosyasi ONCE yazildi (koddan once)")
+    for rp in tests:
+        log(f"  Test: {rp}")
+    return tests
+
+
+def _comprehensive_review(project_dir: Path, file_codes: dict, log=print):
+    """SUPERPOWERS C: REVIEW. Kod calistirilmadan once guvenlik+kalite denetimi."""
+    import ast as _ast
+    issues = []
+    SEC = {"exec": "KRITIK", "eval": "KRITIK", "compile": "YUKSEK",
+           "__import__": "YUKSEK", "system": "YUKSEK", "popen": "YUKSEK"}
+    for fp in sorted(file_codes):
+        if not fp.endswith(".py"):
+            continue
+        cs = file_codes[fp]
+        try:
+            tree = _ast.parse(cs)
+        except SyntaxError as e:
+            issues.append(("KRITIK", fp, f"SyntaxError: {e}"))
+            continue
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Call):
+                fn = ""
+                if isinstance(node.func, _ast.Name):
+                    fn = node.func.id
+                elif isinstance(node.func, _ast.Attribute):
+                    fn = node.func.attr
+                if fn in SEC:
+                    issues.append((SEC[fn], fp, f"{fn}() satir {node.lineno}"))
+            if isinstance(node, _ast.ExceptHandler) and node.type is None:
+                issues.append(("ORTA", fp, f"bare except satir {node.lineno}"))
+        if not cs.strip():
+            issues.append(("KRITIK", fp, "dosya bos!"))
+    crit = [i for i in issues if i[0] == "KRITIK"]
+    high = [i for i in issues if i[0] == "YUKSEK"]
+    med = [i for i in issues if i[0] == "ORTA"]
+    if not issues:
+        log("REVIEW: Tum dosyalar temiz (guvenlik + kalite)")
+    else:
+        log(f"REVIEW SONUCU: {len(crit)} kritik, {len(high)} yuksek, {len(med)} orta")
+        for sev, fp, msg in issues:
+            icon = {"KRITIK": "!!", "YUKSEK": "! ", "ORTA": "~ "}.get(sev, "  ")
+            log(f"  [{icon}] [{sev}] {fp}: {msg}")
+        if crit:
+            log("UYARI: Kritik sorunlar var - duzeltilmeli!")
+    return issues
+
+
 def _build_project(
     description: str,
     language: str,
@@ -3072,6 +3204,10 @@ def _build_project(
                 log(f"⚠️ Eski çıktı temizlenemedi: {output_path} ({exc})")
 
     log(f"Project: {proj_name} | Files: {len(files)} | Entry: {entry_point}")
+
+    # SUPERPOWERS (2026-10-03): Plan-first + TDD
+    _present_plan_for_review(plan, log=log)
+    _generate_test_scaffold(plan, project_dir, log=log)
 
     def _dep_sort_key(fi: dict) -> int:
         return len(fi.get("imports", []))
@@ -3316,6 +3452,9 @@ def _build_project(
     previous_fix_error_output: str | None = None
 
     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
+        # SUPERPOWERS (2026-10-03): Review (calistirma oncesi)
+        _comprehensive_review(project_dir, file_codes, log=log)
+
         log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
         run_started_at = time.time()
         last_output = _run_project(run_command, project_dir, current_timeout)
