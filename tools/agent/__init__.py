@@ -27,4 +27,16 @@ from tools.registry import registry, ToolContext
 )
 async def _react_handler(args: dict, ctx: ToolContext) -> str:
     from tools.agent.react_runtime import react_solve
-    return await react_solve(goal=args.get("goal", ""), ctx=ctx)
+    raw = args.get("goal", None)
+    if raw is None:
+        raw = args.get("task", None)
+    if raw is None:
+        return "HATA: Gorev hedefi bos. goal parametresi gerekli."
+    if not isinstance(raw, str):
+        return "HATA: goal metin olmali. Gelen tip: " + type(raw).__name__
+    goal = raw.strip()
+    if not goal or len(goal) < 2:
+        return "HATA: Gorev hedefi cok kisa."
+    if len(goal) > 50000:
+        goal = goal[:50000]
+    return await react_solve(goal=goal, ctx=ctx)

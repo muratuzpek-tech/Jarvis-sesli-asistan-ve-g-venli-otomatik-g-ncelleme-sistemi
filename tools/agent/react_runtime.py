@@ -43,6 +43,10 @@ from tools.security import SecurityLevel
 
 logger = logging.getLogger("tools.agent.react")
 
+# LRU Cache for identical queries
+_react_cache = {}
+_REACT_CACHE_MAX = 50
+
 MAX_REACT_TURNS = 10
 _FINISH_TOOL = "finish_task"
 
@@ -97,12 +101,14 @@ ReAct protokolu ile calisiyorsun:
 KURALLAR:
 - Cevaplarin KUSURSUZ, DOGAL TURKCE olmali.
 - Araclari cagirirken GERKLI TUM PARAMETRELERI eksiksiz doldur.
-- Karmaşık kodlama isteklerini 'agentic_code' aracina devret.
-- KisIisel bilgi verildiginde 'memory_save' ile kaydet.
-- Gecmisle ilgili sorulara 'memory_recall' ile ara.
-- Duygusal ifadelerde 'spotify_control' play_onem mood oner.
-- Isin BITIGINDE kesinlikle 'finish_task' cagir.
-- Yanitlarini kisa, net ve direkt cozum odakli tut.
+
+
+
+
+
+- DUSUN, cozum uret, SONRA finish_task cagir.
+- Basit sorular (matematik, bilgi, tarih) → dogrudan finish_task ile cevapla.
+- Token tozu uretme: 1-2 adimda coz, zaman harcama.
 
 MEVCUT ARACLARIN:
 {TOKEN_TOOLS}
@@ -118,14 +124,13 @@ CIKTI FORMATI (SADECE JSON):
 
 
 def _build_system_prompt() -> str:
-    schemas = registry.list_tools()
-    tool_lines = []
-    for name in schemas:
-        entry = registry.get(name)
-        if entry:
-            tool_lines.append(f"- {name}: {entry.description[:80]}")
-    tool_lines.append(f"- {_FINISH_TOOL}: Gorevi bitir ve ozeti sun")
-    return _SYSTEM_PROMPT.replace("{TOKEN_TOOLS}", "\n".join(tool_lines))
+    # ReAct ic toolbox: SADECE finish_task.
+    # External tool'lar (agentic_code, spotify_control vb.)
+    # Jarvis ana dispatch calistirir, ReAct degil.
+    tool_lines = [
+        f"- {_FINISH_TOOL}: Gorevi bitir, cozumu ve ozeti sun",
+    ]
+    return _SYSTEM_PROMPT.replace("{TOKEN_TOOLS}", chr(10).join(tool_lines))
 
 
 def _parse_json_response(raw: str) -> dict:
@@ -166,7 +171,10 @@ class ReactAgent:
     def _default_model(prompt: str) -> str:
         try:
             from google import genai
-            client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
+            _api_key = os.environ.get("GEMINI_API_KEY", "")
+            if not _api_key:
+                raise ValueError("GEMINI_API_KEY bos")
+            client = genai.Client(api_key=_api_key)
             resp = client.models.generate_content(
                 model="gemini-2.0-flash", contents=prompt,
             )
@@ -175,8 +183,23 @@ class ReactAgent:
             pass
         try:
             import ollama
+            # Dinamik model secimi: yuklu modellerden en iyisini bul
+            _best_model = "qwen2.5:7b"  # default: surekli yuklu olan
+            try:
+                _models = ollama.list()
+                _names = [m.get("model", m.get("name", "")) for m in _models.get("models", [])]
+                if _names:
+                    # Oncelik: coder > 7b > ilk model
+                    for pref in ["qwen2.5-coder:7b", "qwen2.5:7b", "qwen2.5-coder:14b"]:
+                        if pref in _names:
+                            _best_model = pref
+                            break
+                    else:
+                        _best_model = _names[0]
+            except Exception:
+                pass  # default model kullan
             resp = ollama.chat(
-                model="qwen3:1.7b",
+                model=_best_model,
                 messages=[{"role": "user", "content": prompt}],
                 format="json",
                 options={"temperature": 0.3},
@@ -311,5 +334,13 @@ async def react_solve(
     model_fn: Callable[[str], str] | None = None,
     max_turns: int = MAX_REACT_TURNS,
 ) -> str:
+    cache_key = goal.strip().lower()[:200]
+    if cache_key in _react_cache:
+        return _react_cache[cache_key]
     agent = ReactAgent(model_fn=model_fn, ctx=ctx, max_turns=max_turns)
-    return await agent.solve(goal)
+    result_str = await agent.solve(goal)
+    if len(_react_cache) >= _REACT_CACHE_MAX:
+        oldest = next(iter(_react_cache))
+        del _react_cache[oldest]
+    _react_cache[cache_key] = result_str
+    return result_str

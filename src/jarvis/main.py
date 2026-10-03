@@ -33,7 +33,25 @@ from google.genai import types
 from jarvis.ui import JarvisUI
 from jarvis.memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
+
 )
+
+
+# ── Jarvis 2.0 Tool Registry (FAZ 6.1) ──────────────────────
+# Graceful: registry yoksa eski sistem normal çalışır.
+_JARVIS2_REGISTRY_AVAILABLE = False
+_JARVIS2_REGISTRY_TOOL_NAMES: set = set()
+try:
+    import tools.developer  # noqa: F401
+    import tools.media     # noqa: F401
+    import tools.agent     # noqa: F401
+    from tools.registry import registry as _jarvis2_registry
+    from tools.registry import ToolContext as _Jarvis2ToolContext
+    from tools.schemas import generate_declarations as _gen_decls
+    _JARVIS2_REGISTRY_AVAILABLE = True
+    _JARVIS2_REGISTRY_TOOL_NAMES = set(_jarvis2_registry.list_tools())
+except Exception:
+    _JARVIS2_REGISTRY_AVAILABLE = False
 
 from jarvis.actions.file_processor import file_processor
 from jarvis.actions.flight_finder import flight_finder
@@ -906,6 +924,12 @@ TOOL_DECLARATIONS = [
 
 
 class JarvisLive:
+    # Güvenli varsayılan değerler — JarvisLive.__new__() ile oluşturulan
+    # test nesneleri için. Gerçek __init__() bunları değiştirir.
+    # GÜVENLİK DEĞİŞİKLİĞİ DEĞİL: Aynı değerler __init__'te zaten var.
+    _pending_dangerous_action = None
+    _dangerous_confirmation_granted = False
+    _pending_terminal_command = None
 
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
@@ -1504,7 +1528,10 @@ class JarvisLive:
             output_audio_transcription={},
             input_audio_transcription={},
             system_instruction="\n".join(parts),
-            tools=[{"function_declarations": TOOL_DECLARATIONS}],
+            tools=[{"function_declarations": (
+                list(TOOL_DECLARATIONS)
+                + (_gen_decls() if _JARVIS2_REGISTRY_AVAILABLE else [])
+            )}],
             max_output_tokens=16384,
             session_resumption=types.SessionResumptionConfig() if self._first_connect else None,
             speech_config=types.SpeechConfig(
@@ -1519,6 +1546,46 @@ class JarvisLive:
     async def _execute_tool(self, fc) -> types.FunctionResponse:
         name = fc.name
         args = dict(fc.args or {})
+
+        # ── Jarvis 2.0 Registry Routing (FAZ 6.1) ──────────────────
+        # Yeni araçlar registry.execute() üzerinden çalışır.
+        # Eski if/elif dispatch'e DOKUNULMAZ.
+        if _JARVIS2_REGISTRY_AVAILABLE and name in _JARVIS2_REGISTRY_TOOL_NAMES:
+            _ctx = _Jarvis2ToolContext(ui=self.ui, session=self.session)
+            _dangerous_confirmed = (
+                self._dangerous_confirmation_granted
+                and self._pending_dangerous_action == name
+            )
+            _ctx.dangerous_confirmed = _dangerous_confirmed
+            if _dangerous_confirmed:
+                self._pending_dangerous_action = None
+                self._dangerous_confirmation_granted = False
+            try:
+                _result = await _jarvis2_registry.execute(name, args, ctx=_ctx)
+            except Exception as _reg_err:
+                _result = (
+                    f"Tool error ({name}): "
+                    f"{type(_reg_err).__name__}: {str(_reg_err)[:120]}"
+                )
+                print(f"[JARVIS 2.0] ❌ Registry error: {name}: {_reg_err}")
+            # CONFIRMATION_REQUIRED protokolünü mevcut sistemle entegre et
+            if isinstance(_result, str) and _result.startswith("CONFIRMATION_REQUIRED:"):
+                _parts = _result.split(":", 2)
+                _conf_action = _parts[1] if len(_parts) > 1 else name
+                _conf_prompt = _parts[2] if len(_parts) > 2 else _result
+                self._pending_dangerous_action = _conf_action
+                self._dangerous_confirmation_granted = False
+                return types.FunctionResponse(
+                    id=fc.id,
+                    name=fc.name,
+                    response={"output": _result},
+                )
+            return types.FunctionResponse(
+                id=fc.id,
+                name=fc.name,
+                response={"output": _result},
+            )
+        # ── Eski dispatch (korundu) ────────────────────────────────
 
         print(f"[JARVIS] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
