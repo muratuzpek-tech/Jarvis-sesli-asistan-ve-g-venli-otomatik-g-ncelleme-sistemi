@@ -40,6 +40,14 @@ _HIGH_RISK = {
     ("coder_ai", "modify_critical_file"),
     ("install_program", None),
     ("download_file", None),
+    # GUARD: executor farkli adlarla gönderebilir (2026-10-03 güvenlik fix)
+    ("file_controller", "delete_file"),
+    ("file_controller", "delete_folder"),
+    ("file_controller", "remove_file"),
+    ("file_controller", "remove"),
+    ("file_controller", "move_file"),
+    ("file_controller", "rename"),
+    ("file_controller", "rename_file"),
 }
 _MEDIUM_RISK = {
     ("file_controller", "create_file"),
@@ -47,6 +55,11 @@ _MEDIUM_RISK = {
     ("file_controller", "copy"),
     ("coder_ai", "write_new_file"),
     ("backup_create", None),
+
+    # GUARD: executor varyasyonları (2026-10-03 güvenlik fix)
+    ("file_controller", "write_file"),
+    ("file_controller", "write_new_file"),
+    ("coder_ai", "write_file"),
 }
 # Geri kalan her şey (okuma, analiz, araştırma, loglama) varsayılan olarak LOW.
 
@@ -68,11 +81,63 @@ class SecurityAI(BaseBrain):
     SYSTEM_PROMPT = SYSTEM_PROMPT
 
     @staticmethod
+    def _normalize_action(action: str | None) -> str | None:
+        """Action isimlerini standartlaştır — 'delete_file' → 'delete'.
+
+        Güvenlik tablosu kısa ad kullanir ('delete', 'move', ...),
+        executor ayni eylemi uzun adla gönderebilir ('delete_file', ...).
+        Eşleşme sağlanamazsa KÖTÜ amaçlı isim → default 'low' düşer
+        ve işlem ONAYSIZ onaylanir. Bu normalizasyon bunu önler.
+        """
+        if not action:
+            return None
+        a = action.strip().lower()
+        # Eşanlamlılar → tablo adı
+        _ALIAS = {
+            "delete_file": "delete",
+            "delete_folder": "delete",
+            "remove_file": "delete",
+            "remove_folder": "delete",
+            "remove": "delete",
+            "erase": "delete",
+            "move_file": "move",
+            "move_folder": "move",
+            "rename": "move",
+            "rename_file": "move",
+            "rename_folder": "move",
+            "create_file": "create_file",
+            "create_folder": "create_folder",
+            "write_file": "create_file",
+            "write_new_file": "write_new_file",
+            "modify_file": "modify_critical_file",
+            "edit_file": "modify_critical_file",
+            "overwrite": "modify_critical_file",
+            "shutdown_pc": "shutdown",
+            "power_off": "shutdown",
+            "reboot": "restart",
+            "lock": "lock_screen",
+            "send_message": "send_message",
+            "send_email": "send_message",
+            "send_mail": "send_message",
+            "copy_file": "copy",
+            "copy_folder": "copy",
+            "install_program": "install_program",
+            "install_package": "install_program",
+            "pip_install": "install_program",
+            "download_file": "download_file",
+            "download": "download_file",
+        }
+        return _ALIAS.get(a, a)
+
+    @staticmethod
     def classify_risk(tool: str, action: str | None) -> str:
-        if (tool, action) in _HIGH_RISK or (tool, None) in _HIGH_RISK:
-            return "high"
-        if (tool, action) in _MEDIUM_RISK or (tool, None) in _MEDIUM_RISK:
-            return "medium"
+        norm_action = SecurityAI._normalize_action(action)
+        # Hem orijinal hem normalize edilmiş halini kontrol et
+        for act in (norm_action, action):
+            if (tool, act) in _HIGH_RISK or (tool, None) in _HIGH_RISK:
+                return "high"
+            if (tool, act) in _MEDIUM_RISK or (tool, None) in _MEDIUM_RISK:
+                return "medium"
         return "low"
 
     def handle(self, message: dict) -> dict:
