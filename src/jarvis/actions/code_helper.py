@@ -94,7 +94,13 @@ def _get_gemini_breaker():
 
 
 def _clean_code(text: str) -> str:
+    """Markdown icindeki kod bloklarini dogru sekilde cikarir."""
     text = text.strip()
+    # Tum kod bloklarini bul (orn: ```python\n...\n```)
+    blocks = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
+    if blocks:
+        return "\n".join(b.strip() for b in blocks)
+    # Fallback: cevreleyen fence'leri temizle
     text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
     text = re.sub(r"\n?```$", "", text)
     return text.strip()
@@ -238,13 +244,7 @@ def _save_file(path: Path, content: str) -> str:
         log_action(module="code_helper", action="save_file",
                    detail=f"path={path} backup_id={bm_result['backup_id']}",
                    risk="medium", result="SUCCESS")
-        _post = []
-        _ed = _open_in_editor(path)
-        if _ed: _post.append(_ed)
-        _rn = _try_run_simple(path)
-        if _rn: _post.append(_rn)
-        _extra = ("\n" + "\n".join(_post)) if _post else ""
-        return f"Saved to: {path}{backup_note}{_extra}"
+        return f"Saved to: {path}{backup_note}"
     except Exception as e:
         log_action(module="code_helper", action="save_file",
                    detail=f"path={path} err={e}", risk="medium", result="FAILED")
@@ -524,7 +524,13 @@ def _write_action(description, language, output_path, player) -> str:
     try:
         code, path = _write(description, language, output_path, player)
         print(f"[Code] ✅ Written: {path}")
-        return f"Code written. Saved to: {path}\n\nKOD INCELEME (ilk 25 satir):\n{_preview(code)}"
+        _post = []
+        _ed = _open_in_editor(path)
+        if _ed: _post.append(_ed)
+        _rn = _try_run_simple(path)
+        if _rn: _post.append(_rn)
+        _extra = ("\n" + "\n".join(_post)) if _post else ""
+        return f"Code written. Saved to: {path}{_extra}\n\nKOD INCELEME (ilk 25 satir):\n{_preview(code)}"
     except Exception as e:
         return f"Could not generate code: {e}"
 
