@@ -103,6 +103,131 @@ def _run_with_timeout(fn, timeout: float = LLM_CALL_TIMEOUT_SECONDS):
         pool.shutdown(wait=False)
 
 
+# ── AI FIX 1+3+4: Retry + Error Classification + Metrics ──────────────────
+# 2026-10-03: Geçici hatalar (network flicker, 429 rate-limit, 503 overload)
+# tek denemede LLM çağrısını öldürüyordu. Artık akıllı retry var.
+
+import time as _time
+from collections import defaultdict as _defaultdict
+
+_llm_metrics: dict = _defaultdict(lambda: {
+    "calls": 0, "successes": 0, "failures": 0,
+    "retries": 0, "total_time_s": 0.0,
+})
+
+
+def _is_transient_error(e: Exception) -> bool:
+    """Geçici hata mı? Retry mantıklı mı? 
+    
+    TRANSIENT (retry et):
+    - TimeoutError (ağ geçikmesi, LLM yavaş)
+    - ConnectionError / ConnectionResetError (network flicker)
+    - BrokenPipeError / EOFError (bağlantı kesildi)
+    - OSError: connection-related errno'lar
+    
+    PERMANENT (retry ETME, HEMEN fırlat):
+    - ValueError / TypeError / KeyError (kod hatası)
+    - json.JSONDecodeError (bozuk yanıt)
+    - KeyboardInterrupt / SystemExit
+    - MemoryError
+    """
+    # Permanent — asla retry
+    if isinstance(e, (ValueError, TypeError, KeyError, AttributeError,
+                      SyntaxError, ImportError, MemoryError,
+                      KeyboardInterrupt, SystemExit)):
+        return False
+    try:
+        import json as _json
+        if isinstance(e, _json.JSONDecodeError):
+            return False
+    except ImportError:
+        pass
+    # HTTP durum kodları — sadece geçici olanlar
+    try:
+        import requests as _req
+        if isinstance(e, _req.exceptions.HTTPError):
+            resp = getattr(e, 'response', None)
+            status = getattr(resp, 'status_code', 0) if resp else 0
+            return status in (408, 425, 429, 500, 502, 503, 504)
+        if isinstance(e, (_req.exceptions.ConnectionError,
+                          _req.exceptions.Timeout)):
+            return True
+    except ImportError:
+        pass
+    # Transient OS seviyesi
+    return isinstance(e, (TimeoutError, ConnectionError,
+                          ConnectionResetError, BrokenPipeError,
+                          EOFError))
+
+
+def call_with_retry(
+    fn,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 15.0,
+    timeout: float | None = None,
+    label: str = "LLM-call",
+):
+    """fn'yi _run_with_timeout ile sarar ve geçici hatalarda exponential
+    backoff ile yeniden dener.
+    
+    Kullanim:
+        result = call_with_retry(lambda: client.models.generate_content(...))
+    
+    Davranış:
+    - Geçici hata: 3 deneme (1s → 2s → 4s backoff)
+    - Permanent hata: HEMEN fırlat (retry zaman kaybı)
+    - Tüm denemeler başarısız: son hata fırlatılır
+    - Her çağrı metrik kaydı üretir
+    """
+    if timeout is None:
+        timeout = LLM_CALL_TIMEOUT_SECONDS
+    start = _time.monotonic()
+    metrics = _llm_metrics[label]
+    metrics["calls"] += 1
+
+    for attempt in range(max_retries):
+        try:
+            result = _run_with_timeout(fn, timeout=timeout)
+            metrics["successes"] += 1
+            metrics["total_time_s"] += _time.monotonic() - start
+            return result
+        except Exception as e:
+            is_last = attempt == max_retries - 1
+            transient = _is_transient_error(e)
+            
+            if not transient:
+                metrics["failures"] += 1
+                metrics["total_time_s"] += _time.monotonic() - start
+                raise
+            
+            if is_last:
+                metrics["failures"] += 1
+                metrics["total_time_s"] += _time.monotonic() - start
+                print(f"[BaseBrain] {label}: TÜM {max_retries} deneme başarısız.")
+                raise
+            
+            delay = min(base_delay * (2 ** attempt), max_delay)
+            metrics["retries"] += 1
+            err_type = type(e).__name__
+            print(f"[BaseBrain] {label}: deneme {attempt + 1}/{max_retries} "
+                  f"başarısız ({err_type}: {e})")
+            print(f"[BaseBrain] {label}: {delay:.1f}sn sonra yeniden denenecek...")
+            _time.sleep(delay)
+
+
+def get_llm_metrics(label: str | None = None) -> dict:
+    """LLM çağrı metriklerini döndürür. Tümü veya tek etiket için."""
+    if label:
+        return dict(_llm_metrics.get(label, {}))
+    return {k: dict(v) for k, v in _llm_metrics.items()}
+
+
+def reset_llm_metrics():
+    """Metrikleri sıfırla (test/debug için)."""
+    _llm_metrics.clear()
+
+
 def _get_api_key() -> str:
     # Once GEMINI_API_KEY ortam degiskeni, sonra kullanici veri dizinindeki
     # api_keys.json (bkz. jarvis.core.secure_config).
@@ -156,6 +281,74 @@ def _repair_triple_quoted_json(text: str) -> str | None:
         cursor = value_start + close_idx + 3
     parts.append(text[cursor:])
     return "".join(parts)
+
+
+def validate_llm_json(
+    parsed: dict | list,
+    required_keys: list[str] | None = None,
+    max_depth: int = 20,
+    max_string_len: int = 500_000,
+    max_list_len: int = 10_000,
+    max_dict_keys: int = 500,
+) -> tuple[bool, str]:
+    """LLM'den dönen JSON'u doğrular — execute edilmeden ÖNCE kalite kontrolü.
+
+    Kontrol edilenler:
+    - Tip doğruluğu (dict beklenen yerde dict mi?)
+    - Required key'ler var mı?
+    - İç içe derinlik makul mü? (stack overflow koruması)
+    - String uzunluğu makul mü? (OOM koruması)  
+    - Liste/dict boyutu makul mü? (resource koruması)
+    - Null byte / control char sızıntısı var mı? (enjeksiyon koruması)
+    
+    Döner: (basarili: bool, mesaj: str)
+    Başarısızsa mesaj NE bozuk olduğunu açıklar (debug kolaylığı).
+    """
+
+    problems: list[str] = []
+
+    # Type check
+    if required_keys is not None and isinstance(parsed, dict):
+        missing = [k for k in required_keys if k not in parsed]
+        if missing:
+            problems.append(f"Eksik key'ler: {missing}")
+
+    def _walk(obj, depth=0, path="$"):
+        if depth > max_depth:
+            problems.append(f"Derinlik limiti asildi ({depth}): {path}")
+            return
+        if isinstance(obj, dict):
+            if len(obj) > max_dict_keys:
+                problems.append(f"Cok fazla dict key ({len(obj)}): {path}")
+            for k, v in obj.items():
+                ks = str(k)
+                if any(ord(c) < 32 and c not in '\t\n\r' for c in ks):
+                    problems.append(f"Control char in key: {path}.{ks[:50]}")
+                _walk(v, depth + 1, f"{path}.{ks[:30]}")
+        elif isinstance(obj, list):
+            if len(obj) > max_list_len:
+                problems.append(f"Cok uzun liste ({len(obj)}): {path}")
+            for i, v in enumerate(obj[:100]):  # first 100 for speed
+                _walk(v, depth + 1, f"{path}[{i}]")
+        elif isinstance(obj, str):
+            if len(obj) > max_string_len:
+                problems.append(f"Cok uzun string ({len(obj)}): {path}")
+            if "\x00" in obj:
+                problems.append(f"Null byte detected: {path}")
+        elif isinstance(obj, float):
+            import math
+            if math.isnan(obj) or math.isinf(obj):
+                problems.append(f"NaN/Inf value: {path}")
+
+    _walk(parsed)
+
+    if problems:
+        summary = "; ".join(problems[:5])
+        if len(problems) > 5:
+            summary += f" (+{len(problems) - 5} daha)"
+        return False, f"QUALITY GATE RED: {summary}"
+    
+    return True, "Kalite kontrolü gecti."
 
 
 def make_message(from_agent: str, to_agent: str, task: str, payload: dict | None = None,
