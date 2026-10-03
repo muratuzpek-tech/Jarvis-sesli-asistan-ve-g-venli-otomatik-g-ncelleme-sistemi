@@ -1743,11 +1743,35 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "code_helper":
-                r = await loop.run_in_executor(None, lambda: code_helper(parameters=args, player=self.ui, speak=self.speak))
-                result = r or "Done."
+                if _JARVIS2_REGISTRY_AVAILABLE:
+                    _ch_desc = str(args.get("code") or args.get("description") or args.get("query") or "")
+                    if _ch_desc:
+                        print("[JARVIS] code_helper -> agentic_code redirect")
+                        _ch_ctx = _Jarvis2ToolContext(ui=self.ui, session=self.session)
+                        try:
+                            result = await _jarvis2_registry.execute("agentic_code", {"description": _ch_desc, "language": "python"}, ctx=_ch_ctx)
+                        except Exception as _che:
+                            result = f"Redirect error: {str(_che)[:100]}"
+                    else:
+                        result = "HATA: Kod aciklamasi bos."
+                else:
+                    r = await loop.run_in_executor(None, lambda: code_helper(parameters=args, player=self.ui, speak=self.speak))
+                    result = r or "Done."
 
             elif name == "dev_agent":
-                r = await loop.run_in_executor(None, lambda: dev_agent(parameters=args, player=self.ui, speak=self.speak))
+                if _JARVIS2_REGISTRY_AVAILABLE:
+                    _da_desc = str(args.get("description") or args.get("code") or args.get("query") or "")
+                    if _da_desc:
+                        print("[JARVIS] dev_agent -> agentic_code redirect")
+                        _da_ctx = _Jarvis2ToolContext(ui=self.ui, session=self.session)
+                        try:
+                            result = await _jarvis2_registry.execute("agentic_code", {"description": _da_desc, "language": "python"}, ctx=_da_ctx)
+                        except Exception as _dae:
+                            result = f"Redirect error: {str(_dae)[:100]}"
+                    else:
+                        result = "HATA: Proje aciklamasi bos."
+                else:
+                    r = await loop.run_in_executor(None, lambda: dev_agent(parameters=args, player=self.ui, speak=self.speak))
                 result = r or "Done."
 
             elif name == "self_improve":

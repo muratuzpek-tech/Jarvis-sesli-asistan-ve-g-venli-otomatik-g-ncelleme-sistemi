@@ -9,9 +9,11 @@ from tools.registry import registry, ToolContext
 
 @registry.register(
     name="agentic_code",
-    description="Agentic coding: iteratif yaz→çalıştır→test et→düzelt döngüsü. "
-                "Tam çalışan kod üretir (TODO/pass/stub YASAK). "
-                "Max 15 iterasyon. Multi-file proje destekler.",
+    description="YENI PROGRAM YAZ, UYGULAMA YAZ, DOSYA OLUSTUR: KESINLIKLE BU ARACI KULLAN. "
+                "Tam calisan kod uretir, dosyalari diske yazar. "
+                "Yaz→calistir→test et→duzelt dongusu (max 15 iterasyon). "
+                "Multi-file proje destekler. Kod yazma/tasarima/gelistirme/dosya olusturma/icin "
+                "BAŞKA ARAC KULLANMA, mutlaka bu.",
     parameters={
         "type": "OBJECT",
         "properties": {

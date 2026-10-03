@@ -43,7 +43,7 @@ from typing import Any, Callable
 logger = logging.getLogger("tools.developer.agentic")
 
 # ── Sabitler ──────────────────────────────────────────────────
-MAX_ITERATIONS = 15
+MAX_ITERATIONS = 25
 _MAX_OUTPUT_CHARS = 2000
 _RUN_TIMEOUT = 30
 
@@ -62,6 +62,9 @@ class CodingTask:
     language: str = "python"
     project_path: Path = field(default_factory=lambda: Path.cwd())
     files_written: dict[str, str] = field(default_factory=dict)  # rel_path → content
+    last_written_file: str = ""
+    same_file_writes: int = 0
+    expected_files: list[str] = field(default_factory=list)
     iterations: int = 0
     errors: list[str] = field(default_factory=list)
     accepted: bool = False
@@ -96,7 +99,10 @@ HER FONKSİYON ÇALIŞIR KOD İÇERMELİ. `python3 dosya.py` ile HATASIZ çalı�
 ÇOK DOSYALI PROJELER:
 - Her adımda tek dosyanın TAM ve ÇALIŞIR kodunu yaz
 - Dosyalar arası import'ları doğru yaz
-- Tüm dosyalar bitince ACCEPT yap
+- TÜM dosyaları YAZDIĞINDAN EMİN OL!
+- Her dosyayı ayrı ayrı yaz: ana dosya, yardımcı modül, config vb.
+- ANA DOSYAYI (main.py / target_filename) ATLA!
+- Üretilen dosya sayısı = istenen dosya sayısı eşleşmeden ACCEPT yapma.
 
 ÇIKTI FORMATI (SADECE JSON):
 {
@@ -265,7 +271,7 @@ class AgenticCoder:
         try:
             import ollama
             resp = ollama.chat(
-                model="qwen2.5-coder:7b",
+                model=os.environ.get("OLLAMA_CODER_MODEL", "qwen2.5:7b"),
                 messages=[{"role": "user", "content": prompt}],
                 format="json",
                 options={"temperature": 0.2},
@@ -303,9 +309,19 @@ class AgenticCoder:
             description=description,
             language=language,
             project_path=Path(project_path) if project_path
-                else (Path.home() / "Desktop" / "jarvis_code"),
+                else (Path.home() / "jarvis_programs"),
         )
         task.project_path.mkdir(parents=True, exist_ok=True)
+
+        # Auto-parse expected files from description
+        import re as _re
+        _fn_pattern = _re.findall(r"(?:[\w]+\.py|[\w]+\.js|[\w]+\.ts|[\w]+\.html|[\w]+\.css|[\w]+\.json|[\w]+\.txt)", description)
+        task.expected_files = list(dict.fromkeys(_fn_pattern))  # unique, preserve order
+        if target_filename and target_filename not in task.expected_files:
+            task.expected_files.append(target_filename)
+        if not task.expected_files:
+            task.expected_files = [f"main.{language}"]
+        self._ui_progress(f"  [PLAN] Beklenen dosyalar: {task.expected_files}")
 
         steps: list[CodingStep] = []
         last_run_output = ""
@@ -340,10 +356,27 @@ class AgenticCoder:
                 filename = args.get("filename") or target_filename or f"main.{task.language}"
                 content = args.get("content", "")
 
-                if not content:
-                    step.detail = "BOŞ içerik — atlandı"
+                # Same file write tracking + force rotate
+                if filename == task.last_written_file:
+                    task.same_file_writes += 1
+                    if task.same_file_writes >= 3:
+                        task.same_file_writes = 0
+                        # Force next unwritten file
+                        for exp_f in task.expected_files:
+                            if exp_f not in task.files_written:
+                                filename = exp_f
+                                last_error = f"ZORLA ROTATE: {task.last_written_file} dosyasina 3 kez yazdin. Simdi MUTLAKA {filename} yaz."
+                                step.detail = f"ROTATE -> {filename}"
+                                break
+                else:
+                    task.same_file_writes = 0
+                task.last_written_file = filename
+
+                if not content or len(content.strip()) < 100:
+                    step.detail = f"COK KISA kod ({len(content)} char) — en az 50 gerekli, REDDEDILDI"
                     step.success = False
                     steps.append(step)
+                    last_error = f"CONTENT_TOO_SHORT: {len(content)} char kod yazdin. En az 200 karakter dolu, calisan kod yaz."
                     continue
 
                 valid, val_msg = _validate_code(content, task.language)
@@ -465,7 +498,17 @@ class AgenticCoder:
         if last_error:
             parts.append(f"\n## HATA:\n{last_error}")
 
-        parts.append("\n## ŞİMDİ NE YAPMALISIN?")
+        _missing = [f for f in task.expected_files if f not in task.files_written]
+        _written_names = list(task.files_written.keys())
+        parts.append("\n## DOSYA PLANI (TUMU yazilmali!)")
+        parts.append(f"  Yazilan: {_written_names if _written_names else 'hicbir sey yok'}")
+        parts.append(f"  EKSIK: {_missing if _missing else 'tumu yazildi!'}")
+        if _missing:
+            parts.append(f"  -> SIMDI MUTLAKA {_missing[0]} dosyasini yaz. AYNI dosyaya tekrar yazma!")
+            parts.append("  -> TUM dosyalar bitmeden ACCEPT yapma!")
+        else:
+            parts.append("  -> Tum dosyalar yazildi. Run et, test et, sonra ACCEPT.")
+        parts.append("\n## SIMDI NE YAPMALISIN?")
         if not task.files_written:
             parts.append("→ İlk dosyayı yaz (action: write)")
         elif last_error:
