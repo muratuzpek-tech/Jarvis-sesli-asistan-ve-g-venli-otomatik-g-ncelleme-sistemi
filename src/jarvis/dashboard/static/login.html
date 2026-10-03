@@ -139,11 +139,11 @@
     <p id="reconnecting">Reconnecting…</p>
     <p class="hint">Press <strong style="color:var(--text)">Remote Control</strong> in the JARVIS desktop app to get a QR code or session key.</p>
     <div class="key-wrap">
-      <input class="key-input" id="key" type="text" maxlength="6"
+      <input class="key-input" role="textbox" aria-label="Login key (8 characters)" maxlength="8" autocapitalize="characters" spellcheck="false" id="key" type="text" maxlength="6"
              autocomplete="off" autocorrect="off" spellcheck="false"
-             placeholder="· · · · · ·">
+             placeholder="· · · · · · · ·">
     </div>
-    <div class="err" id="err"></div>
+    <div class="err" id="err" role="alert" aria-live="polite"></div>
     <button class="btn" onclick="doLogin()">CONNECT</button>
     <p class="voice-note">
       🎤 <strong style="color:var(--text)">Voice commands:</strong> open
@@ -188,7 +188,7 @@
 
     async function doLogin() {
       const key = inp.value.trim();
-      if (key.length < 6) { shake(); return; }
+      if (key.length < 8) { shake(); return; }
       let data;
       try {
         const r = await fetch('/login', {

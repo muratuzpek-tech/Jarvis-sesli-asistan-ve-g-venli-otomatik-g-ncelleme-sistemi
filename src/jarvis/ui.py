@@ -1610,6 +1610,22 @@ class MainWindow(QMainWindow):
         sc_intr = QShortcut(QKeySequence("Escape"), self)
         sc_intr.activated.connect(self._do_interrupt)
         sc_remote = QShortcut(QKeySequence("F6"), self)
+        # ── UI FIX: Keyboard shortcut yardimi (Ctrl+F1) ──────────────
+        sc_help = QShortcut(QKeySequence("Ctrl+F1"), self)
+        sc_help.activated.connect(self._show_shortcut_help)
+
+    def _show_shortcut_help(self):
+        """Klavye kisayol yardim overlayi — kullanici hangi tusun ne yaptigini ogrenir."""
+        shortcuts_text = (
+            "⌨️  KLAVYE KISAYOLLARI\n"
+            "\n"
+            "  F4          Mikrofon ac/kapa (mute)\n"
+            "  F6          Uzak baglanti penceresi\n"
+            "  F11         Tam ekran ac/kapa\n"
+            "  Escape      Kes/interrupt (aktif konusma)\n"
+            "  Ctrl+F1     Bu yardim penceresi\n"
+        )
+        self._log.append_log("SYS: " + shortcuts_text.replace("\n", " | "))
         sc_remote.activated.connect(self._open_remote)
 
     def _pill(self, text: str, color: str = C.PRI) -> QLabel:
