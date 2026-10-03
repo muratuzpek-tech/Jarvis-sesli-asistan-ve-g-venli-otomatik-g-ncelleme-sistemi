@@ -89,6 +89,39 @@ def _decrypt_cbc(aes_key: bytes, enc_b64: str) -> str:
     unpadder = sym_pad.PKCS7(128).unpadder()
     return (unpadder.update(padded) + unpadder.finalize()).decode('utf-8')
 
+def _encrypt_gcm(aes_key: bytes, plaintext: str) -> str:
+    """Encrypt with AES-256-GCM (AEAD). Format: base64(nonce[12] | tag[16] | ciphertext)."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    import os as _os
+    nonce = _os.urandom(12)
+    ct    = AESGCM(aes_key).encrypt(nonce, plaintext.encode('utf-8'), None)
+    # AESGCM.encrypt() returns ciphertext || tag (tag = last 16 bytes)
+    return base64.b64encode(nonce + ct).decode('ascii')
+
+
+def _decrypt_gcm(aes_key: bytes, enc_b64: str) -> str:
+    """Decrypt base64(nonce[12] | tag[16] | ciphertext) with AES-256-GCM (AEAD).
+    
+    AEAD: sifreleme ve dogrulama tek adimda - padding oracle mumkun degil.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    raw   = base64.b64decode(enc_b64)
+    nonce = raw[:12]
+    ct    = raw[12:]  # includes 16-byte GCM tag at end
+    return AESGCM(aes_key).decrypt(nonce, ct, None).decode('utf-8')
+
+
+def _decrypt_auto(aes_key: bytes, enc_b64: str) -> str:
+    """Auto-detect GCM vs CBC and decrypt accordingly.
+    
+    GCM first (authenticated), CBC fallback for older clients.
+    """
+    try:
+        return _decrypt_gcm(aes_key, enc_b64)
+    except Exception:
+        pass  # not GCM - try legacy CBC
+    return _decrypt_cbc(aes_key, enc_b64)
+
 
 # ── CryptoJS (served locally only) ────────────────────────────────────────────
 _CRYPTOJS_FILE = STATIC_DIR / "crypto-js.min.js"
@@ -407,7 +440,7 @@ class DashboardServer:
     def new_key(self, expiry_secs: int = 600) -> str:
         now = time.time()
         self._pending_keys = {k: v for k, v in self._pending_keys.items() if v > now}
-        key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(6))
+        key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(8))
         self._pending_keys[key] = now + expiry_secs
         return key
 
@@ -436,7 +469,7 @@ class DashboardServer:
         if not sk:
             return None
         try:
-            return _decrypt_cbc(self._aes_key(sk), enc_b64)
+            return _decrypt_auto(self._aes_key(sk), enc_b64)
         except Exception:
             return None
 
