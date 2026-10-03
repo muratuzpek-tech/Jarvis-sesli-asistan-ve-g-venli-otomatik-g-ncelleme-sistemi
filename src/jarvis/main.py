@@ -2234,6 +2234,7 @@ class JarvisLive:
                 pass
 
             try:
+                _silent_ticks = 0
                 while True:
                     try:
                         chunk = await asyncio.wait_for(
@@ -2241,6 +2242,25 @@ class JarvisLive:
                             timeout=0.1
                         )
                     except TimeoutError:
+                        _silent_ticks += 1
+                        # WATCHDOG (30 x 0.1s = 3s):
+                        # speaking=True takili veya _interrupted=True takili
+                        # kalmissa (WS drop → turn_done hic gelmemis olabilir)
+                        # oto-düzelt ki mic yeniden acilsin.
+                        if _silent_ticks >= 30:
+                            with self._speaking_lock:
+                                _sp = self._is_speaking
+                            if _sp:
+                                print("[AUDIO_DIAG] ⏰ Speaking watchdog: 3s sessizlik → mic acildi")
+                                self.set_speaking(False)
+                                try:
+                                    self.ui.set_voice_volume(0.0)
+                                except Exception:
+                                    pass
+                            if self._interrupted:
+                                self._interrupted = False
+                                print("[AUDIO_DIAG] ⏰ _interrupted auto-cleared (stale)")
+                            _silent_ticks = 0
                         if (
                             self._turn_done_event
                             and self._turn_done_event.is_set()
@@ -2253,6 +2273,7 @@ class JarvisLive:
                                 pass
                             self._turn_done_event.clear()
                         continue
+                    _silent_ticks = 0
                     self.set_speaking(True)
                     try:
                         await asyncio.to_thread(stream.write, chunk)
