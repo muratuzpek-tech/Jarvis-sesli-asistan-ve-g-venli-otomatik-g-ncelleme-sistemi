@@ -224,8 +224,10 @@ def analyze_sentiment(text: str) -> SentimentResult:
         mood = "angry"
     elif anx_hits and len(anx_hits) >= max(len(sad_hits), len(ang_hits)):
         mood = "anxious"
-    elif exc_hits or (pos_hits and raw_score > 0.3):
-        mood = "excited" if (exc_hits or raw_score > 0.5) else "happy"
+    elif exc_hits:
+        mood = "excited"
+    elif pos_hits and raw_score > 0.3:
+        mood = "happy"
     elif calm_hits and len(calm_hits) > len(pos_hits):
         mood = "calm"
     elif raw_score > 0.1:
