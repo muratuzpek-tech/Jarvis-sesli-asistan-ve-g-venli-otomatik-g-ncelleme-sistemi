@@ -487,6 +487,28 @@ class DashboardServer:
     def _build_app(self) -> "FastAPI":
         app = FastAPI(docs_url=None, redoc_url=None)
 
+        # ── GUVENLIK: Security Headers (her tum yanita eklenir) ──────
+        @app.middleware("http")
+        async def _security_headers(request, call_next):
+            response = await call_next(request)
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("X-Frame-Options", "DENY")
+            response.headers.setdefault("X-XSS-Protection", "0")
+            # Token URL query param'da oldugunda bile Referer ile sizmasin
+            response.headers.setdefault("Referrer-Policy", "no-referrer")
+            response.headers.setdefault(
+                "Content-Security-Policy",
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                "connect-src 'self' wss: ws:; frame-ancestors 'none'",
+            )
+            if self._ssl_enabled():
+                response.headers.setdefault(
+                    "Strict-Transport-Security",
+                    "max-age=31536000; includeSubDomains",
+                )
+            return response
+
         def _auth(req: Request) -> bool:
             auth = req.headers.get("authorization", "").strip()
             if not auth.lower().startswith("bearer "):
@@ -827,11 +849,35 @@ class DashboardServer:
 
         @app.get("/uploads/{filename}")
         async def download_file(filename: str, token: str = ""):
-            # Auth via query param — browser <a download> can't send custom headers
+            # Geriye donuk uyumluluk: query param token hala calisir.
+            # Referrer-Policy: no-referrer sayesinde Referer header'dan sizmaz.
+            # YENI: POST /api/download endpoint de token icin daha guvenli.
             tok = token.strip()
             if not self._valid_token(tok):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
             safe = _safe_filename(filename)
+            if safe is None:
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            root = self._uploads_dir.resolve()
+            raw_path = root / safe
+            path = raw_path.resolve()
+            if (raw_path.is_symlink() or path.parent != root
+                    or root not in path.parents or not path.is_file()):
+                return JSONResponse({"error": "Not found"}, status_code=404)
+            return FileResponse(str(path), filename=safe)
+
+        @app.post("/api/download")
+        async def download_file_post(req: Request):
+            # GUVENLIK: Token body icinde tasinir — URL'de gorunmez.
+            # Frontend bu endpoint'i fetch() + blob download ile kullanir.
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"error": "Bad request"}, status_code=400)
+            fname = str(body.get("filename", "")).strip()
+            safe = _safe_filename(fname)
             if safe is None:
                 return JSONResponse({"error": "Not found"}, status_code=404)
             root = self._uploads_dir.resolve()
