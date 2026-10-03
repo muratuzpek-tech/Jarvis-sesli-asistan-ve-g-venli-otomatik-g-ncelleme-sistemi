@@ -238,7 +238,13 @@ def _save_file(path: Path, content: str) -> str:
         log_action(module="code_helper", action="save_file",
                    detail=f"path={path} backup_id={bm_result['backup_id']}",
                    risk="medium", result="SUCCESS")
-        return f"Saved to: {path}{backup_note}"
+        _post = []
+        _ed = _open_in_editor(path)
+        if _ed: _post.append(_ed)
+        _rn = _try_run_simple(path)
+        if _rn: _post.append(_rn)
+        _extra = ("\n" + "\n".join(_post)) if _post else ""
+        return f"Saved to: {path}{backup_note}{_extra}"
     except Exception as e:
         log_action(module="code_helper", action="save_file",
                    detail=f"path={path} err={e}", risk="medium", result="FAILED")
@@ -246,7 +252,7 @@ def _save_file(path: Path, content: str) -> str:
         return f"Could not save: {e}"
 
 
-def _preview(code: str, lines: int = 10) -> str:
+def _preview(code: str, lines: int = 25) -> str:
     all_lines = code.splitlines()
     preview   = "\n".join(all_lines[:lines])
     suffix    = f"\n... ({len(all_lines) - lines} more lines)" if len(all_lines) > lines else ""
@@ -315,6 +321,64 @@ def _detect_intent(description: str, file_path: str, code: str) -> str:
         return "build"
 
     return "write"
+
+def _open_in_editor(path: Path) -> str:
+    """Yazilan dosyayi varsayilan uygulamayla ac."""
+    import subprocess, shutil
+    cmd = shutil.which("xdg-open") or shutil.which("open")
+    if not cmd:
+        return ""
+    try:
+        subprocess.Popen([cmd, str(path)],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        return f"[EDITOR] {path.name} acildi"
+    except Exception:
+        return ""
+
+
+def _try_run_simple(path: Path) -> str:
+    """Guvenli basit CLI scriptlerini calistir ve ciktisi goster."""
+    import subprocess, ast, sys
+    if path.suffix != ".py":
+        return ""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+
+    GUARD = {"tkinter","PyQt5","PySide6","pygame","kivy","turtle",
+             "flask","django","fastapi","http","socketserver",
+             "subprocess","ctypes","socket","requests","urllib"}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(a.name.split(".")[0] in GUARD for a in node.names):
+                return "[GUVENLIK] Agir kutuphane - elle calistirin"
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.split(".")[0] in GUARD:
+                return "[GUVENLIK] Agir kutuphane - elle calistirin"
+        if isinstance(node, ast.Call):
+            fn = getattr(node.func, "id", "") or getattr(node.func, "attr", "")
+            if fn in ("exec", "eval", "system", "popen", "execv", "input"):
+                return f"[ELLE] Tehlikeli/interaktif ({fn}) - elle calistirin"
+
+    try:
+        r = subprocess.run([sys.executable, str(path)],
+                           capture_output=True, text=True,
+                           timeout=10, cwd=str(path.parent))
+        out = r.stdout.strip()
+        if r.returncode == 0 and out:
+            cap = out[:800] + ("... (devam)" if len(out) > 800 else "")
+            return f">> CALISTI! Cikti:\n{cap}"
+        if r.stderr:
+            return f"HATA: {r.stderr.strip()[:300]}"
+        return ">> Calisti (cikti bos)"
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT: 10sn asildi"
+    except Exception as e:
+        return f"(calistirma hatasi: {e})"
+
 
 def _write(description: str, language: str, output_path: str, player=None) -> tuple[str, Path]:
     lang  = language or "python"
@@ -460,7 +524,7 @@ def _write_action(description, language, output_path, player) -> str:
     try:
         code, path = _write(description, language, output_path, player)
         print(f"[Code] ✅ Written: {path}")
-        return f"Code written. Saved to: {path}\n\nPreview:\n{_preview(code)}"
+        return f"Code written. Saved to: {path}\n\nKOD INCELEME (ilk 25 satir):\n{_preview(code)}"
     except Exception as e:
         return f"Could not generate code: {e}"
 
