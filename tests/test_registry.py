@@ -25,7 +25,7 @@ def test_duplicate_registration_warns():
     @register(name="_pytest_dup", description="b", parameters={}, security="normal", category="test")
     def _b(args, ctx): return "b"
     entry = registry.get("_pytest_dup")
-    assert entry.handler.__qualname__ == "_b"
+    assert entry.handler.__qualname__.endswith("_b")
 
 def test_disable_enable():
     @register(name="_pytest_toggle", description="t", parameters={}, security="normal", category="test")
