@@ -94,15 +94,56 @@ def _get_gemini_breaker():
 
 
 def _clean_code(text: str) -> str:
-    """Markdown icindeki kod bloklarini dogru sekilde cikarir."""
+    """Markdown icindeki kod bloklarini dogru sekilde cikarir.
+
+    Gorsel LLM'ler (Gemini, Ollama) farkli markdown formatlari
+    uretebilir.  Bu fonksiyon tum varyasyonlari yakalar:
+
+    ```python
+    code
+    ```
+    ```python
+    code
+    ```
+    veya aciklama metni arasinda sikismis bloklar.
+    """
     text = text.strip()
-    # Tum kod bloklarini bul (orn: ```python\n...\n```)
-    blocks = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
+    # 1. Tur: Standart ``` fences (dil etiketi opsiyonel, bosluk toleransli)
+    blocks = re.findall(
+        r"```\s*(?:\w+)?\s*\n(.*?)\s*```",
+        text, re.DOTALL,
+    )
     if blocks:
-        return "\n".join(b.strip() for b in blocks)
-    # Fallback: cevreleyen fence'leri temizle
-    text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-    text = re.sub(r"\n?```$", "", text)
+        return "\n".join(b.strip() for b in blocks if b.strip())
+
+    # 2. Tur: Dil etiketi VAR ama \n SONRA boşluk/tablo geciriyor
+    blocks = re.findall(
+        r"```\s*[a-zA-Z0-9_+-]*\s+(.*?)(?=```|$)",
+        text, re.DOTALL,
+    )
+    if blocks:
+        cleaned = [b.strip() for b in blocks if b.strip() and not b.strip().startswith("-")]
+        if cleaned:
+            return "\n".join(cleaned)
+
+    # 3. Tur: Fence icermiyor → markdown bullet/bold'li metinden
+    # gercek kod satirlarini cikar
+    code_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        # Markdown format belirteclerini temizle
+        if stripped.startswith(("```", "**", "- ", "* ", "# ", "> ")):
+            continue
+        if stripped.startswith(("\n", "|")):
+            continue
+        code_lines.append(line)
+
+    if code_lines:
+        return "\n".join(code_lines).strip()
+
+    # 4. Tur: Son care — eskisi gibi sadece cevreleyen fence'leri temizle
+    text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
     return text.strip()
 
 
@@ -366,6 +407,7 @@ def _try_run_simple(path: Path) -> str:
     try:
         r = subprocess.run([sys.executable, str(path)],
                            capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL,
                            timeout=10, cwd=str(path.parent))
         out = r.stdout.strip()
         if r.returncode == 0 and out:
@@ -442,6 +484,7 @@ def _run_file(path: Path, args: list, timeout: int) -> str:
         result = subprocess.run(
             interp + [str(path)] + (args or []),
             capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
             encoding="utf-8", errors="replace",
             timeout=timeout, cwd=str(path.parent)
         )

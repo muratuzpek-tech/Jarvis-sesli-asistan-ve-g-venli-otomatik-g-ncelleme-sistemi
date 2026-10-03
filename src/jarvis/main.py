@@ -1506,7 +1506,7 @@ class JarvisLive:
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": TOOL_DECLARATIONS}],
             max_output_tokens=16384,
-            session_resumption=types.SessionResumptionConfig(),
+            session_resumption=types.SessionResumptionConfig() if _first_connect else None,
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -2610,6 +2610,7 @@ class JarvisLive:
         else:
             self._dashboard = None
 
+        _first_connect = True
         while True:
             try:
                 print("[JARVIS] Connecting...")
@@ -2638,6 +2639,7 @@ class JarvisLive:
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+                    _first_connect             = False
 
                     print("[JARVIS] Connected.")
                     self.ui.set_state("LISTENING")
