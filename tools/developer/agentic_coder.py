@@ -65,6 +65,8 @@ class CodingTask:
     last_written_file: str = ""
     same_file_writes: int = 0
     expected_files: list[str] = field(default_factory=list)
+    last_content_hash: str = ""
+    stuck_count: int = 0
     iterations: int = 0
     errors: list[str] = field(default_factory=list)
     accepted: bool = False
@@ -391,6 +393,20 @@ class AgenticCoder:
                 fpath = task.project_path / filename
                 fpath.parent.mkdir(parents=True, exist_ok=True)
                 fpath.write_text(content, encoding="utf-8")
+                # Stuck detection: same content repeatedly
+                _ch = str(hash(content))[:8]
+                if _ch == task.last_content_hash:
+                    task.stuck_count += 1
+                    if task.stuck_count >= 3:
+                        last_error = f"STUCK: Ayni kodu 3 kez urettin! DAHA FAZLA KOD, daha detayli yaz. {filename} icin en az 300 karakter dolu fonksiyon yaz."
+                        step.detail = f"🔄 STUCK ({task.stuck_count}x ayni icerik) — DETAYLI yazmalisin"
+                        step.success = False
+                        steps.append(step)
+                        continue
+                else:
+                    task.stuck_count = 0
+                task.last_content_hash = _ch
+
                 task.files_written[filename] = content
                 step.detail = f"📝 {filename} ({len(content)} chars)"
                 step.success = True
@@ -403,6 +419,9 @@ class AgenticCoder:
                 if cmd_target:
                     fpath = task.project_path / cmd_target.split()[-1]
                     if fpath.exists():
+                        _fsz = fpath.stat().st_size
+                        if _fsz < 200:
+                            last_error = f"KUCUK DOSYA: {fpath.name} sadece {_fsz} bytes. Daha fazla kod yaz — fonksiyonlar, class, mantik ekle!"
                         last_run_output = _run_file(fpath)
                         last_error = ""
                         step.detail = last_run_output[:200]

@@ -1772,7 +1772,7 @@ class JarvisLive:
                         result = "HATA: Proje aciklamasi bos."
                 else:
                     r = await loop.run_in_executor(None, lambda: dev_agent(parameters=args, player=self.ui, speak=self.speak))
-                result = r or "Done."
+                    result = r or "Done."
 
             elif name == "self_improve":
                 r = await loop.run_in_executor(None, lambda: self_improve(parameters=args, player=self.ui))
