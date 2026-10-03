@@ -147,11 +147,24 @@ def analyze_sentiment(text: str) -> SentimentResult:
     lower = text.lower()
     words = set(re.findall(r"[a-zçğıöşü]+", lower))
 
-    pos_hits  = words & _POSITIVE_WORDS
-    sad_hits  = words & _NEGATIVE_SAD
-    ang_hits  = words & _NEGATIVE_ANGRY
-    anx_hits  = words & _NEGATIVE_ANXIOUS
-    calm_hits = words & _CALM_WORDS
+    # Exact match + substring match (Türkçe ek nedeniyle kelime bölünüyor)
+    def _match_set(words: set, lexicon: set) -> set:
+        hits = set()
+        for w in words:
+            if w in lexicon:
+                hits.add(w)
+            else:
+                for lw in lexicon:
+                    if lw in w or w in lw:
+                        hits.add(lw)
+                        break
+        return hits
+
+    pos_hits  = _match_set(words, _POSITIVE_WORDS)
+    sad_hits  = _match_set(words, _NEGATIVE_SAD)
+    ang_hits  = _match_set(words, _NEGATIVE_ANGRY)
+    anx_hits  = _match_set(words, _NEGATIVE_ANXIOUS)
+    calm_hits = _match_set(words, _CALM_WORDS)
 
     # Skor hesaplama
     pos_score = len(pos_hits) * 0.3

@@ -50,6 +50,9 @@ def clean_music_query(text: str) -> str:
     cleaned = text.strip()
     for p in patterns:
         cleaned = re.sub(p, "", cleaned, flags=re.IGNORECASE)
+    # Artifact temizliği: kalan tek harf/suffix parçaları ("yı", "yı ", "n" vb.)
+    cleaned = re.sub(r"\b[ytnnmkslr]\w{0,1}\b", "", cleaned)  # tek-iki harfli artıklar
+    cleaned = re.sub(r"\s+", " ", cleaned)  # çoklu boşluk
     return cleaned.strip()
 
 
