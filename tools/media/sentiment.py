@@ -147,15 +147,24 @@ def analyze_sentiment(text: str) -> SentimentResult:
     lower = text.lower()
     words = set(re.findall(r"[a-zçğıöşü]+", lower))
 
-    # Exact match + substring match (Türkçe ek nedeniyle kelime bölünüyor)
+    # Exact match + SAFE substring match (Türkçe ek nedeniyle kelime bölünüyor)
+    # HIGH FIX: "w in lw" yönü KALDIRILDI — "çok" → "bugün çok berbat" gibi
+    # FALSE POSITIVE'ları engeller. Sadece "lw in w" (suffix tolerance) kalır.
+    # Ek olarak: minimum 3 harf gerektir (tek-iki harfli ortak kelimeler dışarıda)
     def _match_set(words: set, lexicon: set) -> set:
         hits = set()
         for w in words:
+            if len(w) < 3:
+                continue  # Çok kısa kelimeler: "o", "ve", "çok" hariç tut
             if w in lexicon:
                 hits.add(w)
             else:
                 for lw in lexicon:
-                    if lw in w or w in lw:
+                    # SADECE lexicon word input word'ün suffix'inde ise (Türkçe ek)
+                    # Örnek: "heyecanlıyım" içinde "heyecanlı" ✓
+                    # "mutluyum" içinde "mutlu" ✓
+                    # "çok" içinde "bugün çok berbat" ✗ (engellendi!)
+                    if len(lw) >= 3 and lw in w:
                         hits.add(lw)
                         break
         return hits
@@ -165,6 +174,17 @@ def analyze_sentiment(text: str) -> SentimentResult:
     ang_hits  = _match_set(words, _NEGATIVE_ANGRY)
     anx_hits  = _match_set(words, _NEGATIVE_ANXIOUS)
     calm_hits = _match_set(words, _CALM_WORDS)
+
+    # Negation support: "hiç mutlu değilim", "sinirli değilim"
+    negation_markers = {"değil", "yok", "hiç", "asla", "olmadım", "olmaz", "olmuyor"}
+    is_negated = bool(words & negation_markers) or "değil" in lower or "yok" in lower
+    
+    if is_negated:
+        # Negated → swap polarity
+        pos_hits, neg_hits_tmp = set(), pos_hits
+        # (mutlu değilim → negative sentiment, not positive)
+        if neg_hits_tmp and not (sad_hits | ang_hits | anx_hits):
+            sad_hits = neg_hits_tmp  # negate positive → treat as sad/negative
 
     # Skor hesaplama
     pos_score = len(pos_hits) * 0.3

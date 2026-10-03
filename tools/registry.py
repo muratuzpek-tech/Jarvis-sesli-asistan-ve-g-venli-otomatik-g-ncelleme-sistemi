@@ -127,6 +127,13 @@ class ToolRegistry:
             security = sec_map.get(security.lower(), SecurityLevel.NORMAL)
 
         def _add(fn: Callable) -> Callable:
+            # HIGH FIX: Duplicate registration warn
+            if name in self._tools:
+                logger.warning(
+                    f"[Registry] ⚠️ DUPLICATE: '{name}' yeniden kaydediliyor "
+                    f"(eski: {self._tools[name].handler.__module__}.{self._tools[name].handler.__qualname__} → "
+                    f"yeni: {fn.__module__}.{fn.__qualname__})"
+                )
             self._tools[name] = ToolEntry(
                 name=name,
                 description=description,
@@ -166,6 +173,15 @@ class ToolRegistry:
         Returns:
             str: Sonuç mesajı (her zaman string)
         """
+        # CRITICAL FIX: None args guard
+        if args is None:
+            args = {}
+        if not isinstance(args, dict):
+            return f"Invalid arguments: expected dict, got {type(args).__name__}"
+
+        # HIGH FIX: Type coercion — tüm string parametreleri zorla str
+        args = {k: str(v) if isinstance(v, (int, float)) else v for k, v in args.items()}
+
         entry = self._tools.get(name)
         if not entry:
             return f"Unknown tool: '{name}'"

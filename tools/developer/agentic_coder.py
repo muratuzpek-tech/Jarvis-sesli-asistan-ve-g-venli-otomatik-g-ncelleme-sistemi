@@ -234,18 +234,32 @@ class AgenticCoder:
         Varsayılan LLM: Gemini API.
         Kullanılamazsa Ollama fallback.
         """
-        # 1. Gemini dene
-        try:
-            from google import genai
-            from google.genai import types
-            client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
-            resp = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt,
-            )
-            return resp.text or ""
-        except Exception as e:
-            logger.warning(f"[Coder] Gemini yok ({type(e).__name__}) → Ollama")
+        # 1. Gemini dene (CRITICAL FIX: API key kontrolü ÖNCE, client leak önleme)
+        api_key = os.environ.get("GEMINI_API_KEY", "")
+        if not api_key:
+            logger.info("[Coder] GEMINI_API_KEY yok → Ollama")
+        else:
+            try:
+                from google import genai
+                client = genai.Client(api_key=api_key)
+                try:
+                    resp = client.models.generate_content(
+                        model="gemini-2.0-flash",
+                        contents=prompt,
+                    )
+                    return resp.text or ""
+                finally:
+                    # CRITICAL FIX: Client async resource leak prevention
+                    try:
+                        if hasattr(client, '_async_httpx_client'):
+                            import asyncio as _aio
+                            _aio.get_event_loop().run_until_complete(
+                                client._async_httpx_client.aclose()
+                            )
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"[Coder] Gemini hatası ({type(e).__name__}) → Ollama")
 
         # 2. Ollama fallback
         try:
@@ -297,6 +311,7 @@ class AgenticCoder:
         last_run_output = ""
         last_error = ""
 
+        description = str(description)  # HIGH FIX: type coercion
         self._ui_progress(f"🔨 Agentic coding başlıyor: {description[:60]}")
 
         for i in range(self._max):
