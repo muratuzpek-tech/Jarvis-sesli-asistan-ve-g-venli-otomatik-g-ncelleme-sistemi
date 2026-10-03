@@ -1590,6 +1590,7 @@ class JarvisLive:
         print(f"[JARVIS] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
 
+        r = None  # UnboundLocalError guard
         if name == "save_memory":
             category = args.get("category", "notes")
             key      = args.get("key", "")
