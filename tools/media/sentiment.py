@@ -75,6 +75,24 @@ _CALM_WORDS = {
     "meditasyon", "nefes", "yavaş", "yumşak", "lo-fi",
 }
 
+# Excited indicator → happy değil excited sayılır
+_EXCITED_WORDS = {
+    "heyecanlı", "heyecan", "coşkulu", "enerjik", "dinamik",
+    "tutkulu", "aşık", "aday", "adrenal",
+}
+
+# Multi-word phrase'ler → METIN seviyesinde match edilmeli
+_SAD_PHRASES = {
+    "moralim bozuk", "kendimi kötü", "bunalımda", "boşluktayım",
+    "hissediyorum üzgün", "çok üzgün", "kötü hissediyorum",
+}
+_ANGRY_PHRASES = {
+    "yeter artık", "çok berbat", "çok sinirli", "delireceğim",
+}
+_POSITIVE_PHRASES = {
+    "çok mutlu", "çok güzel", "çok iyi", "çok harika", "çok süper",
+}
+
 
 # ── Duygu → Müzik Eşlemesi (Boran'dan + genişletilmiş) ────────
 
@@ -147,33 +165,37 @@ def analyze_sentiment(text: str) -> SentimentResult:
     lower = text.lower()
     words = set(re.findall(r"[a-zçğıöşü]+", lower))
 
-    # Exact match + SAFE substring match (Türkçe ek nedeniyle kelime bölünüyor)
-    # HIGH FIX: "w in lw" yönü KALDIRILDI — "çok" → "bugün çok berbat" gibi
-    # FALSE POSITIVE'ları engeller. Sadece "lw in w" (suffix tolerance) kalır.
-    # Ek olarak: minimum 3 harf gerektir (tek-iki harfli ortak kelimeler dışarıda)
+    # Phrase matching: multi-word lexicon entries → text'te ARA
+    def _match_phrases(text: str, phrase_set: set) -> set:
+        hits = set()
+        lower_text = text.lower()
+        for phrase in phrase_set:
+            if phrase in lower_text:
+                hits.add(phrase)
+        return hits
+
+    # Exact match + SAFE substring match (Türkçe ek toleranslı)
     def _match_set(words: set, lexicon: set) -> set:
         hits = set()
         for w in words:
             if len(w) < 3:
-                continue  # Çok kısa kelimeler: "o", "ve", "çok" hariç tut
+                continue
             if w in lexicon:
                 hits.add(w)
             else:
                 for lw in lexicon:
-                    # SADECE lexicon word input word'ün suffix'inde ise (Türkçe ek)
-                    # Örnek: "heyecanlıyım" içinde "heyecanlı" ✓
-                    # "mutluyum" içinde "mutlu" ✓
-                    # "çok" içinde "bugün çok berbat" ✗ (engellendi!)
                     if len(lw) >= 3 and lw in w:
                         hits.add(lw)
                         break
         return hits
 
-    pos_hits  = _match_set(words, _POSITIVE_WORDS)
-    sad_hits  = _match_set(words, _NEGATIVE_SAD)
-    ang_hits  = _match_set(words, _NEGATIVE_ANGRY)
+    # Word-level + phrase-level matching
+    pos_hits  = _match_set(words, _POSITIVE_WORDS) | _match_phrases(lower, _POSITIVE_PHRASES)
+    sad_hits  = _match_set(words, _NEGATIVE_SAD) | _match_phrases(lower, _SAD_PHRASES)
+    ang_hits  = _match_set(words, _NEGATIVE_ANGRY) | _match_phrases(lower, _ANGRY_PHRASES)
     anx_hits  = _match_set(words, _NEGATIVE_ANXIOUS)
     calm_hits = _match_set(words, _CALM_WORDS)
+    exc_hits  = _match_set(words, _EXCITED_WORDS)
 
     # Negation support: "hiç mutlu değilim", "sinirli değilim"
     negation_markers = {"değil", "yok", "hiç", "asla", "olmadım", "olmaz", "olmuyor"}
@@ -202,8 +224,8 @@ def analyze_sentiment(text: str) -> SentimentResult:
         mood = "angry"
     elif anx_hits and len(anx_hits) >= max(len(sad_hits), len(ang_hits)):
         mood = "anxious"
-    elif pos_hits and raw_score > 0.3:
-        mood = "excited" if raw_score > 0.6 else "happy"
+    elif exc_hits or (pos_hits and raw_score > 0.3):
+        mood = "excited" if (exc_hits or raw_score > 0.5) else "happy"
     elif calm_hits and len(calm_hits) > len(pos_hits):
         mood = "calm"
     elif raw_score > 0.1:
