@@ -508,6 +508,13 @@ class AgenticCoder:
             parts.append("  -> TUM dosyalar bitmeden ACCEPT yapma!")
         else:
             parts.append("  -> Tum dosyalar yazildi. Run et, test et, sonra ACCEPT.")
+        _wr = list(task.files_written.keys())
+        if _wr:
+            _lc = task.files_written[_wr[-1]]
+            parts.append(_lc[:300])
+            parts.append('ONCEKI DOSYA YUKARIDA. AYNISINI TEKRAR YAZMA!')
+            parts.append('models.py=sadece sinif/dataclass. storage.py=dosya I/O JSON. cli.py=input/print/menu. analyzer.py=hesaplama/rapor. main.py=import+baglama')
+            parts.append('SIMDI MUTLAKA FARKLI dosya yaz.')
         parts.append("\n## SIMDI NE YAPMALISIN?")
         if not task.files_written:
             parts.append("→ İlk dosyayı yaz (action: write)")
