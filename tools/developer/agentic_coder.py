@@ -71,6 +71,7 @@ class CodingTask:
     stuck_count: int = 0
     iterations: int = 0
     errors: list[str] = field(default_factory=list)
+    rewrite_counts: dict = field(default_factory=dict)
     accepted: bool = False
     final_response: str = ""
 
@@ -355,7 +356,32 @@ class AgenticCoder:
 
             step = CodingStep(step_num=i + 1, thought=thought, action=action)
 
+            # ═══ SMART EXIT: tum dosyalar yazildi + compile temiz → accept ═══
+            _all_clean = len(task.files_written) >= 3
+            if _all_clean:
+                for _fn, _fc in task.files_written.items():
+                    try:
+                        compile(_fc, _fn, "exec")
+                    except SyntaxError:
+                        _all_clean = False
+                        break
+            if _all_clean and task.iterations >= 3:
+                task.accepted = True
+                task.final_response = f"Tum dosyalar yazildi ve temiz: {sorted(task.files_written.keys())}"
+                steps.append(CodingStep(step_num=i+1, thought="auto-accept: all files valid", action="accept", detail="SMART_EXIT", success=True))
+                break
+
+
             # ── ACTION: write / fix ────────────────────────────
+            if action in ("write", "fix"):
+                _fn_target = args.get("filename", "")
+                if _fn_target:
+                    task.rewrite_counts[_fn_target] = task.rewrite_counts.get(_fn_target, 0) + 1
+                    if task.rewrite_counts[_fn_target] > 3 and _fn_target in task.files_written:
+                        step.detail = f"SKIP: {_fn_target} zaten 3+ kez yazildi (locked)"
+                        step.success = True
+                        steps.append(step)
+                        continue
             if action in ("write", "fix"):
                 filename = args.get("filename") or target_filename or f"main.{task.language}"
                 content = args.get("content", "")
