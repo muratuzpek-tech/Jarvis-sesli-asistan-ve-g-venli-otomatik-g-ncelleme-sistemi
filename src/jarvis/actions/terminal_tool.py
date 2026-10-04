@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -115,6 +116,19 @@ def terminal_tool(
     command = str(params.get("command", "")).strip()
     if not command:
         return "Komut belirtilmedi."
+
+    # ═══ CD PIPELINE DESTEGI ═══
+    # "cd /path && python3 main.py" → cwd=/path, command="python3 main.py"
+    # "cd /path ; python3 main.py"  → cwd=/path, command="python3 main.py"
+    _cd_match = re.match(r'^cd\s+([^;&|]+?)\s*(?:&&|;)\s*(.+)$', command, re.DOTALL)
+    if _cd_match:
+        _cd_target = _cd_match.group(1).strip().strip("'\"")
+        _rest = _cd_match.group(2).strip()
+        params["cwd"] = _cd_target
+        command = _rest
+        if not command:
+            return f"Dizin değiştirildi: {_cd_target}"
+
     try:
         argv = shlex.split(command, posix=os.name != "nt")
     except ValueError as exc:
