@@ -61,9 +61,11 @@ def gate(tool_name: str, params: dict, user_approved: bool = False) -> str | Non
     if needs_confirmation(tool_name) and not user_approved:
         danger = "TEHLIKELI" if is_destructive(tool_name) else "DIKKAT"
         ps = ", ".join(f"{k}={str(v)[:40]}" for k, v in (params or {}).items())
+        _code = generate_confirm_code(tool_name, params)
         return (
             f"CONFIRMATION_REQUIRED:{tool_name}:"
-            f"{danger} arac cagrisi: {ps} - Onayliyor musunuz? (evet/hayir)"
+            f"{danger} arac cagrisi: {ps} - Onayliyor musunuz? (evet/hayir). "
+            f"ONAY_KODU: {_code} — Kullanici onaylarsa confirm_code='{_code}' ile tekrar cagir."
         )
     return None
 
