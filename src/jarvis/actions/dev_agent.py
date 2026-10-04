@@ -34,6 +34,8 @@ MODEL_WRITER     = "gemini-flash-latest"
 # bir kod doner; kullanici acikca onaylayip ayni kodla tekrar cagirilana kadar pip
 # install / uretilen kodu calistirma adimlarina gecilmez.
 _pending_dev_agent: dict[str, dict] = {}
+# AYNI GOREV ICIN AYNI KOD: timeout sonrasi yeni kod uretme → loop kir
+_task_to_code: dict[str, str] = {}  # desc[:80]|lang|project → code
 
 # ONAY KAPISI, MODELE GUVENMEZ (2026-09-28, Windows canli testi): Gemini
 # "Onaylıyor musunuz?" dedikten sonra kullanicinin cevabini beklemeden ayni
@@ -63,7 +65,7 @@ def confirmation_problem(confirm_code: str) -> str | None:
     mesaj, yoksa None. (agent_board da is baslatmadan once bunu kullanir.)"""
     pending = _pending_dev_agent.get((confirm_code or "").strip())
     if pending is None:
-        return "Onay kodu geçersiz veya süresi dolmuş. Önce confirm_code vermeden çağırıp yeni kod alın."
+        return "Onay kodu geçersiz veya süresi dolmuş. Aynı description ile yeniden çağır — sistem aynı görev için aynı kodu döndürecek."
     if not _user_confirmed_after(pending.get("issued_at", 0.0)):
         print("[DevAgent] ⛔ confirm_code kullanıcı cevap vermeden kullanıldı — reddedildi.")
         return (
@@ -3834,7 +3836,19 @@ def dev_agent(
     # ONAY KAPISI: bu adim pip ile paket kurar ve modelin urettigi kodu
     # gercekten calistirir - confirm_code verilmeden hicbiri yapilmaz.
     if not confirm_code:
-        code = secrets.token_hex(3)
+        _task_key = f"{(p.get('description',''))[:80]}|{p.get('language','')}|{p.get('project_name','')}"
+
+        _existing_code = _task_to_code.get(_task_key)
+
+        if _existing_code and _existing_code in _pending_dev_agent:
+
+            code = _existing_code  # AYNI GOREV -> AYNI KOD
+
+        else:
+
+            code = secrets.token_hex(3)
+
+            _task_to_code[_task_key] = code
         _pending_dev_agent[code] = {
             "description": description, "language": language,
             "project_name": project_name, "timeout": timeout,
@@ -3847,7 +3861,8 @@ def dev_agent(
             f"gerçekten çalıştırır. Kullanıcıya bunu tarif et; kullanıcı SESLİ/YAZILI olarak "
             f"açıkça onaylarsa (bir sonraki mesajında), dev_agent'ı aynı description/language/"
             f"project_name ile ve confirm_code='{code}' parametresiyle TEKRAR çağır. "
-            f"Kullanıcı onaylamadan bu kodu kendi kendine kullanma."
+            f"Kullanıcı onaylamadan bu kodu kendi kendine kullanma. "
+            f"Bu kodu olduğu gibi kullan — yeni kod üretmek GEREKMEZ."
         )
     # Kota/ağ/model hatasında aynı açık onayla tekrar denenebilsin. Eski akış
     # build başlamadan kodu siliyor, Gemini 429 sonrasında kullanıcıyı yeni
