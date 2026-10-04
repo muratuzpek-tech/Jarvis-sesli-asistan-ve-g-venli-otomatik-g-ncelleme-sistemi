@@ -37,6 +37,7 @@ import time
 import sys
 from jarvis.logger import get_logger
 _LOG = get_logger("main")
+_LOG = get_logger("main")
 import struct
 import traceback
 from urllib.parse import unquote, urlparse
@@ -2055,7 +2056,7 @@ class JarvisLive:
         RETRY_DELAY = 10.0
         while True:
             if _mic_breaker.is_open():
-                print("[JARVIS] ⏳ Mikrofon devre kesici açık, deneme atlanıyor.")
+                _LOG.debug("[JARVIS] ⏳ Mikrofon devre kesici açık, deneme atlanıyor.")
                 try:
                     self.ui.set_mic_device("devre kesici açık - bekleniyor")
                 except Exception:
@@ -2070,7 +2071,7 @@ class JarvisLive:
             # cihazlarda mikrofonun hic acilamamasina yol aciyordu.
             _devices_snapshot = _list_audio_devices()
             candidates = _audio_candidates("input", devices=_devices_snapshot)
-            print(f"[JARVIS] Mikrofon adaylari: {candidates}")
+            _LOG.debug(f"[JARVIS] Mikrofon adaylari: {candidates}")
 
             last_err = None
             opened = False
@@ -2084,12 +2085,12 @@ class JarvisLive:
                 )
                 if resolved is None:
                     last_err = RuntimeError("input device changed or is ambiguous")
-                    print(f"[JARVIS] ⚠️ Mikrofon adayi yeniden dogrulanamadi (device={cand})")
+                    _LOG.debug(f"[JARVIS] ⚠️ Mikrofon adayi yeniden dogrulanamadi (device={cand})")
                     continue
                 try:
                     stream_rate = _input_rate(resolved)
                     if stream_rate != SEND_SAMPLE_RATE:
-                        print(f"[JARVIS] ℹ️ Mikrofon {stream_rate} Hz destekliyor; Gemini için 16 kHz'e dönüştürülüyor.")
+                        _LOG.debug(f"[JARVIS] ℹ️ Mikrofon {stream_rate} Hz destekliyor; Gemini için 16 kHz'e dönüştürülüyor.")
                     with sd.InputStream(
                         device=resolved,
                         samplerate=stream_rate,
@@ -2112,7 +2113,7 @@ class JarvisLive:
                     raise
                 except Exception as e:
                     last_err = e
-                    print(f"[JARVIS] ⚠️ Mikrofon acilamadi (device={resolved}): {type(e).__name__}")
+                    _LOG.debug(f"[JARVIS] ⚠️ Mikrofon acilamadi (device={resolved}): {type(e).__name__}")
                     continue
 
             if not opened:

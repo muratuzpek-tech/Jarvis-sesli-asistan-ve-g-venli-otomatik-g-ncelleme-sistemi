@@ -158,13 +158,13 @@ def terminal_tool(
 
     # ===== INTERAKTIF -> XTERM AC =====
     _should_xterm = False
-    _target_py = next((str(a) for a in argv if str(a).endswith('.py')), None)
+    _target_py = next((str(a) for a in argv if str(a).endswith(('.py', '.python'))), None)
     if _target_py and not Path(_target_py).is_absolute():
         _target_py = str(Path(cwd) / _target_py)
     if _target_py:
         try:
             _txt = Path(_target_py).read_text()
-            if 'input(' in _txt:
+            if 'input(' in _txt or 'tkinter' in _txt or 'Tk()' in _txt:
                 _should_xterm = True
         except Exception:
             pass
