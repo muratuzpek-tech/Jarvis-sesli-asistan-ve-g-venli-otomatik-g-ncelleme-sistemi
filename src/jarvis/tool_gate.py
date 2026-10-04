@@ -49,6 +49,12 @@ def audit_entry(tool_name: str, params: dict, result: str, approved: bool):
 
 
 def gate(tool_name: str, params: dict, user_approved: bool = False) -> str | None:
+    _cc = params.get("confirm_code", "")
+    if _cc and tool_name in _DESTRUCTIVE_TOOLS:
+        _stored = _PENDING_CONFIRMATIONS.get(_cc)
+        if _stored and _stored[0] == tool_name:
+            del _PENDING_CONFIRMATIONS[_cc]
+            return None  # ONAYLANDI!
     if needs_confirmation(tool_name) and not user_approved:
         danger = "TEHLIKELI" if is_destructive(tool_name) else "DIKKAT"
         ps = ", ".join(f"{k}={str(v)[:40]}" for k, v in (params or {}).items())
@@ -57,3 +63,15 @@ def gate(tool_name: str, params: dict, user_approved: bool = False) -> str | Non
             f"{danger} arac cagrisi: {ps} - Onayliyor musunuz? (evet/hayir)"
         )
     return None
+
+
+# ═══ CONFIRM CODE SYSTEM ═══
+_PENDING_CONFIRMATIONS: dict = {}
+
+def generate_confirm_code(tool_name: str, args: dict) -> str:
+    code = secrets.token_hex(3).upper()
+    _PENDING_CONFIRMATIONS[code] = (tool_name, dict(args))
+    return code
+
+def consume_confirm_code(code: str):
+    return _PENDING_CONFIRMATIONS.pop(code, None)
