@@ -1,0 +1,59 @@
+"""Merkezi arac onay kapisi + audit log."""
+
+from __future__ import annotations
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+_DESTRUCTIVE_TOOLS = {
+    "send_message", "shutdown_jarvis", "self_improve",
+    "file_delete", "file_write", "os_system", "pip_install",
+    "git_push", "computer_control", "dev_agent", "code_helper",
+}
+_CONFIRM_TOOLS = {
+    "agentic_code", "open_app",
+}
+
+
+def is_destructive(tool_name: str) -> bool:
+    return tool_name in _DESTRUCTIVE_TOOLS
+
+
+def needs_confirmation(tool_name: str) -> bool:
+    return tool_name in _DESTRUCTIVE_TOOLS or tool_name in _CONFIRM_TOOLS
+
+
+def _audit_log() -> Path:
+    return Path.home() / ".jarvis" / "audit.log"
+
+
+def audit_entry(tool_name: str, params: dict, result: str, approved: bool):
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "tool": tool_name,
+        "params": {k: str(v)[:80] for k, v in (params or {}).items()},
+        "result": str(result or "")[:200],
+        "approved": approved,
+        "destructive": is_destructive(tool_name),
+    }
+    apath = _audit_log()
+    apath.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(apath, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        log.warning("Audit log yazilamadi")
+
+
+def gate(tool_name: str, params: dict, user_approved: bool = False) -> str | None:
+    if needs_confirmation(tool_name) and not user_approved:
+        danger = "TEHLIKELI" if is_destructive(tool_name) else "DIKKAT"
+        ps = ", ".join(f"{k}={str(v)[:40]}" for k, v in (params or {}).items())
+        return (
+            f"CONFIRMATION_REQUIRED:{tool_name}:"
+            f"{danger} arac cagrisi: {ps} - Onayliyor musunuz? (evet/hayir)"
+        )
+    return None

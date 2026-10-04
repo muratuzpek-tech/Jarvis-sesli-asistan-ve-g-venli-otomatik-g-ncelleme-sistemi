@@ -1,3 +1,0 @@
-'python' Komutu bulunamadı, şunu mu demek istiyorsunuz:
-  komut 'python3' deb python3 paketinden
-  komut 'python' deb python-is-python3 paketinden

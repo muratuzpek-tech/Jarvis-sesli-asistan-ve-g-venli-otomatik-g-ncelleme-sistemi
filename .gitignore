@@ -56,3 +56,10 @@ src/jarvis/self_improvement/virtual_brain/brain_state/state.json
 
 # Audit & log files
 *.log
+# Git cop
+~
+log.txt
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/
