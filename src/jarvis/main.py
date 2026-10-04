@@ -1597,10 +1597,11 @@ class JarvisLive:
         # ═══ MERKEZI TOOL GATE ═══
         _gate_block = gate(name, args, user_approved=getattr(self, '_tool_approved', False))
         if _gate_block:
-            result = _gate_block
-            audit_entry(name, args, result, approved=False)
-            audit_entry(name, args, str(result or ""), approved=True)
-        return result
+            audit_entry(name, args, _gate_block, approved=False)
+            return types.FunctionResponse(
+                id=fc.id, name=name,
+                response={"result": _gate_block}
+            )
 
         if name == "save_memory":
             category = args.get("category", "notes")
