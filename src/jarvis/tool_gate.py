@@ -10,8 +10,8 @@ log = logging.getLogger(__name__)
 
 _DESTRUCTIVE_TOOLS = {
     "send_message", "shutdown_jarvis", "self_improve",
-    "file_delete", "file_write", "os_system", "pip_install",
-    "git_push", "computer_control", "dev_agent", "code_helper",
+    "file_delete",  "os_system", "pip_install",
+    "git_push", "computer_control", 
 }
 _CONFIRM_TOOLS = {
     "agentic_code", "open_app",
