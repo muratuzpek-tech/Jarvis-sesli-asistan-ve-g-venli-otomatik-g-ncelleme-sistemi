@@ -1,3 +1,8 @@
+# QueueFull spam sustur
+import warnings
+warnings.filterwarnings("ignore", message=".*QueueFull.*")
+import logging
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
 
 def put_nowait_nooverflow(q, item):
