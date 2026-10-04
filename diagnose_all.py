@@ -126,7 +126,7 @@ def dead_code():
 def hardcoded():
     errs = []
     from pathlib import Path
-    ac = Path("tools/developer/agentic_coder.py").read_text()
+    Path("tools/developer/agentic_coder.py").read_text()
     # all >=3 are intentional thresholds (retries, stuck, lock limits)
     pass
     return errs

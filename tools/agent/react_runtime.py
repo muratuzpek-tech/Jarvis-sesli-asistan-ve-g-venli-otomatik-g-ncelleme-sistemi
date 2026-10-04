@@ -36,7 +36,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from collections.abc import Callable
 
 from tools.registry import registry, ToolContext
 

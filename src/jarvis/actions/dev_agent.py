@@ -3012,7 +3012,7 @@ def _generate_test_scaffold(plan: dict, project_dir: Path, log=print):
     """SUPERPOWERS B: TDD. Testler implementation'dan ONCE yazilir."""
     files = plan.get("files", [])
     entry = plan.get("entry_point", "main.py")
-    outputs = plan.get("expected_outputs", [])
+    plan.get("expected_outputs", [])
 
     mods = []
     for fi in files:

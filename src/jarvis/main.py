@@ -2001,7 +2001,7 @@ class JarvisLive:
                 _level_state["last_print"] = now
                 peak = int(_np.abs(indata).max()) if indata.size else 0
                 rms = float(_np.sqrt(_np.mean(_np.square(indata.astype(_np.float32))))) if indata.size else 0.0
-                bar = "█" * min(50, peak // 200)
+                "█" * min(50, peak // 200)
                 _LOG.debug("Mic level logged")
                 try:
                     self.ui.set_voice_volume(min(1.0, rms / 4500.0))
@@ -2473,7 +2473,7 @@ class JarvisLive:
                         raise
                     except RuntimeError:
                         return
-                    except Exception as write_error:
+                    except Exception:
                         _LOG.debug("[AUDIO_DIAG] Hoparlöre ses yazılamadı: {type(write_error).__name__")
                         _speaker_breaker.record_failure()
                         break
