@@ -16,8 +16,8 @@ if _platform.system() == "Windows":
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
-from jarvis.tool_gate import gate, audit_entry, is_destructive
-from jarvis.path_utils import safe_resolve, register_project, lookup_project, list_projects
+from .tool_gate import gate, audit_entry, is_destructive
+from .path_utils import safe_resolve, register_project, lookup_project, list_projects
 import os
 import re
 import threading

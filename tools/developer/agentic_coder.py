@@ -494,6 +494,25 @@ class AgenticCoder:
 
         summary = self._build_summary(task, steps)
         self._ui_progress(f"  🏁 Tamamlandı: {len(task.files_written)} dosya, {task.iterations} iterasyon")
+        _acc_err = []
+        for _fn, _fc in task.files_written.items():
+            try:
+                compile(_fc, _fn, "exec")
+            except SyntaxError as _se:
+                _acc_err.append(f"{_fn}: line {_se.lineno}: {_se.msg}")
+            if len(_fc) < 150:
+                _acc_err.append(f"{_fn}: too short ({len(_fc)} chars)")
+        if _acc_err:
+            task.accepted = False
+            task.errors.extend(_acc_err[:3])
+            task.final_response = f"HATA: {'; '.join(_acc_err[:3])}"
+        try:
+            import sys as _s
+            _s.path.insert(0, str(Path(__file__).parent.parent / "src"))
+            from jarvis.path_utils import register_project
+            register_project(name=task.project_path.name, root=task.project_path, entry="main.py", status="accepted" if task.accepted else "needs_fix")
+        except Exception:
+            pass
         return summary
 
     # ── Prompt Builder ─────────────────────────────────────────
