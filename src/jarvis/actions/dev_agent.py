@@ -318,6 +318,16 @@ def _selenium_instead_of_playwright(file_codes: dict[str, str], dependencies) ->
     if "playwright" not in deps:
         return {}
     found: dict[str, list[dict]] = {}
+    # FIX: dosya uzantisini normalize et
+    _norm_fc = {}
+    for _fp, _fc in file_codes.items():
+        if _fp.endswith('.python'):
+            _fp = _fp[:-7] + '.py'
+        elif not _fp.endswith(('.py', '.json', '.txt', '.md', '.html', '.css', '.js', '.yaml', '.yml', '.cfg', '.toml', '.xml')):
+            _fp = _fp + '.py'
+        _norm_fc[_fp] = _fc
+    file_codes = _norm_fc
+
     for path, code in file_codes.items():
         for no, line in enumerate(code.splitlines(), 1):
             if re.match(r"\s*(from|import)\s+selenium\b", line):
