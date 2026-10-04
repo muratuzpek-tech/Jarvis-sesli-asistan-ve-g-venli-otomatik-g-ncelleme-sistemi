@@ -15,7 +15,7 @@ _DESTRUCTIVE_TOOLS = {
     "git_push", "computer_control", 
 }
 _CONFIRM_TOOLS = {
-    "terminal", "agentic_code", "open_app", "dev_agent",
+    "agentic_code", "open_app",
 }
 
 
@@ -51,6 +51,9 @@ def audit_entry(tool_name: str, params: dict, result: str, approved: bool):
 
 def gate(tool_name: str, params: dict, user_approved: bool = False) -> str | None:
     _cc = params.get("confirm_code", "")
+    # terminal kendi confirm_code'unu isler — gate'de tuketme
+    if tool_name == "terminal":
+        return None
     if _cc and tool_name in _DESTRUCTIVE_TOOLS:
         _stored = _PENDING_CONFIRMATIONS.get(_cc)
         if _stored and _stored[0] == tool_name:
