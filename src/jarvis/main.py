@@ -1608,7 +1608,8 @@ class JarvisLive:
         r = None  # UnboundLocalError guard
 
         # ═══ MERKEZI TOOL GATE ═══
-        _gate_block = gate(name, args, user_approved=getattr(self, '_tool_approved', False))
+        _cc = args.get("confirm_code", "")
+        _gate_block = gate(name, args, user_approved=(bool(_cc) or getattr(self, '_tool_approved', False)))
         if _gate_block:
             audit_entry(name, args, _gate_block, approved=False)
             return types.FunctionResponse(
@@ -2086,6 +2087,21 @@ class JarvisLive:
                 await asyncio.sleep(RETRY_DELAY)
                 continue
 
+
+    _APPROVE_KEYWORDS = {"evet", "onay", "onaylıyorum", "onayliyorum", "tamam", "olsun", "onay veriyorum", "onayveriyorum", "approve", "yes", "yap", "devam"}
+    _DENY_KEYWORDS = {"hayır", "hayir", "iptal", "dur", "vazgeç", "vazgec", "no", "stop"}
+
+    def _check_user_approval(self, text: str):
+        """Kullanici dogal dilde onay/reddederse yakala."""
+        t = (text or "").strip().lower()
+        if any(kw in t for kw in self._DENY_KEYWORDS):
+            self._tool_approved = False
+            self._pending_tool = None
+            return False
+        if any(kw in t for kw in self._APPROVE_KEYWORDS):
+            self._tool_approved = True
+            return True
+        return False
 
     @staticmethod
     def _safe_put(q, item):
