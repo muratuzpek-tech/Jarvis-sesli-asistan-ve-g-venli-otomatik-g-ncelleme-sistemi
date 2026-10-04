@@ -156,6 +156,55 @@ def terminal_tool(
                        result="AWAITING_APPROVAL")
             return _preview(argv, cwd)
 
+    # ═══ INTERAKTIF PROGRAM → XTERM AC ═══
+    # input() kullanan programlari kendi terminal penceresinde ac
+    _is_python_script = any(str(arg).endswith(".py") for arg in argv if not str(arg).startswith("-"))
+    _wants_interactive = params.get("interactive", False)
+    if (_is_python_script or _wants_interactive) and not params.get("confirm_code"):
+        pass  # confirm akisindan gec, asagida actif ederiz
+
+    _should_xterm = False
+    if _is_python_script or _wants_interactive:
+        # Hızlı tespit: dosyada input() var mı?
+        _target_py = next((str(a) for a in argv if str(a).endswith(".py")), None)
+        if _target_py:
+            try:
+                _py_text = Path(_target_py).read_text()
+                if "input(" in _py_text or "raw_input(" in _py_text:
+                    _should_xterm = True
+            except Exception:
+                pass
+
+    if _should_xterm:
+        import shutil as _shutil
+        _term = None
+        for _cand in ("xterm", "konsole", "gnome-terminal", "kitty", "alacritty"):
+            if _shutil.which(_cand):
+                _term = _cand
+                break
+        if _term:
+            _cmd_str = _display_command(argv)
+            if _term == "gnome-terminal":
+                _full = f'gnome-terminal -- bash -lc "cd {shlex.quote(str(cwd))} && {_cmd_str}; read -p 'Enter ile kapat...'"'
+            else:
+                _full = f'{_term} -e bash -c "cd {shlex.quote(str(cwd))} && {_cmd_str}; echo; read -p 'Enter ile kapat...'"'
+            try:
+                subprocess.Popen(
+                    _full,
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return (
+                    f"PROGRAM YENİ TERMİNAL PENCERESİNDE AÇILDI!\n"
+                    f"Komut: {_cmd_str}\n"
+                    f"Klasör: {cwd}\n"
+                    f"Terminal: {_term}\n"
+                    f"Kullanıcı açılan pencereden programı interaktif olarak kullanabilir."
+                )
+            except Exception as _e:
+                return f"xterm açma hatası: {_e}"
+
     # ═══ STDIN DESTEGI ═══
     # input() bekleyen programlar icin stdin verisi
     # params["input"] ile LLM gonderebilir; yoksa bos string
