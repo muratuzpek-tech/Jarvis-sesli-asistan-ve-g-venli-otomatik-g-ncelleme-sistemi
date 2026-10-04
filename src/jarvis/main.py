@@ -1556,6 +1556,22 @@ class JarvisLive:
         )
         parts.append(sys_prompt)
         parts.append(
+            "ANTI-HALLUCINATION RULES (MANDATORY):\n"
+            "1. Any question requiring facts, data, commands, or analysis: "
+            "you MUST call the appropriate tool FIRST. Never answer from memory.\n"
+            "2. If you cannot verify a claim with a tool, reply with "
+            "'UNKNOWN (no tool executed)'. Never guess.\n"
+            "3. NEVER fabricate numbers, hash IDs, commit counts, file names, "
+            "line numbers, or system metrics.\n"
+            "4. When the user asks for proof or evidence: execute the tool and "
+            "quote its EXACT raw output verbatim.\n"
+            "5. For git analysis use terminal tool. For code audits use "
+            "system_scan_and_repair. For file reads use file_controller.\n"
+            "6. If asked what command produced a result and you ran none, "
+            "state honestly: 'I have not executed any command for this claim.'"
+        )
+
+        parts.append(
             "FINAL LANGUAGE RULE: Answer this user only in natural Turkish. Do not answer "
             "in Russian, Telugu, or any other language merely because speech recognition "
             "produced a foreign-script fragment. Never repeat the same sentence twice."
