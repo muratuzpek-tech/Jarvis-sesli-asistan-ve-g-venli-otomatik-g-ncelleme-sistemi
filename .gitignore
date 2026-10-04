@@ -63,3 +63,19 @@ log.txt
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Backup dirs
+src/jarvis_yedekler/
+build/
+*.bak*
+*.orig
+
+# Logs (central at ~/.jarvis/logs/)
+logs/
+log.txt
+*.log
+
+# Memory logs
+memory/*_log.jsonl
+memory/*_log.json
+memory/error_log.json

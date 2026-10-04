@@ -35,6 +35,8 @@ import re
 import threading
 import time
 import sys
+from jarvis.logger import get_logger
+_LOG = get_logger("main")
 import struct
 import traceback
 from urllib.parse import unquote, urlparse
@@ -2000,7 +2002,7 @@ class JarvisLive:
                 peak = int(_np.abs(indata).max()) if indata.size else 0
                 rms = float(_np.sqrt(_np.mean(_np.square(indata.astype(_np.float32))))) if indata.size else 0.0
                 bar = "█" * min(50, peak // 200)
-                print(f"[JARVIS] 🎚️ Mikrofon seviyesi: {peak:5d} {bar}")
+                _LOG.debug("Mic level logged")
                 try:
                     self.ui.set_voice_volume(min(1.0, rms / 4500.0))
                 except Exception:
@@ -2430,7 +2432,7 @@ class JarvisLive:
                             with self._speaking_lock:
                                 _sp = self._is_speaking
                             if _sp:
-                                print("[AUDIO_DIAG] ⏰ Speaking watchdog: 3s sessizlik → mic acildi")
+                                _LOG.debug("AUDIO_DIAG] ⏰ Speaking watchdog: 3s sessizlik → mic acild")
                                 self.set_speaking(False)
                                 try:
                                     self.ui.set_voice_volume(0.0)
@@ -2438,7 +2440,7 @@ class JarvisLive:
                                     pass
                             if self._interrupted:
                                 self._interrupted = False
-                                print("[AUDIO_DIAG] ⏰ _interrupted auto-cleared (stale)")
+                                _LOG.debug("AUDIO_DIAG] ⏰ _interrupted auto-cleared (stale")
                             _silent_ticks = 0
                         if (
                             self._turn_done_event
@@ -2464,15 +2466,15 @@ class JarvisLive:
                         except Exception:
                             pass
                         if _played_chunks == 1:
-                            print("[AUDIO_DIAG] İlk Gemini ses paketi hoparlör stream'ine yazıldı.")
+                            _LOG.debug("AUDIO_DIAG] İlk Gemini ses paketi hoparlör stream'ine yazıldı")
                         elif _played_chunks % 200 == 0:
-                            print(f"[AUDIO_DIAG] Hoparlöre yazılan ses paketi: {_played_chunks}")
+                            _LOG.debug("[AUDIO_DIAG] Hoparlöre yazılan ses paketi: {_played_chunks")
                     except asyncio.CancelledError:
                         raise
                     except RuntimeError:
                         return
                     except Exception as write_error:
-                        print(f"[AUDIO_DIAG] Hoparlöre ses yazılamadı: {type(write_error).__name__}")
+                        _LOG.debug("[AUDIO_DIAG] Hoparlöre ses yazılamadı: {type(write_error).__name__")
                         _speaker_breaker.record_failure()
                         break
             finally:
