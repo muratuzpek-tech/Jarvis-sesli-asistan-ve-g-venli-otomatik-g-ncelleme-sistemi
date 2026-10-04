@@ -289,6 +289,18 @@ def match_file_modification(text: str) -> dict | None:
     if any(x in low for x in destructive):
         return None
 
+    # ═══ MULTI-FILE / PROJECT GUARD ═══
+    # 2+ farkli dosya adi veya proje/uygulama kelimesi varsa bu TEK dosya
+    # degil, bir PROJEDIR → dev_agent'a birak (return None).
+    _all_filenames = _FILE_MOD_NAME_RE.findall(t)
+    _unique_files = list(dict.fromkeys(_all_filenames))
+    _multi_file_kw = ("proje", "projesi", "uygulama", "aplikasyon", "application",
+                      "project", "modul", "modülü", "modulu",
+                      "dosyadan", "dosyalık", "dosyalı", "dosyalar")
+    _has_multi_kw = any(kw in low for kw in _multi_file_kw)
+    if len(_unique_files) >= 2 or _has_multi_kw:
+        return None  # dev_agent halleder
+
     # Bozuk UTF-8/console durumlari icin:
     # olustur, olu?tur, olu?tur
     # DUZELTME (2026-09-28): fiiller eskiden ALT DIZE olarak araniyordu -
