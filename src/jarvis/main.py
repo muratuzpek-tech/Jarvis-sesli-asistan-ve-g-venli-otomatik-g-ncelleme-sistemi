@@ -2666,6 +2666,12 @@ class JarvisLive:
         while True:
             await asyncio.sleep(10)
             alert = await asyncio.to_thread(self._sys_monitor.check)
+            if alert:
+                try:
+                    self.ui.write_log(alert)
+                except Exception:
+                    pass
+                alert = None  # UI-only: do NOT send to LLM (prevents spoken false warnings)
             if alert and self.session:
                 try:
                     await self.session.send_client_content(

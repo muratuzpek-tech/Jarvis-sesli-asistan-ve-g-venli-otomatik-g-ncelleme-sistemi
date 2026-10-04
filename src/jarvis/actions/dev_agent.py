@@ -542,6 +542,7 @@ Critical rules:
 8. If running the entry point is supposed to durably create or update a file (a database, a report, an exported document, a log, a generated image, etc.), list each such file's relative path in "expected_outputs" with a one-line description of what a CORRECT result looks like inside it. If the result is a FOLDER TREE (files copied/moved/sorted into sub-folders), list that output folder's relative path (e.g. "sorted") instead of guessing individual file names. Leave this list EMPTY only for purely interactive/display-only programs that persist nothing (e.g. a calculator, a GUI that only shows numbers on screen). This is critical: a program can run to completion with NO Python error while silently producing nothing real (a network call that fails silently, a thread that never runs, wrong file path) — "expected_outputs" is what lets that be caught instead of wrongly reported as a success.
 9. This is a completely standalone, independent project with NO relationship to any AI assistant framework. NEVER plan a file path or an import under a top-level name "jarvis" (e.g. "jarvis/core/engine.py", or importing "jarvis.anything") — that name does not exist for this project and is never a real requirement, no matter what the description mentions.
 10. If the task needs content that appears only after JavaScript runs (infinite scroll, "load more" buttons, dynamic pages, "wait until the page is fully loaded"), plain HTTP clients (requests/httpx/urllib) are WRONG: use Playwright and list "playwright" in dependencies. If the task works on a web page, take the URL from the command line (sys.argv[1]) and put the real URL from the description into run_command.
+11. ALWAYS include a "README.md" in the files list (describe setup, usage, architecture, test instructions). If the user requests tests OR the project is non-trivial (more than 2 files), also include a "tests/" directory with at least 3 test files covering core functionality. Tests use pytest format (functions named test_*).
 
 JSON:"""
 
@@ -623,6 +624,32 @@ def _validate_plan(plan: dict, description: str) -> dict:
             raise ValueError("Every expected output must have a relative path.")
         if Path(path).is_absolute() or ".." in Path(path).parts:
             raise ValueError(f"Expected output escapes project: {path}")
+    # AUTO-INJECT README.md and tests/ if missing and project is non-trivial
+    _paths = {f.get("path", "") for f in plan.get("files", [])}
+    _has_readme = any("readme" in p.lower() for p in _paths)
+    _has_tests = any("test" in p.lower() for p in _paths)
+
+    if not _has_readme:
+        plan["files"].append({
+            "path": "README.md",
+            "description": "Project documentation - setup, usage, architecture, testing",
+            "imports": []
+        })
+        print("[DevAgent] README.md plan'a otomatik eklendi.")
+
+    if not _has_tests and len(plan.get("files", [])) >= 3:
+        plan["files"].insert(0, {
+            "path": "tests/test_core.py",
+            "description": "Unit tests for core business logic - at least 5 test functions",
+            "imports": []
+        })
+        plan["files"].insert(0, {
+            "path": "tests/test_integration.py",
+            "description": "Integration tests for end-to-end workflows - at least 3 test functions",
+            "imports": []
+        })
+        print("[DevAgent] tests/ plan'a otomatik eklendi.")
+
     return plan
 
 
