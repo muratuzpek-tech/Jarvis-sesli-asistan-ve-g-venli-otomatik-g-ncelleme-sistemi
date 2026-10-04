@@ -87,6 +87,7 @@ class CodingTask:
     last_written_file: str = ""
     same_file_writes: int = 0
     expected_files: list[str] = field(default_factory=list)
+    min_test_count: int = 0
     last_content_hash: str = ""
     stuck_count: int = 0
     iterations: int = 0
@@ -128,6 +129,69 @@ def _fn_role_hints(filename: str, task) -> str:
             return 'Entry point — imports and wires other modules together.'
         return 'Business logic/utility functions as described in the task.'
     return 'As described in the task.'
+
+
+def _verify_project(task, run_pytest=True):
+    import subprocess, sys, re as _vt
+    problems = []
+    for _fn, _fc in task.files_written.items():
+        _fp = task.project_path / _fn
+        _fp.parent.mkdir(parents=True, exist_ok=True)
+        _fp.write_text(_fc, encoding="utf-8")
+    for _ef in task.expected_files:
+        if _ef not in task.files_written:
+            _dp = task.project_path / _ef
+            if not _dp.is_file():
+                problems.append(f"Eksik dosya: {_ef}")
+    _rd = task.files_written.get("README.md", "")
+    if len(_rd.strip()) < 200:
+        problems.append(f"README.md yetersiz ({len(_rd.strip())} chars, min 200)")
+    _tc = ""
+    for _fn, _fc in task.files_written.items():
+        _st = Path(_fn).stem.lower()
+        if _st.startswith("test_") or _st.endswith("_test"):
+            _tc += _fc + "\n"
+    _tf = _vt.findall(r"def\s+(test_\w+)\s*\(", _tc)
+    if task.min_test_count > 0 and len(_tf) < task.min_test_count:
+        problems.append(f"Test sayisi yetersiz: {len(_tf)}/{task.min_test_count}")
+    elif not _tf and any("test" in f.lower() for f in task.files_written):
+        problems.append("Test dosyalarinda def test_* yok")
+    for _fn, _fc in task.files_written.items():
+        if _fn.endswith(".py"):
+            try:
+                compile(_fc, _fn, "exec")
+            except SyntaxError as _se:
+                problems.append(f"SyntaxError {_fn}: line {_se.lineno}: {_se.msg}")
+    for _fn, _fc in task.files_written.items():
+        if _fn.endswith("__init__.py"):
+            continue
+        if len(_fc.strip()) < 150:
+            problems.append(f"{_fn}: cok kisa ({len(_fc)} chars)")
+    if run_pytest and _tc:
+        try:
+            _pt = subprocess.run(
+                [sys.executable, "-m", "pytest", "--tb=short", "-q"],
+                cwd=str(task.project_path), capture_output=True,
+                text=True, timeout=60)
+            if _pt.returncode != 0:
+                problems.append(f"pytest FAILED: {(_pt.stdout or '')[-200:]}")
+        except Exception as _pe:
+            problems.append(f"pytest hatasi: {_pe}")
+    for _cn in ("cli.py", "main.py"):
+        if (task.project_path / _cn).is_file():
+            try:
+                _ct = subprocess.run(
+                    [sys.executable, _cn, "--help"],
+                    cwd=str(task.project_path), capture_output=True,
+                    text=True, timeout=15)
+                if _ct.returncode not in (0, 1, 2):
+                    problems.append(f"{_cn} calismiyor (exit {_ct.returncode})")
+                break
+            except subprocess.TimeoutExpired:
+                problems.append(f"{_cn} TIMEOUT (15s)")
+            except Exception:
+                pass
+    return (len(problems) == 0, problems)
 
 # ── System Prompt ─────────────────────────────────────────────
 
@@ -386,9 +450,16 @@ class AgenticCoder:
         # Always require README.md and tests/ for multi-file projects
         if 'README.md' not in task.expected_files:
             task.expected_files.append('README.md')
-        if len(task.expected_files) >= 3 and not any('test' in f.lower() for f in task.expected_files):
+        _has_real_test = any(
+            Path(f).stem.startswith('test_') or Path(f).stem.endswith('_test')
+            for f in task.expected_files
+        )
+        if len(task.expected_files) >= 3 and not _has_real_test:
             task.expected_files.append('tests/__init__.py')
             task.expected_files.append('tests/test_core.py')
+        _tc_m = _re.search(r'(\d+)\s+(?:adet\s+)?test\b', description, _re.I)
+        if _tc_m:
+            task.min_test_count = int(_tc_m.group(1))
         self._ui_progress(f"  [PLAN] Beklenen dosyalar: {task.expected_files}")
 
         steps: list[CodingStep] = []
@@ -572,10 +643,16 @@ class AgenticCoder:
 
             # ── ACTION: accept ─────────────────────────────────
             elif action == "accept":
+                _ok, _vp = _verify_project(task, run_pytest=False)
+                if not _ok:
+                    last_error = "ACCEPT_REDDEDILDI: " + "; ".join(_vp[:4])
+                    step.detail = f"❌ ACCEPT REJECTED ({len(_vp)} sorun)"
+                    step.success = False
+                    steps.append(step)
+                    continue
                 step.detail = f"✅ ACCEPT: {response[:100]}"
                 step.success = True
                 steps.append(step)
-                task.accepted = True
                 task.final_response = response or (
                     f"Tamamlandı. {len(task.files_written)} dosya yazıldı, "
                     f"{task.iterations} iterasyon."
@@ -587,28 +664,20 @@ class AgenticCoder:
                 step.success = False
                 steps.append(step)
 
-        # ── Final (accept olmasa bile) ─────────────────────────
+        # FINAL QUALITY GATE — accepted HERE only
+        _ok, _vp = _verify_project(task, run_pytest=True)
+        task.accepted = _ok
         if not task.accepted:
+            task.errors.extend(_vp[:5])
             task.final_response = (
-                f"Kod tamamlandı (max {self._max} iterasyon). "
-                f"{len(task.files_written)} dosya yazıldı. "
-                f"⚠️ Otomatik accept yapılmadı — Manuel kontrol önerilir."
+                f"DOGRULAMA BASARISIZ ({len(_vp)} sorun): "
+                + "; ".join(_vp[:5])
             )
+        elif not task.final_response:
+            task.final_response = f"Tamamlandi. {len(task.files_written)} dosya yazildi."
 
         summary = self._build_summary(task, steps)
         self._ui_progress(f"  🏁 Tamamlandı: {len(task.files_written)} dosya, {task.iterations} iterasyon")
-        _acc_err = []
-        for _fn, _fc in task.files_written.items():
-            try:
-                compile(_fc, _fn, "exec")
-            except SyntaxError as _se:
-                _acc_err.append(f"{_fn}: line {_se.lineno}: {_se.msg}")
-            if len(_fc) < 150:
-                _acc_err.append(f"{_fn}: too short ({len(_fc)} chars)")
-        if _acc_err:
-            task.accepted = False
-            task.errors.extend(_acc_err[:3])
-            task.final_response = f"HATA: {'; '.join(_acc_err[:3])}"
         try:
             import sys as _s
             _s.path.insert(0, str(Path(__file__).parent.parent / "src"))
