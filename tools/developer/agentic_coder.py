@@ -359,12 +359,22 @@ class AgenticCoder:
         description = str(description)  # HIGH FIX: type coercion
         self._ui_progress(f"🔨 Agentic coding başlıyor: {description[:60]}")
 
+        # ═══ AGENTGREP SCAN: projedeki mevcut dosyaları tara ═══
+        try:
+            _scan_result = _scan_project(description, task.project_path)
+            if _scan_result:
+                self._ui_progress(f"  [SCAN] agentgrep: {_scan_result[:100]}")
+        except Exception:
+            pass
+
         for i in range(self._max):
             task.iterations = i + 1
             self._ui_progress(f"  ⚙️ Iterasyon {task.iterations}/{self._max}")
 
             # ── LLM'e sorma ────────────────────────────────────
-            prompt = self._build_prompt(task, steps, last_run_output, last_error, target_filename)
+            _remaining = [f for f in task.expected_files if f not in task.files_written]
+        _rem_note = f"\n\n*** ONEMLI: Henuz yazilmayan dosyalar: {_remaining} ***\nBunlari MUTLAKA yaz!' " if _remaining else ""
+        prompt = self._build_prompt(task, steps, last_run_output, last_error, target_filename) + _rem_note
             raw = self._model_fn(prompt)
             decision = _parse_model_response(raw)
 
@@ -380,8 +390,12 @@ class AgenticCoder:
 
             step = CodingStep(step_num=i + 1, thought=thought, action=action)
 
+            # ── ZERO PROGRESS TRACKER: 3 boş iterasyon → zorla write prompt ──
+            if not hasattr(task, '_zero_progress'):
+                task._zero_progress = 0
+
             # ═══ SMART EXIT: tum dosyalar yazildi + compile temiz → accept ═══
-            _all_clean = len(task.files_written) >= 3
+            _all_clean = len(task.files_written) >= len(task.expected_files)
             if _all_clean:
                 for _fn, _fc in task.files_written.items():
                     try:
@@ -395,6 +409,15 @@ class AgenticCoder:
                 steps.append(CodingStep(step_num=i+1, thought="auto-accept: all files valid", action="accept", detail="SMART_EXIT", success=True))
                 break
 
+
+            # ── ZERO PROGRESS: 3 boş → zorla dosya yazdır ──
+            if action not in ("write", "fix", "accept"):
+                task._zero_progress += 1
+            else:
+                task._zero_progress = 0
+
+            if task._zero_progress >= 3:
+                self._ui_progress(f"  ⚠️ 3 boş iterasyon! Kalan dosyalar: {[f for f in task.expected_files if f not in task.files_written]}")
 
             # ── ACTION: write / fix ────────────────────────────
             if action in ("write", "fix"):
