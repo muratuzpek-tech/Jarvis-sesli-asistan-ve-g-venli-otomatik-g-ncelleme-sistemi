@@ -184,8 +184,17 @@ def _verify_project(task, run_pytest=True):
                     [sys.executable, _cn, "--help"],
                     cwd=str(task.project_path), capture_output=True,
                     text=True, timeout=15)
-                if _ct.returncode not in (0, 1, 2):
-                    problems.append(f"{_cn} calismiyor (exit {_ct.returncode})")
+                if _ct.returncode != 0:
+                    try:
+                        _imp = subprocess.run(
+                            [sys.executable, "-c",
+                             f"import {Path(_cn).stem}; print('IMPORT_OK')"],
+                            cwd=str(task.project_path),
+                            capture_output=True, text=True, timeout=10)
+                        if "IMPORT_OK" not in _imp.stdout:
+                            problems.append(f"{_cn} hem --help hem import basarisiz (exit {_ct.returncode}): {(_ct.stderr or _ct.stdout or '')[-150:]}")
+                    except Exception:
+                        problems.append(f"{_cn} calismiyor (exit {_ct.returncode})")
                 break
             except subprocess.TimeoutExpired:
                 problems.append(f"{_cn} TIMEOUT (15s)")
@@ -427,11 +436,16 @@ class AgenticCoder:
                 if '/' in str(_pp) and len(str(_pp)) > 5:
                     project_path = str(_pp)
         
+        # SECURITY: enforce $HOME containment for project paths
+        _candidate = (Path(project_path) if project_path
+                      else _auto_project_dir(description)).expanduser().resolve()
+        _home = Path.home().resolve()
+        if not (_home in _candidate.parents or _candidate == _home):
+            raise ValueError(f"GÜVENLİK: proje yolu $HOME dışında: {_candidate}")
         task = CodingTask(
             description=description,
             language=language,
-            project_path=Path(project_path) if project_path
-                else _auto_project_dir(description),
+            project_path=_candidate,
         )
         task.project_path.mkdir(parents=True, exist_ok=True)
 
