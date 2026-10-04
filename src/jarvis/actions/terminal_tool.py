@@ -20,7 +20,7 @@ import time
 from jarvis.core.audit_log import log_action
 
 _MAX_OUTPUT = 12000
-_TIMEOUT = 30
+_TIMEOUT = 60
 
 _READONLY_PROGRAMS = {"pwd", "ls", "cat", "head", "tail", "grep", "rg", "find", "which", "whoami", "uname", "df", "du"}
 _GIT_READONLY = {"status", "diff", "log", "show", "branch", " rev-parse"}
@@ -156,6 +156,16 @@ def terminal_tool(
                        result="AWAITING_APPROVAL")
             return _preview(argv, cwd)
 
+    # ═══ STDIN DESTEGI ═══
+    # input() bekleyen programlar icin stdin verisi
+    # params["input"] ile LLM gonderebilir; yoksa bos string
+    stdin_data = params.get("input", params.get("stdin", ""))
+    if not stdin_data and any(
+        Path(arg).suffix == ".py" for arg in argv if Path(arg).suffix == ".py"
+    ):
+        # Python scriptleri muhtemelen input() ile menu sunuyor
+        stdin_data = "0\n0\n0\n0\n0\n"
+
     try:
         proc = subprocess.run(
             argv,
@@ -167,9 +177,22 @@ def terminal_tool(
             errors="replace",
             timeout=_TIMEOUT,
             env=os.environ.copy(),
+            input=stdin_data if stdin_data else None,
         )
-    except subprocess.TimeoutExpired:
-        return f"Komut {_TIMEOUT} saniyede zaman aşımına uğradı."
+    except subprocess.TimeoutExpired as exc:
+        # ═══ TIMEOUT'TA PARTIAL OUTPUT DON ═══
+        _out = ((exc.stdout or "") if isinstance(exc.stdout, str)
+                else (exc.stdout or b"").decode("utf-8", "replace")).strip()
+        _err = ((exc.stderr or "") if isinstance(exc.stderr, str)
+                else (exc.stderr or b"").decode("utf-8", "replace")).strip()
+        parts = [f"KOMUT {_TIMEOUT} SN'DE ZAMAN ASIMINA UGRADI"]
+        parts.append("MUHTEMEL SEBEP: Program interaktif (input() bekliyor). "
+                     "Input parametresi ile cevap gonderin: {\"command\": \"...\", \"input\": \"1\\n2\\n\"}")
+        if _out:
+            parts.append(f"stdout (kismi):\n{_out[-_MAX_OUTPUT:]}")
+        if _err:
+            parts.append(f"stderr (kismi):\n{_err[-_MAX_OUTPUT:]}")
+        return "\n\n".join(parts)
     except FileNotFoundError:
         return f"Komut bulunamadı: {argv[0]}"
     except OSError as exc:
@@ -182,4 +205,6 @@ def terminal_tool(
         parts.append(f"stdout:\n{stdout[-_MAX_OUTPUT:]}")
     if stderr:
         parts.append(f"stderr:\n{stderr[-_MAX_OUTPUT:]}")
+    if not stdout and not stderr and proc.returncode == 0:
+        parts.append("Komut basariyla tamamlandi (cikti yok).")
     return "\n\n".join(parts)
