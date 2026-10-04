@@ -16,6 +16,8 @@ if _platform.system() == "Windows":
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
+from jarvis.tool_gate import gate, audit_entry, is_destructive
+from jarvis.path_utils import safe_resolve, register_project, lookup_project, list_projects
 import os
 import re
 import threading
@@ -1591,6 +1593,15 @@ class JarvisLive:
         self.ui.set_state("THINKING")
 
         r = None  # UnboundLocalError guard
+
+        # ═══ MERKEZI TOOL GATE ═══
+        _gate_block = gate(name, args, user_approved=getattr(self, '_tool_approved', False))
+        if _gate_block:
+            result = _gate_block
+            audit_entry(name, args, result, approved=False)
+            audit_entry(name, args, str(result or ""), approved=True)
+        return result
+
         if name == "save_memory":
             category = args.get("category", "notes")
             key      = args.get("key", "")

@@ -571,6 +571,12 @@ class AgenticCoder:
         lines = [
             f"🔧 AGENTIC CODING — {task.description}",
             f"📂 Konum: {task.project_path}",
+            "Dosyalar:\n" + "\n".join(
+                f"  ✅ {task.project_path / f} ({len(c)} karakter)"
+                for f, c in sorted(task.files_written.items())
+            ),
+            f"▶️ Çalıştırma: cd {task.project_path} && python3 main.py",
+            f"📊 Durum: {task.status}",
             "\n".join(
                 f"  - {task.project_path / fname} ({len(c)} karakter)"
                 for fname, c in sorted(task.files_written.items())
