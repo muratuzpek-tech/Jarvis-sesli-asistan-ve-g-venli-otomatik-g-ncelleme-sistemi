@@ -159,6 +159,8 @@ def terminal_tool(
     # ===== INTERAKTIF -> XTERM AC =====
     _should_xterm = False
     _target_py = next((str(a) for a in argv if str(a).endswith('.py')), None)
+    if _target_py and not Path(_target_py).is_absolute():
+        _target_py = str(Path(cwd) / _target_py)
     if _target_py:
         try:
             _txt = Path(_target_py).read_text()

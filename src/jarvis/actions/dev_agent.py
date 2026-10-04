@@ -14,6 +14,18 @@ import typing
 from pathlib import Path
 
 
+
+def _find_existing_project(project_name: str) -> Path | None:
+    """Ayni isimde mevcut proje var mi? Varsa o klasoru done."""
+    base = Path.home() / "jarvis_programs"
+    if not base.exists():
+        return None
+    name_lower = (project_name or "").lower().replace(" ", "_")[:30]
+    for d in sorted(base.iterdir()):
+        if d.is_dir() and name_lower[:10] in d.name.lower():
+            return d
+    return None
+
 def get_base_dir():
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
