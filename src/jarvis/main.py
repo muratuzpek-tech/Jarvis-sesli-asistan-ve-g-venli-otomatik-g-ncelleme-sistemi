@@ -1572,6 +1572,18 @@ class JarvisLive:
         )
 
         parts.append(
+            "7. When citing source code, quote the ACTUAL function/class names "
+            "from the file content you read. Never invent function names. "
+            "If the real function is terminal_tool, say terminal_tool, not run_command."
+            "8. When explaining why something happened, quote the EXACT condition "
+            "that caused it including real function and real variable names."
+            "9. If tool output proves a previous claim wrong, say 'Yanlis iddiami duzeltiyorum' "
+            "then state the corrected fact only."
+            "10. Hardware warnings like GPU percent must ONLY come from actual tool output. "
+            "NEVER emit system warnings with numbers that no tool produced."
+        )
+
+        parts.append(
             "FINAL LANGUAGE RULE: Answer this user only in natural Turkish. Do not answer "
             "in Russian, Telugu, or any other language merely because speech recognition "
             "produced a foreign-script fragment. Never repeat the same sentence twice."

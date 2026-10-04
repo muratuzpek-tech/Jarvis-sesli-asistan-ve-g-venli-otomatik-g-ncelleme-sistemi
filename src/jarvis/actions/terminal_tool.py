@@ -48,17 +48,21 @@ def _is_readonly(argv: list[str]) -> bool:
     program = Path(argv[0]).name.lower()
     args = argv[1:]
     home = Path.home().resolve()
+    _ro_prog = program in _READONLY_PROGRAMS
     for token in args:
         if token.startswith("-"):
             continue
         if token.startswith("/"):
             try:
                 if not Path(token).resolve().is_relative_to(home):
-                    return False
+                    if not _ro_prog:
+                        return False
             except OSError:
-                return False
+                if not _ro_prog:
+                    return False
         if token.startswith("../") or token == ".." or "/../" in token:
-            return False
+            if not _ro_prog:
+                return False
     if program in _READONLY_PROGRAMS:
         return True
     if program == "git":
