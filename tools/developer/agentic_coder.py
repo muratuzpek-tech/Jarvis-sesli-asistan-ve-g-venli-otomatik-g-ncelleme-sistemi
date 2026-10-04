@@ -370,9 +370,14 @@ class AgenticCoder:
                 from google import genai
                 client = genai.Client(api_key=api_key)
                 try:
+                    from google.genai import types as _gtypes
                     resp = client.models.generate_content(
                         model="gemini-2.0-flash",
                         contents=prompt,
+                        config=_gtypes.GenerateContentConfig(
+                            max_output_tokens=8192,
+                            temperature=0.3,
+                        ),
                     )
                     return resp.text or ""
                 finally:
@@ -395,14 +400,14 @@ class AgenticCoder:
                 model=os.environ.get("OLLAMA_CODER_MODEL", "qwen2.5:7b"),
                 messages=[{"role": "user", "content": prompt}],
                 format="json",
-                options={"temperature": 0.2},
+                options={"temperature": 0.2, "num_predict": 8192, "num_ctx": 16384},
             )
             return resp.get("message", {}).get("content", "")
         except Exception as e:
             logger.warning(f"[Coder] Ollama da yok ({type(e).__name__})")
             return json.dumps({
                 "thought": "LLM bulunamadı",
-                "action": "accept",
+                "action": "error",
                 "args": {},
                 "response": "HATA: Kullanılabilir LLM yok (Gemini/Ollama)",
             })
