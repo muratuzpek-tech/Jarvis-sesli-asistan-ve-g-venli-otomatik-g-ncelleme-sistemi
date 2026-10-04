@@ -79,3 +79,6 @@ log.txt
 memory/*_log.jsonl
 memory/*_log.json
 memory/error_log.json
+
+# Runtime log rotation files
+*.log.*
