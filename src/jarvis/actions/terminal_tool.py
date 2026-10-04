@@ -156,6 +156,48 @@ def terminal_tool(
                        result="AWAITING_APPROVAL")
             return _preview(argv, cwd)
 
+    # ===== INTERAKTIF -> XTERM AC =====
+    _should_xterm = False
+    _target_py = next((str(a) for a in argv if str(a).endswith('.py')), None)
+    if _target_py:
+        try:
+            _txt = Path(_target_py).read_text()
+            if 'input(' in _txt:
+                _should_xterm = True
+        except Exception:
+            pass
+    if _should_xterm:
+        import shutil as _sh
+        _term = None
+        for _c in ('xterm', 'konsole', 'gnome-terminal', 'kitty', 'alacritty'):
+            if _sh.which(_c):
+                _term = _c
+                break
+        if _term:
+            _cmd_str = _display_command(argv)
+            _pause = '; echo; read -p "_" _x'
+            _inner = "cd '" + str(cwd) + "' && " + _cmd_str + _pause
+            _full = [_term]
+            if _term == 'gnome-terminal':
+                _full += ['--', 'bash', '-lc', _inner]
+            else:
+                _full += ['-e', 'bash', '-c', _inner]
+            try:
+                subprocess.Popen(
+                    _full,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return (
+                    'PROGRAM YENI TERMINALDE ACILDI!' + chr(10) +
+                    'Komut: ' + _cmd_str + chr(10) +
+                    'Klasor: ' + str(cwd) + chr(10) +
+                    'Terminal: ' + _term + chr(10) +
+                    'Kullanici pencereden interaktif kullanabilir.'
+                )
+            except Exception as _e:
+                return 'Terminal acma hatasi: ' + str(_e)
+
     # ═══ STDIN DESTEGI ═══
     # input() bekleyen programlar icin stdin verisi
     # params["input"] ile LLM gonderebilir; yoksa bos string
