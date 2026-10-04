@@ -222,7 +222,7 @@ HER FONKSİYON ÇALIŞIR KOD İÇERMELİ. `python3 dosya.py` ile HATASIZ çalı�
 - Dosyalar arası import'ları doğru yaz
 - TÜM dosyaları YAZDIĞINDAN EMİN OL!
 - Her dosyayı ayrı ayrı yaz: ana dosya, yardımcı modül, config vb.
-- ANA DOSYAYI (main.py / target_filename) ATLA!
+- TÜM dosyaları yaz — main.py DAHİL!
 - Üretilen dosya sayısı = istenen dosya sayısı eşleşmeden ACCEPT yapma.
 
 ÇIKTI FORMATI (SADECE JSON):
@@ -509,6 +509,7 @@ class AgenticCoder:
                 prompt += f"\n═══ YAZILAN: {_wl} ═══\n"
                 prompt += f"═══ FARKLI BİR DOSYA YAZ! {_wl[-1]} TEKRAR YAZMA! ═══\n"
             raw = self._model_fn(prompt)
+            self._ui_progress(f"    🔍 RAW[:200]: {repr(raw[:200])}")
             decision = _parse_model_response(raw)
 
             if not decision:
@@ -523,6 +524,7 @@ class AgenticCoder:
             args = decision.get("args", {})
             response = decision.get("response", "")
 
+            self._ui_progress(f"    🎯 action={action} file={args.get('filename','?')} thought={thought[:60]}")
             step = CodingStep(step_num=i + 1, thought=thought, action=action)
 
             # ── ZERO PROGRESS TRACKER: 3 boş iterasyon → zorla write prompt ──
