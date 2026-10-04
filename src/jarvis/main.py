@@ -2086,6 +2086,14 @@ class JarvisLive:
                 await asyncio.sleep(RETRY_DELAY)
                 continue
 
+
+    @staticmethod
+    def _safe_put(q, item):
+        try:
+            q.put_nowait(item)
+        except Exception:
+            pass
+
     async def _receive_audio(self):
         print("[JARVIS] 👂 Recv started")
         out_buf, in_buf = [], []
@@ -2105,7 +2113,7 @@ class JarvisLive:
                             # (24000 Hz × 2 bytes/sample × 0.05 s = 2400 bytes per slice)
                             _SLICE = 2400
                             for _i in range(0, len(_audio_data), _SLICE):
-                                self.audio_in_queue.put_nowait_nooverflow(_audio_data[_i : _i + _SLICE])
+                                self._safe_put(self.audio_in_queue, _audio_data[_i : _i + _SLICE])
 
                     if response.server_content:
                         sc = response.server_content
@@ -2670,7 +2678,7 @@ class JarvisLive:
                 speaking = self._is_speaking
             if not speaking and not self.ui.muted:
                 try:
-                    self.out_queue.put_nowait_nooverflow(chunk)
+                    self._safe_put(self.out_queue, chunk)
                 except asyncio.QueueFull:
                     pass
 
