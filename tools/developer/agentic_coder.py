@@ -372,9 +372,7 @@ class AgenticCoder:
             self._ui_progress(f"  ⚙️ Iterasyon {task.iterations}/{self._max}")
 
             # ── LLM'e sorma ────────────────────────────────────
-            _remaining = [f for f in task.expected_files if f not in task.files_written]
-        _rem_note = f"\n\n*** ONEMLI: Henuz yazilmayan dosyalar: {_remaining} ***\nBunlari MUTLAKA yaz!' " if _remaining else ""
-        prompt = self._build_prompt(task, steps, last_run_output, last_error, target_filename) + _rem_note
+            prompt = self._build_prompt(task, steps, last_run_output, last_error, target_filename)
             raw = self._model_fn(prompt)
             decision = _parse_model_response(raw)
 
