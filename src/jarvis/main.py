@@ -2002,7 +2002,7 @@ class JarvisLive:
                 _level_state["last_print"] = now
                 peak = int(_np.abs(indata).max()) if indata.size else 0
                 rms = float(_np.sqrt(_np.mean(_np.square(indata.astype(_np.float32))))) if indata.size else 0.0
-                _bar = 
+                _bar = "█" * min(50, peak // 200)
                 _LOG.debug(f"peak={peak} rms={rms:.0f}")
                 try:
                     self.ui.set_voice_volume(min(1.0, rms / 4500.0))

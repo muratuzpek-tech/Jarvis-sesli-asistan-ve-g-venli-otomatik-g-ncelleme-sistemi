@@ -130,9 +130,7 @@ def terminal_tool(
             return f"Dizin değiştirildi: {_cd_target}"
 
     try:
-        # normalize ext
-    argv = [a.replace(chr(46)+chr(112)+chr(121)+chr(116)+chr(104)+chr(111)+chr(110), chr(46)+chr(112)+chr(121)) if a.endswith('.python') else a for a in argv]
-    argv = shlex.split(command, posix=os.name != "nt")
+        argv = shlex.split(command, posix=os.name != "nt")
     except ValueError as exc:
         return f"Komut ayrıştırılamadı: {exc}"
     if not argv:
