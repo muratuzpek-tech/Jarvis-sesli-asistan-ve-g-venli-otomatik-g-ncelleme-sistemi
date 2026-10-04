@@ -469,8 +469,10 @@ class AgenticCoder:
             for f in task.expected_files
         )
         if len(task.expected_files) >= 3 and not _has_real_test:
-            task.expected_files.append('tests/__init__.py')
-            task.expected_files.append('tests/test_core.py')
+            if 'tests/__init__.py' not in task.expected_files:
+                task.expected_files.append('tests/__init__.py')
+            if 'tests/test_core.py' not in task.expected_files:
+                task.expected_files.append('tests/test_core.py')
         _tc_m = _re.search(r'(\d+)\s+(?:adet\s+)?test\b', description, _re.I)
         if _tc_m:
             task.min_test_count = int(_tc_m.group(1))
@@ -497,6 +499,15 @@ class AgenticCoder:
 
             # ── LLM'e sorma ────────────────────────────────────
             prompt = self._build_prompt(task, steps, last_run_output, last_error, target_filename)
+            _missing = [f for f in task.expected_files if f not in task.files_written]
+            if _missing:
+                prompt += "\n\n═══ KALAN DOSYALAR (HENÜZ YAZILMADI — HEMEN ŞİMDİ YAZ) ═══\n"
+                for _mf in _missing:
+                    prompt += f"  → {_mf}\n"
+            if task.files_written:
+                _wl = list(task.files_written.keys())
+                prompt += f"\n═══ YAZILAN: {_wl} ═══\n"
+                prompt += f"═══ FARKLI BİR DOSYA YAZ! {_wl[-1]} TEKRAR YAZMA! ═══\n"
             raw = self._model_fn(prompt)
             decision = _parse_model_response(raw)
 
@@ -506,7 +517,9 @@ class AgenticCoder:
                 break
 
             thought = decision.get("thought", "")
-            action = decision.get("action", "accept").lower()
+            action = decision.get("action", "unknown").lower()
+            if action not in ("write", "fix", "accept", "run", "inspect"):
+                self._ui_progress(f"    ⚠️ Bilinmeyen action: {action} → atlanıyor")
             args = decision.get("args", {})
             response = decision.get("response", "")
 
@@ -532,14 +545,13 @@ class AgenticCoder:
                         _all_clean = False
                         break
             if _all_clean and task.iterations >= 3:
-                task.accepted = True
                 task.final_response = f"Tum dosyalar yazildi ve temiz: {sorted(task.files_written.keys())}"
                 steps.append(CodingStep(step_num=i+1, thought="auto-accept: all files valid", action="accept", detail="SMART_EXIT", success=True))
                 break
 
 
             # ── ZERO PROGRESS: 3 boş → zorla dosya yazdır ──
-            if action not in ("write", "fix", "accept"):
+            if action not in ("write", "fix"):
                 task._zero_progress += 1
             else:
                 task._zero_progress = 0
@@ -663,6 +675,7 @@ class AgenticCoder:
                     step.detail = f"❌ ACCEPT REJECTED ({len(_vp)} sorun)"
                     step.success = False
                     steps.append(step)
+                    self._ui_progress(f"    ❌ ACCEPT REDDEDILDI ({len(_vp)} sorun): {_vp[0][:80] if _vp else ''}")
                     continue
                 step.detail = f"✅ ACCEPT: {response[:100]}"
                 step.success = True
