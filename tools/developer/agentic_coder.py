@@ -89,8 +89,6 @@ class CodingTask:
     expected_files: list[str] = field(default_factory=list)
     last_content_hash: str = ""
     stuck_count: int = 0
-    last_content_hash: str = ""
-    stuck_count: int = 0
     iterations: int = 0
     errors: list[str] = field(default_factory=list)
     rewrite_counts: dict = field(default_factory=dict)
@@ -108,6 +106,28 @@ class CodingStep:
     detail: str = ""
     success: bool = False
 
+
+
+
+def _fn_role_hints(filename: str, task) -> str:
+    """Return role hints based on file type — generic, not hardcoded."""
+    ext = Path(filename).suffix.lower()
+    if filename.lower() in ('readme.md', 'readme.rst'):
+        return 'Project documentation: setup, usage, architecture, testing instructions.'
+    if 'test' in filename.lower():
+        return 'Test file: pytest-style test functions (def test_*), cover edge cases.'
+    if ext == '.py':
+        lower = filename.lower()
+        if 'model' in lower or 'schema' in lower:
+            return 'Data classes/dataclass/TypeScript interfaces — pure structure definitions.'
+        if 'storage' in lower or 'db' in lower or 'repo' in lower:
+            return 'File/DB I/O — persistence layer with CRUD operations.'
+        if 'cli' in lower or 'view' in lower or 'ui' in lower:
+            return 'User interface — input/output/display layer.'
+        if 'main' in lower or 'app' in lower or 'run' in lower:
+            return 'Entry point — imports and wires other modules together.'
+        return 'Business logic/utility functions as described in the task.'
+    return 'As described in the task.'
 
 # ── System Prompt ─────────────────────────────────────────────
 
@@ -333,6 +353,16 @@ class AgenticCoder:
         Returns:
             str: Final özet + yapılan işlerin listesi
         """
+        # Extract project_path from description if not explicitly passed
+        if not project_path:
+            import re as _rp
+            _path_m = _rp.search(r'(~/[\w/\-_.]+|/[\w/\-_.]+)', str(description))
+            if _path_m:
+                _pp = Path(_path_m.group()).expanduser()
+                # Only use if it looks like a project dir (not just a word)
+                if '/' in str(_pp) and len(str(_pp)) > 5:
+                    project_path = str(_pp)
+        
         task = CodingTask(
             description=description,
             language=language,
@@ -343,12 +373,22 @@ class AgenticCoder:
 
         # Auto-parse expected files from description
         import re as _re
-        _fn_pattern = _re.findall(r"(?:[\w]+\.py|[\w]+\.js|[\w]+\.ts|[\w]+\.html|[\w]+\.css|[\w]+\.json|[\w]+\.txt)", description)
+        _fn_pattern = _re.findall(r"(?:[\w/]+\.py|[\w/]+\.js|[\w/]+\.ts|[\w/]+\.html|[\w/]+\.css|[\w/]+\.json|[\w/]+\.txt|[\w/]+\.md|[\w/]+\.toml|[\w/]+\.cfg|[\w/]+\.ini|[\w/]+\.yml|[\w/]+\.yaml|[\w/]+\.rst)", description)
+        # Also catch bare directory references like "tests/" or "src/"
+        _dir_pattern = _re.findall(r"(?<![\w/])([a-zA-Z_][\w]*[/\\])(?![\w])", description)
+        for _d in _dir_pattern:
+            _fn_pattern.append(_d.rstrip("/\\") + "/__init__.py")
         task.expected_files = list(dict.fromkeys(_fn_pattern))  # unique, preserve order
         if target_filename and target_filename not in task.expected_files:
             task.expected_files.append(target_filename)
         if not task.expected_files:
             task.expected_files = [f"main.{language}"]
+        # Always require README.md and tests/ for multi-file projects
+        if 'README.md' not in task.expected_files:
+            task.expected_files.append('README.md')
+        if len(task.expected_files) >= 3 and not any('test' in f.lower() for f in task.expected_files):
+            task.expected_files.append('tests/__init__.py')
+            task.expected_files.append('tests/test_core.py')
         self._ui_progress(f"  [PLAN] Beklenen dosyalar: {task.expected_files}")
 
         steps: list[CodingStep] = []
@@ -392,7 +432,13 @@ class AgenticCoder:
                 task._zero_progress = 0
 
             # ═══ SMART EXIT: tum dosyalar yazildi + compile temiz → accept ═══
-            _all_clean = len(task.files_written) >= len(task.expected_files)
+            _enforce = set()
+            _enforce.add('README.md')
+            _has_test = any('test' in f.lower() for f in task.files_written)
+            if not _has_test and len(task.expected_files) >= 3:
+                _enforce.add('tests/__init__.py')
+            _all_required = set(task.expected_files) | _enforce
+            _all_clean = _all_required.issubset(set(task.files_written.keys()))
             if _all_clean:
                 for _fn, _fc in task.files_written.items():
                     try:
@@ -446,8 +492,8 @@ class AgenticCoder:
                     task.same_file_writes = 0
                 task.last_written_file = filename
 
-                if not content or len(content.strip()) < 100:
-                    step.detail = f"COK KISA kod ({len(content)} char) — en az 50 gerekli, REDDEDILDI"
+                if not content or len(content.strip()) < 200:
+                    step.detail = f"COK KISA kod ({len(content)} char) — en az 200 gerekli, REDDEDILDI"
                     step.success = False
                     steps.append(step)
                     last_error = f"CONTENT_TOO_SHORT: {len(content)} char kod yazdin. En az 200 karakter dolu, calisan kod yaz."
@@ -472,19 +518,6 @@ class AgenticCoder:
                     if task.stuck_count >= 3:
                         last_error = f"STUCK: Ayni kodu 3 kez urettin! DAHA FAZLA KOD, daha detayli yaz. {filename} icin en az 300 karakter dolu fonksiyon yaz."
                         step.detail = f"🔄 STUCK ({task.stuck_count}x ayni icerik) — DETAYLI yazmalisin"
-                        step.success = False
-                        steps.append(step)
-                        continue
-                else:
-                    task.stuck_count = 0
-                task.last_content_hash = _ch
-
-                _ch = str(hash(content))[:8]
-                if _ch == task.last_content_hash:
-                    task.stuck_count += 1
-                    if task.stuck_count >= 3:
-                        last_error = f"STUCK: Ayni kodu {task.stuck_count}x urettin! DETAYLI yaz — en az 300 karakter, fonksiyonlar dolu olsun."
-                        step.detail = f"STUCK ({task.stuck_count}x) — detayli yaz"
                         step.success = False
                         steps.append(step)
                         continue
@@ -636,7 +669,7 @@ class AgenticCoder:
             _lc = task.files_written[_wr[-1]]
             parts.append(_lc[:300])
             parts.append('ONCEKI DOSYA YUKARIDA. AYNISINI TEKRAR YAZMA!')
-            parts.append('models.py=sadece sinif/dataclass. storage.py=dosya I/O JSON. cli.py=input/print/menu. analyzer.py=hesaplama/rapor. main.py=import+baglama')
+            parts.append(f'\n## DOSYA {fname} = {_fn_role_hints(fname, task)}')
             parts.append('SIMDI MUTLAKA FARKLI dosya yaz.')
         parts.append("\n## SIMDI NE YAPMALISIN?")
         if not task.files_written:
@@ -660,17 +693,8 @@ class AgenticCoder:
         lines = [
             f"🔧 AGENTIC CODING — {task.description}",
             f"📂 Konum: {task.project_path}",
-            "Dosyalar:\n" + "\n".join(
-                f"  ✅ {task.project_path / f} ({len(c)} karakter)"
-                for f, c in sorted(task.files_written.items())
-            ),
-            f"▶️ Çalıştırma: cd {task.project_path} && python3 main.py",
             f"📊 Durum: {'tamamlandi' if task.accepted else 'hatali'}",
-            "\n".join(
-                f"  - {task.project_path / fname} ({len(c)} karakter)"
-                for fname, c in sorted(task.files_written.items())
-            ),
-            f"▶️ Çalıştır: python3 {task.project_path / 'main.py'}",
+            f"▶️ Çalıştır: cd {task.project_path} && python3 main.py",
             f"📊 {task.iterations} iterasyon, {len(task.files_written)} dosya, "
             f"{len(task.errors)} hata, {'ACCEPTED ✅' if task.accepted else 'NOT ACCEPTED ⚠️'}",
             "",
