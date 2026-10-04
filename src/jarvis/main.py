@@ -1,3 +1,11 @@
+
+
+def put_nowait_nooverflow(q, item):
+    """QueueFull sessizce yut"""
+    try:
+        q.put_nowait(item)
+    except Exception:
+        pass
 import platform as _platform
 import subprocess as _subprocess
 
@@ -2092,7 +2100,7 @@ class JarvisLive:
                             # (24000 Hz × 2 bytes/sample × 0.05 s = 2400 bytes per slice)
                             _SLICE = 2400
                             for _i in range(0, len(_audio_data), _SLICE):
-                                self.audio_in_queue.put_nowait(_audio_data[_i : _i + _SLICE])
+                                self.audio_in_queue.put_nowait_nooverflow(_audio_data[_i : _i + _SLICE])
 
                     if response.server_content:
                         sc = response.server_content
@@ -2657,7 +2665,7 @@ class JarvisLive:
                 speaking = self._is_speaking
             if not speaking and not self.ui.muted:
                 try:
-                    self.out_queue.put_nowait(chunk)
+                    self.out_queue.put_nowait_nooverflow(chunk)
                 except asyncio.QueueFull:
                     pass
 
@@ -2733,7 +2741,7 @@ class JarvisLive:
                 ):
                     self.session          = session
                     self.audio_in_queue   = asyncio.Queue()
-                    self.out_queue        = asyncio.Queue(maxsize=200)
+                    self.out_queue        = asyncio.Queue(maxsize=200000)
                     self._turn_done_event = asyncio.Event()
 
                     # Reset transient state that must not carry over from a previous session

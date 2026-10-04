@@ -72,6 +72,7 @@ class CodingTask:
     iterations: int = 0
     errors: list[str] = field(default_factory=list)
     rewrite_counts: dict = field(default_factory=dict)
+    status: str = "running"
     accepted: bool = False
     final_response: str = ""
 
@@ -621,7 +622,7 @@ class AgenticCoder:
                 for f, c in sorted(task.files_written.items())
             ),
             f"▶️ Çalıştırma: cd {task.project_path} && python3 main.py",
-            f"📊 Durum: {task.status}",
+            f"📊 Durum: {'tamamlandi' if task.accepted else 'hatali'}",
             "\n".join(
                 f"  - {task.project_path / fname} ({len(c)} karakter)"
                 for fname, c in sorted(task.files_written.items())
