@@ -67,6 +67,8 @@ class CodingTask:
     expected_files: list[str] = field(default_factory=list)
     last_content_hash: str = ""
     stuck_count: int = 0
+    last_content_hash: str = ""
+    stuck_count: int = 0
     iterations: int = 0
     errors: list[str] = field(default_factory=list)
     accepted: bool = False
@@ -311,7 +313,7 @@ class AgenticCoder:
             description=description,
             language=language,
             project_path=Path(project_path) if project_path
-                else (Path.home() / "jarvis_programs"),
+                else _auto_project_dir(description),
         )
         task.project_path.mkdir(parents=True, exist_ok=True)
 
@@ -400,6 +402,19 @@ class AgenticCoder:
                     if task.stuck_count >= 3:
                         last_error = f"STUCK: Ayni kodu 3 kez urettin! DAHA FAZLA KOD, daha detayli yaz. {filename} icin en az 300 karakter dolu fonksiyon yaz."
                         step.detail = f"🔄 STUCK ({task.stuck_count}x ayni icerik) — DETAYLI yazmalisin"
+                        step.success = False
+                        steps.append(step)
+                        continue
+                else:
+                    task.stuck_count = 0
+                task.last_content_hash = _ch
+
+                _ch = str(hash(content))[:8]
+                if _ch == task.last_content_hash:
+                    task.stuck_count += 1
+                    if task.stuck_count >= 3:
+                        last_error = f"STUCK: Ayni kodu {task.stuck_count}x urettin! DETAYLI yaz — en az 300 karakter, fonksiyonlar dolu olsun."
+                        step.detail = f"STUCK ({task.stuck_count}x) — detayli yaz"
                         step.success = False
                         steps.append(step)
                         continue
@@ -556,6 +571,11 @@ class AgenticCoder:
         lines = [
             f"🔧 AGENTIC CODING — {task.description}",
             f"📂 Konum: {task.project_path}",
+            "\n".join(
+                f"  - {task.project_path / fname} ({len(c)} karakter)"
+                for fname, c in sorted(task.files_written.items())
+            ),
+            f"▶️ Çalıştır: python3 {task.project_path / 'main.py'}",
             f"📊 {task.iterations} iterasyon, {len(task.files_written)} dosya, "
             f"{len(task.errors)} hata, {'ACCEPTED ✅' if task.accepted else 'NOT ACCEPTED ⚠️'}",
             "",
@@ -583,6 +603,27 @@ class AgenticCoder:
 
 
 # ── Kolay Kullanım Fonksiyonu ────────────────────────────────
+
+def _auto_project_dir(description: str) -> Path:
+    """Her proje icin ayri alt klasor: ~/jarvis_programs/<slug>/"""
+    import re
+    from datetime import datetime
+    base = Path.home() / "jarvis_programs"
+    tr = str.maketrans("çğıöşüÇĞİÖŞÜ", "cgiosuCGIOSU")
+    text = (description or "").translate(tr).lower()
+    stop = {"bir","ile","yaz","olsun","icin","ve","veya","dosya","dosyalardan",
+            "dosyalari","kaliteli","calisan","kod","yazilsin","gelistirme",
+            "the","for","and","with","app","application","create","build",
+            "python","projesi","proje","uygulama","olustur","yap","tam"}
+    words = [w for w in re.findall(r"[a-z0-9]+", text) if len(w) >= 3 and w not in stop]
+    name = "_".join(words[:3]) if words else f"proje_{datetime.now().strftime('%Y%m%d_%H%M')}"
+    target = base / name
+    n = 2
+    while target.exists() and any(target.iterdir()):
+        target = base / f"{name}_{n}"
+        n += 1
+    return target
+
 
 async def agentic_solve(
     description: str,
