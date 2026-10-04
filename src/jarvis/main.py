@@ -603,6 +603,27 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "code_search",
+        "description": (
+            "Fast code search and navigation via agentgrep. Four modes: "
+            "'find' = discover relevant files by topic (USE FIRST in coding tasks), "
+            "'grep' = exact word/symbol search grouped by file+function, "
+            "'outline' = show file structure without reading whole file, "
+            "'trace' = find where a symbol is defined/called/rendered. "
+            "Prefer this over reading files blindly during coding tasks."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "mode": {"type": "STRING", "description": "find | grep | outline | trace"},
+                "query": {"type": "STRING", "description": "For find/grep: keywords. For trace: subject:X relation:Y"},
+                "path": {"type": "STRING", "description": "Directory to search in"},
+                "file": {"type": "STRING", "description": "For outline mode: file path"},
+            },
+            "required": ["mode", "query"]
+        }
+    },
+    {
         "name": "dev_agent",
         "description": "Builds complete multi-file projects from scratch: plans, writes files, installs deps, opens VSCode, runs and fixes errors. The first call (no confirm_code) never installs or runs anything, it only returns a preview and a confirm_code. You MUST relay what will be built to the user and wait for their explicit confirmation in their next message before calling 'dev_agent' again with that confirm_code. Never chain both calls in the same turn without a real user confirmation in between.",
         "parameters": {
@@ -1616,6 +1637,23 @@ class JarvisLive:
                 id=fc.id, name=name,
                 response={"result": _gate_block}
             )
+
+        if name == "code_search":
+            import subprocess as _sp, shutil as _sh
+            _ag = _sh.which("agentgrep") or str(Path.home() / "agentgrep/target/release/agentgrep")
+            _mode = args.get("mode", "find")
+            _q = args.get("query", "")
+            _p = args.get("path", "") or args.get("file", "")
+            _cmd = [_ag, _mode, *_q.split()]
+            if _p:
+                _cmd += ["--path", _p]
+            try:
+                _res = _sp.run(_cmd, capture_output=True, text=True, timeout=15)
+                out = _res.stdout.strip() or _res.stderr.strip()[:500]
+                r = types.FunctionResponse(id=fc.id, name=name, response={"result": out[:3000]})
+            except Exception as _e:
+                r = types.FunctionResponse(id=fc.id, name=name, response={"result": f"code_search error: {_e}"})
+
 
         if name == "save_memory":
             category = args.get("category", "notes")

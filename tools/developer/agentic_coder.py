@@ -42,6 +42,29 @@ from typing import Any, Callable
 
 logger = logging.getLogger("tools.developer.agentic")
 
+
+# ═══ AGENTGREP HELPER ═══
+import subprocess as _sp_mod
+import shutil as _sh_mod
+
+def _agentgrep(*args):
+    ag = _sh_mod.which("agentgrep") or str(Path.home() / "agentgrep/target/release/agentgrep")
+    try:
+        r = _sp_mod.run([ag, *args], capture_output=True, text=True, timeout=15)
+        return (r.stdout or "").strip()[:2000]
+    except Exception:
+        return ""
+
+def _scan_project(description, root):
+    findings = []
+    keywords = [w for w in str(description).lower().split() if len(w) > 3][:8]
+    if keywords:
+        out = _agentgrep("find", *keywords, "--path", str(root))
+        if out:
+            findings.append(f"[FILES]\n{out}")
+    return "\n\n".join(findings)[:3000]
+
+
 # ── Sabitler ──────────────────────────────────────────────────
 MAX_ITERATIONS = 25
 _MAX_OUTPUT_CHARS = 2000
