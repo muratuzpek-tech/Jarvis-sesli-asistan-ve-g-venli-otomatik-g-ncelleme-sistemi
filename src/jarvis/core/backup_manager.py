@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 import threading
 import uuid
 from datetime import datetime, timezone, timedelta

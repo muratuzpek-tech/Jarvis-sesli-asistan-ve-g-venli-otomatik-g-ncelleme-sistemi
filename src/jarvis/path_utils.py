@@ -3,6 +3,7 @@
 from __future__ import annotations
 import os
 from pathlib import Path
+from datetime import UTC
 
 _WHITELIST_ROOTS = [
     Path.home(),
@@ -34,7 +35,7 @@ def project_registry_path() -> Path:
 
 def register_project(name: str, root: Path, entry: str, status: str = "generated"):
     import json
-    from datetime import datetime, timezone
+    from datetime import datetime
     rp = project_registry_path()
     rp.parent.mkdir(parents=True, exist_ok=True)
     data = {}
@@ -47,8 +48,8 @@ def register_project(name: str, root: Path, entry: str, status: str = "generated
         "project_root": str(root),
         "entry_point": entry,
         "status": status,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
     }
     rp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return data[name]

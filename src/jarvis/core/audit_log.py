@@ -90,7 +90,7 @@ def read_recent(count: int = 50) -> list[dict]:
     entries: list[dict] = []
     try:
         log_path = _get_log_path()
-        with open(log_path, "r", encoding="utf-8") as fh:
+        with open(log_path, encoding="utf-8") as fh:
             for line in fh.readlines()[-count:]:
                 try:
                     entries.append(json.loads(line))

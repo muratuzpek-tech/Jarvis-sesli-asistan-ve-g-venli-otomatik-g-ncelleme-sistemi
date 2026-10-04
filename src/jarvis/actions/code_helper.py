@@ -365,7 +365,8 @@ def _detect_intent(description: str, file_path: str, code: str) -> str:
 
 def _open_in_editor(path: Path) -> str:
     """Yazilan dosyayi varsayilan uygulamayla ac."""
-    import subprocess, shutil
+    import subprocess
+    import shutil
     cmd = shutil.which("xdg-open") or shutil.which("open")
     if not cmd:
         return ""
@@ -380,7 +381,9 @@ def _open_in_editor(path: Path) -> str:
 
 def _try_run_simple(path: Path) -> str:
     """Guvenli basit CLI scriptlerini calistir ve ciktisi goster."""
-    import subprocess, ast, sys
+    import subprocess
+    import ast
+    import sys
     if path.suffix != ".py":
         return ""
     try:

@@ -29,8 +29,7 @@ if _platform.system() == "Windows":
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
-from .tool_gate import gate, audit_entry, is_destructive
-from .path_utils import safe_resolve, register_project, lookup_project, list_projects
+from .tool_gate import gate, audit_entry
 import os
 import re
 import threading
@@ -1639,7 +1638,8 @@ class JarvisLive:
             )
 
         if name == "code_search":
-            import subprocess as _sp, shutil as _sh
+            import subprocess as _sp
+            import shutil as _sh
             _ag = _sh.which("agentgrep") or str(Path.home() / "agentgrep/target/release/agentgrep")
             _mode = args.get("mode", "find")
             _q = args.get("query", "")

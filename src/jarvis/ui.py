@@ -1609,7 +1609,7 @@ class MainWindow(QMainWindow):
         sc_full.activated.connect(self._toggle_fullscreen)
         sc_intr = QShortcut(QKeySequence("Escape"), self)
         sc_intr.activated.connect(self._do_interrupt)
-        sc_remote = QShortcut(QKeySequence("F6"), self)
+        self._sc_remote = QShortcut(QKeySequence("F6"), self)
         # ── UI FIX: Keyboard shortcut yardimi (Ctrl+F1) ──────────────
         sc_help = QShortcut(QKeySequence("Ctrl+F1"), self)
         sc_help.activated.connect(self._show_shortcut_help)
@@ -1626,7 +1626,7 @@ class MainWindow(QMainWindow):
             "  Ctrl+F1     Bu yardim penceresi\n"
         )
         self._log.append_log("SYS: " + shortcuts_text.replace("\n", " | "))
-        sc_remote.activated.connect(self._open_remote)
+        self._sc_remote.activated.connect(self._open_remote)
 
     def _pill(self, text: str, color: str = C.PRI) -> QLabel:
         w = QLabel(text); w.setAlignment(Qt.AlignmentFlag.AlignCenter)

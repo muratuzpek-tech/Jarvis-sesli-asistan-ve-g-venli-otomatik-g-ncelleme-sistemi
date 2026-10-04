@@ -34,8 +34,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -377,7 +375,7 @@ class AgenticCoder:
             decision = _parse_model_response(raw)
 
             if not decision:
-                self._ui_progress(f"  ⚠️ JSON parse başarısız → accept")
+                self._ui_progress("  ⚠️ JSON parse başarısız → accept")
                 task.final_response = f"Kod oluşturuldu ({task.iterations} iterasyon). JSON parse hatası."
                 break
 
@@ -534,7 +532,7 @@ class AgenticCoder:
                 else:
                     listing = [p.name for p in task.project_path.iterdir()]
                     last_run_output = f"DIR: {task.project_path}\nFiles: {listing}"
-                    step.detail = f"👁️ Dizin listelendi"
+                    step.detail = "👁️ Dizin listelendi"
                 step.success = True
                 steps.append(step)
 
@@ -643,7 +641,7 @@ class AgenticCoder:
         if not task.files_written:
             parts.append("→ İlk dosyayı yaz (action: write)")
         elif last_error:
-            parts.append(f"→ Hatayı düzelt (action: fix) veya yeniden yaz (action: write)")
+            parts.append("→ Hatayı düzelt (action: fix) veya yeniden yaz (action: write)")
         elif not last_run_output:
             parts.append("→ Çalıştır (action: run)")
         elif "[SUCCESS]" in last_run_output:

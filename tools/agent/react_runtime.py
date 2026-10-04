@@ -36,10 +36,9 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 
 from tools.registry import registry, ToolContext
-from tools.security import SecurityLevel
 
 logger = logging.getLogger("tools.agent.react")
 

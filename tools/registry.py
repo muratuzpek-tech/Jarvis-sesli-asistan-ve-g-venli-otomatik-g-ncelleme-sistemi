@@ -26,13 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import inspect
 import logging
-import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
-from tools.security import SecurityLevel, SecurityVerdict, security
+from tools.security import SecurityLevel, security
 from tools.schemas import ToolSchema, register_schema
 
 logger = logging.getLogger("tools.registry")

@@ -20,7 +20,7 @@ import enum
 import re
 import time
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -126,7 +126,7 @@ class SecurityManager:
                 allowed=True,
                 requires_confirmation=True,
                 confirm_prompt=prompt,
-                reason=f"DANGEROUS — proceeding with caution",
+                reason="DANGEROUS — proceeding with caution",
             )
 
         self._audit(tool_name, args, blocked=False, reason="allowed")

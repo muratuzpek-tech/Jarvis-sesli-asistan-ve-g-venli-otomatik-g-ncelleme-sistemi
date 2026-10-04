@@ -22,9 +22,8 @@ import logging
 import os
 import re
 import webbrowser
-from typing import Any
 
-from tools.media.sentiment import analyze_sentiment, SentimentResult
+from tools.media.sentiment import analyze_sentiment
 
 logger = logging.getLogger("tools.media.spotify")
 

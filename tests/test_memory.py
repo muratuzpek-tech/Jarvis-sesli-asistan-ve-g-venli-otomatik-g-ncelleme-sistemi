@@ -1,5 +1,6 @@
 """tests/test_memory.py — Memory regression tests"""
-import sys, asyncio
+import sys
+import asyncio
 sys.path.insert(0, '.')
 from memory.vector_memory import VectorMemory
 

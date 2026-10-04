@@ -1,10 +1,9 @@
 """tests/test_registry.py — Registry regression tests"""
-import sys, asyncio
+import sys
+import asyncio
 sys.path.insert(0, '.')
 
-import pytest
-from tools.registry import registry, ToolContext, register
-from tools.security import SecurityLevel
+from tools.registry import registry, register
 
 
 def test_none_args():

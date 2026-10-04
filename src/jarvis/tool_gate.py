@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ def _audit_log() -> Path:
 
 def audit_entry(tool_name: str, params: dict, result: str, approved: bool):
     entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "tool": tool_name,
         "params": {k: str(v)[:80] for k, v in (params or {}).items()},
         "result": str(result or "")[:200],

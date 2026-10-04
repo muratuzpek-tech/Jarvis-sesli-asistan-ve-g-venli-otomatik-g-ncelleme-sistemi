@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import sqlite3
 import threading
 import time
@@ -30,7 +29,6 @@ from uuid import uuid4
 from memory.embedding_provider import (
     cosine_similarity,
     embed_text,
-    embed_batch,
     get_embedding_dim,
 )
 
