@@ -625,7 +625,11 @@ class LogWidget(QTextEdit):
 
     def _step(self):
         if self._pos < len(self._text):
-            ch  = self._text[self._pos]
+            # Daktilo efekti uzun metinlerde dakikalar surmesin: metin uzadikca
+            # ve sirada bekleyen mesaj biriktikce her adimda daha cok karakter
+            # yazilir (uzun bir metin en fazla ~1 sn'de biter).
+            n   = max(1, len(self._text) // 120, len(self._queue) * 4)
+            ch  = self._text[self._pos:self._pos + n]
             cur = self.textCursor()
             fmt = cur.charFormat()
             col = {
@@ -640,7 +644,7 @@ class LogWidget(QTextEdit):
             cur.insertText(ch, fmt)
             self.setTextCursor(cur)
             self.ensureCursorVisible()
-            self._pos += 1
+            self._pos += len(ch)
         else:
             self._tmr.stop()
             cur = self.textCursor()
