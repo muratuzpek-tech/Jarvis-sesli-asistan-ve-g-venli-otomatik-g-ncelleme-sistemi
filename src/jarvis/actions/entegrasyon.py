@@ -1,15 +1,16 @@
 """
-entegrasyon.py — kullanıcının açık isteğiyle eklenen TAM OTOMATİK entegrasyon
-adımı: discovery.py'nin Gemini'den "tool" değerlendirmesi aldığı bir şeyi,
-KULLANICIYA SORMADAN Jarvis'in kendi çalışan koduna ekler.
+entegrasyon.py — discovery.py/github_arama.py'nin "tool" dediği bir adayı
+Jarvis'in kodu içine yeni bir actions/discovered_<isim>.py modülü olarak ekler.
+YALNIZCA kullanıcının gerçek onayından sonra çağrılır (agent_loop ->
+entegrasyon_uygula; tools_kopru.is_destructive fail-closed).
 
-AÇIKÇA KABUL EDİLEN RİSK (kullanıcıya söylendi, kullanıcı onayladı):
-Bu, discovery.py'nin başındaki tasarım notunda anlatılan güvenlik sınırını
-BİLEREK KALDIRIR. Buradaki tek koruma self_improve.py'nin ZATEN kullandığı
-standart: tam proje yedeği + söz dizimi/import doğrulaması + otomatik geri
-alma. Bu, "açıkça bozuk mu" sorusuna cevap verir — kötü niyetli ama
-sözdizimi geçerli bir kodu YAKALAMAZ. Kullanıcıya bu sınırlama açıkça
-anlatıldı.
+GÜVENLİK SINIRLARI:
+  * LLM'in yazdığı modül entegrasyon sırasında HİÇ import edilmez ve
+    çalıştırılmaz; doğrulama tamamen statiktir (bkz. _verify_module).
+  * Entegre edilen araç ALLOWED_TOOLS'a girse bile salt-okunur
+    işaretlenmediği için her çağrıda kullanıcı onayı ister.
+  * Statik kontroller "açıkça bozuk mu" sorusuna cevap verir; kötü niyetli
+    ama geçerli bir kodu YAKALAMAZ - asıl koruma çağrı başına onaydır.
 
 Kapsam (bilerek dar tutuldu): bulunan yetenek, karantinadaki gerçek kod
 okunarak Gemini'ye YENİ, TEK bir actions/discovered_<isim>.py modülü
@@ -27,7 +28,6 @@ from __future__ import annotations
 import ast
 import json
 import re
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -164,52 +164,106 @@ def _has_top_level_run(source: str) -> bool:
     return any(isinstance(n, ast.FunctionDef) and n.name == "run" for n in tree.body)
 
 
-def _verify_module(path: Path, mod_name: str) -> tuple[bool, str]:
-    """self_improve.py'nin _verify() ile AYNI standart olan (A) sozdizimi ve
-    (B) gercek import kontrolune ek olarak, discovered_jc.py'de YAKALANAMAYAN
-    bir hatanin (fonksiyon govdesindeki GECIKMELI/ic ice import - ör. `def
-    run(): import jc`) bir DAHA gozden kacmamasi icin (D) bagimlilik taramasi,
-    (E) requirements.txt karsilastirmasi ve (C) gercek bir bos-parametre
-    cagri testi eklendi. Hepsi ayri bir Python surecinde calisir (bu surecin
-    kendi import cache'ini kirletmemek icin).
+def _import_time_calls(tree: ast.Module) -> list[int]:
+    """Modul import edildiginde CALISACAK cagrilarin satir numaralari: ust
+    seviye ifadeler, sinif govdeleri, decorator'lar, varsayilan arguman ve
+    annotation'lar. Fonksiyon/lambda govdeleri (yalnizca cagrilinca calisir)
+    ve `if __name__ == "__main__":` blogu sayilmaz."""
+    found: list[int] = []
 
-    ONEMLI AYRIM: 'ModuleNotFoundError / No module named' (eksik bagimlilik)
-    HER ZAMAN sert bir basarisizliktir (FAILED_DEPENDENCY) - kod calismaz.
-    Ama run({}) BASKA bir sebeple hata verirse (ör. fonksiyon gercek
-    parametre bekliyor, bos sozlukle KeyError/ValueError firlatiyor) bu bir
-    HATA DEGILDIR - bircok gercek arac bos girdiyle mantikli sekilde hata
-    verir. Bu durumda YUMUSAK bir uyari notu eklenir ama dogrulama BASARILI
-    sayilir - yoksa gercekte calisan araclari yanlislikla reddederiz (false
-    positive)."""
+    def visit(node: ast.AST, in_body: bool) -> None:
+        if (not in_body and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and node.decorator_list):
+            # `@x` cagri sozdizimi olmadan da import aninda x(fn) calistirir.
+            found.append(node.decorator_list[0].lineno)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for dec in node.decorator_list:
+                visit(dec, False)
+            visit(node.args, False)
+            if node.returns is not None:
+                visit(node.returns, False)
+            for stmt in node.body:
+                visit(stmt, True)
+            return
+        if isinstance(node, ast.Lambda):
+            visit(node.args, False)
+            visit(node.body, True)
+            return
+        if not in_body and isinstance(node, (ast.Call, ast.Await)):
+            found.append(getattr(node, "lineno", 0))
+        for child in ast.iter_child_nodes(node):
+            visit(child, in_body)
+
+    for stmt in tree.body:
+        if (isinstance(stmt, ast.If) and isinstance(stmt.test, ast.Compare)
+                and isinstance(stmt.test.left, ast.Name) and stmt.test.left.id == "__name__"):
+            continue
+        visit(stmt, False)
+    return found
+
+
+def _unresolvable_imports(tree: ast.Module) -> list[str]:
+    """Kodun (fonksiyon govdeleri dahil) import ettigi ust seviye paketlerden
+    ortamda BULUNAMAYANLAR. find_spec ust seviye bir ad icin modulu
+    calistirmaz, yalnizca bulucularda arar."""
+    import importlib.util
+    missing: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name.split(".")[0] for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            names = [node.module.split(".")[0]]
+        else:
+            continue
+        for name in names:
+            try:
+                found = importlib.util.find_spec(name) is not None
+            except (ImportError, ValueError):
+                found = False
+            if not found and name not in missing:
+                missing.append(name)
+    return missing
+
+
+def _verify_module(path: Path, mod_name: str) -> tuple[bool, str]:
+    """LLM'in yazdigi discovered_* modulunu YALNIZCA STATIK olarak dogrular.
+
+    GUVENLIK (2026-10-05): Eskiden modul ayri bir Python surecinde
+    `import actions.<mod>` ve `run({})` ile CALISTIRILIYORDU. O surec bir
+    sandbox degildi: kullanicinin tum dosya yetkileri, ortam degiskenlerindeki
+    API anahtarlari ve ag erisimiyle, disaridan gelen kaynaktan uretilmis kodu
+    kullanici hicbir satirini gormeden calistiriyordu. Artik modul hicbir
+    asamada import edilmez/calistirilmaz; kontroller AST ile yapilir:
+      (A) soz dizimi, (B) ust seviye `def run(parameters)`,
+      (C) import aninda calisacak kod yok (ust seviye/sinif govdesi/decorator/
+          varsayilan arguman icinde cagri),
+      (D) kodun import ettigi paketler ortamda bulunuyor.
+    Kodun ilk gercek calismasi, tools_kopru.is_destructive (fail-closed)
+    geregi her cagrida kullanicinin acik onayindan sonra olur."""
     try:
         source = path.read_text(encoding="utf-8")
-        ast.parse(source)
+        tree = ast.parse(source)
     except SyntaxError as e:
         return False, f"Söz dizimi hatası (satır {e.lineno}): {e.msg}"
     except Exception as e:
         return False, f"Dosya okunamadı: {type(e).__name__}: {e}"
 
-    # (B) mevcut, degismedi: ust-duzey import calisiyor mu?
-    proc = subprocess.run(
-        [sys.executable, "-c", f"import actions.{mod_name}"],
-        capture_output=True, text=True, timeout=30, cwd=str(BASE_DIR),
-    )
-    if proc.returncode != 0:
-        return False, f"Import hatası: {proc.stderr.strip()[-600:]}"
+    if not _has_top_level_run(source):
+        return False, "Modül üst seviyede `def run(parameters: dict) -> str` tanımlamıyor."
 
-    # (D) + (E): dosyanin TAMAMINDA (fonksiyon govdeleri DAHIL - ast.walk
-    # ic ice/gecikmeli importlari da yakalar) kullanilan 3. parti paketleri
-    # tara, ortamda kurulu olmayanlari requirements.txt ile karsilastir.
-    try:
-        from jarvis.actions.capability_registry import guess_missing_deps
-        missing_deps = guess_missing_deps(path)
-    except Exception as e:
-        missing_deps = []
-        print(f"[Entegrasyon] ⚠️ Bağımlılık taraması atlandı (capability_registry hatası): {e}")
+    calls = _import_time_calls(tree)
+    if calls:
+        lines = ", ".join(str(n) for n in sorted(set(calls))[:5])
+        return False, (
+            f"Modül import edilirken kod çalıştırıyor (satır {lines}). Üst seviyede, "
+            f"sınıf gövdesinde, decorator'da ya da varsayılan argümanda çağrı olmamalı; "
+            f"tüm iş run() içinde yapılmalı."
+        )
 
-    if missing_deps:
+    missing = _unresolvable_imports(tree)
+    if missing:
         declared = _read_requirements_names()
-        truly_missing = [d for d in missing_deps if d.lower().replace("_", "-") not in declared]
+        truly_missing = [d for d in missing if d.lower().replace("_", "-") not in declared]
         if truly_missing:
             return False, (
                 f"FAILED_DEPENDENCY: kod şu paketleri kullanıyor ama bunlar ne "
@@ -218,42 +272,18 @@ def _verify_module(path: Path, mod_name: str) -> tuple[bool, str]:
                 f"paketleri EKLEME' idi — bu ihlal edilmiş görünüyor."
             )
 
-    # (C) gercek, izole bir 'bos parametreyle cagirmayi dene' testi - SADECE
-    # modul ust seviyede bir `run()` tanimliyorsa (discovered_* modulleri).
-    warning_note = ""
-    if _has_top_level_run(source):
-        test_script = (
-            f"import sys\n"
-            f"from actions.{mod_name} import run\n"
-            f"try:\n"
-            f"    run({{}})\n"
-            f"    print('RUN_OK')\n"
-            f"except Exception as e:\n"
-            f"    print('RUN_EXC:' + type(e).__name__ + ':' + str(e)[:300])\n"
-            f"    sys.exit(2)\n"
-        )
-        try:
-            run_proc = subprocess.run(
-                [sys.executable, "-c", test_script],
-                capture_output=True, text=True, timeout=15, cwd=str(BASE_DIR),
-            )
-        except subprocess.TimeoutExpired:
-            warning_note = " (uyarı: run({}) çağrısı zaman aşımına uğradı - kritik değil, gerçek kullanımda ağ/IO bekliyor olabilir)"
-        else:
-            out = (run_proc.stdout or "").strip()
-            if run_proc.returncode == 2 and out.startswith("RUN_EXC:"):
-                exc_info = out[len("RUN_EXC:"):]
-                exc_type = exc_info.split(":", 1)[0]
-                if exc_type in ("ModuleNotFoundError", "ImportError") or "No module named" in exc_info:
-                    return False, f"FAILED_DEPENDENCY: run({{}}) çağrısı sırasında eksik modül: {exc_info[:300]}"
-                # BASKA bir istisna - yumusak uyari, dogrulama basarili sayilir.
-                warning_note = f" (uyarı: run({{}}) boş parametreyle {exc_info[:200]} verdi - muhtemelen gerçek parametre gerekiyor, kritik değil)"
-            elif run_proc.returncode not in (0, 2):
-                # beklenmeyen bir cikis kodu (ör. segfault benzeri) - sert
-                # basarisizlik degil ama bilgilendirici bir uyari olarak isaretle.
-                warning_note = f" (uyarı: run({{}}) testi beklenmeyen çıkış kodu {run_proc.returncode} verdi)"
+    return True, "ok"
 
-    return True, ("ok" + warning_note if warning_note else "ok")
+
+def _verify_syntax(path: Path) -> tuple[bool, str]:
+    """tools_kopru.py yamasinin soz dizimi kontrolu (calistirmadan)."""
+    try:
+        ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError as e:
+        return False, f"Söz dizimi hatası (satır {e.lineno}): {e.msg}"
+    except Exception as e:
+        return False, f"Dosya okunamadı: {type(e).__name__}: {e}"
+    return True, "ok"
 
 
 def _patch_tools_kopru(mod_name: str, tool_name: str, description: str) -> tuple[bool, str, str]:
@@ -393,10 +423,7 @@ def integrate_discovered_tool(item: dict) -> str:
         return msg
 
     TOOLS_KOPRU_PATH.write_text(patched_content_or_error, encoding="utf-8")
-    kopru_ok, kopru_detail = _verify_module(TOOLS_KOPRU_PATH, "tools_kopru")
-    # tools_kopru.py'nin kendi modul adiyla import kontrolu icin kucuk bir
-    # duzeltme: yukaridaki _verify_module "actions.<isim>" import ediyor,
-    # tools_kopru icin de bu dogru (actions.tools_kopru).
+    kopru_ok, kopru_detail = _verify_syntax(TOOLS_KOPRU_PATH)
     if not kopru_ok:
         TOOLS_KOPRU_PATH.write_text(original_kopru, encoding="utf-8")
         target.unlink(missing_ok=True)
@@ -416,8 +443,9 @@ def integrate_discovered_tool(item: dict) -> str:
         pass  # kayit basarisiz olsa bile gercek entegrasyon zaten tamamlandi
 
     verify_suffix = f" [doğrulama notu: {module_verify_note}]" if module_verify_note != "ok" else ""
-    msg = (f"'{source_name}' otomatik olarak kendime entegre ettim — yeni araç: '{tool_name}'. "
-            f"{description} Tam proje yedeği: {backup_path.name}.{verify_suffix}")
+    msg = (f"'{source_name}' kendime entegre ettim — yeni araç: '{tool_name}'. "
+            f"{description} Kod entegrasyon sırasında çalıştırılmadı; araç her "
+            f"çağrıda senin onayını isteyecek. Tam proje yedeği: {backup_path.name}.{verify_suffix}")
     _log({"source_name": source_name, "status": "integrated", "tool_name": tool_name,
           "backup": str(backup_path), "verify_note": module_verify_note})
     return msg

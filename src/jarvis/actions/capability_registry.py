@@ -11,7 +11,6 @@ actions/capability_resolver.py'nin de referans verdiği aynı ilke).
 Kullananlar (bu arayüz KORUNDU, imzalar değişmedi):
   - actions/discovery.py::_gap_analyze() / _capability_usability_analyze()
     -> get_capability_summary()
-  - actions/entegrasyon.py::_verify_module() -> guess_missing_deps(path)
   - actions/capability_resolver.py -> get_capabilities(),
     _extract_dict_keys(source, dict_name)
 """
@@ -139,7 +138,10 @@ def _risk_for_tool(name: str, allowed_keys: list[str]) -> str:
     if name in _CONDITIONAL_RISK:
         return "conditional"
     if name in allowed_keys:
-        return "low"
+        # tools_kopru.is_destructive fail-closed: yalnizca acikca salt-okunur
+        # isaretli araclar onaysiz calisir.
+        from jarvis.actions.tools_kopru import _READONLY_TOOLS
+        return "low" if name in _READONLY_TOOLS else "high"
     return "unknown"
 
 

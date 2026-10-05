@@ -187,7 +187,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "web_search":        "query: string; mode: 'search'|'news'|'research'|'price' (opsiyonel)",
     "weather_report":    "city: string",
     "system_status":     "parametre gerekmez - CPU/RAM/GPU/sicaklik bilgisi doner",
-"system_scan_and_repair": "parametre gerekmez - projenin tum python dosyalarini gercekten import ederek calisma zamani hatalarini tarar, pyproject.toml bagimliliklarinin surum uyumunu kontrol eder ve eksik/uyumsuz olanlari onay istemeden otomatik kurar",
+"system_scan_and_repair": "parametre gerekmez - projenin tum python dosyalarini gercekten import ederek calisma zamani hatalarini tarar, pyproject.toml bagimliliklarinin surum uyumunu kontrol eder ve (yalnizca JARVIS_ALLOW_DEP_INSTALL=1 ise) eksik/uyumsuz olanlari kurar - kullanici onayi ister",
     "computer_settings": "action: volume/brightness/wifi gibi TEK bir OS ayari; description; value (opsiyonel). shutdown/restart/lock_screen YIKICI sayilir.",
     "send_message":      "receiver; message_text; platform (whatsapp/telegram/vb.) - kullanici adina disariya mesaj gittigi icin HER ZAMAN once onay ister.",
     "github_arama":      "query: string; min_stars (opsiyonel); max_results (opsiyonel) - GitHub'da salt-okunur depo arar, hicbir sey indirmez.",
@@ -197,17 +197,44 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
 }
 
 
-# Yikici sayilan (action, tool) kombinasyonlari - agent_loop bunlari asla
-# dogrudan calistirmaz, once kullaniciya sorar. file_controller icin liste
-# TUTULMAZ: salt-okunur eylemler (file_controller.READONLY_ACTIONS) disindaki
-# her eylem - takma adlar ve bilinmeyen adlar dahil - yikicidir.
-_DESTRUCTIVE_SETTINGS_ACTIONS = {"shutdown", "restart", "lock_screen", "lock"}
+# Onaysiz calisabilen araclar - FAIL-CLOSED: bu kumede OLMAYAN her arac
+# (send_message, entegrasyon_uygula, entegrasyon ile eklenen discovered_*
+# araclari, bilinmeyen adlar dahil) yikici sayilir ve agent_loop onu ancak
+# kullanicinin gercek onayindan sonra calistirir. Eskiden ALLOWED_TOOLS'taki
+# HER arac onaysiz geciyordu; entegrasyon_uygula ALLOWED_TOOLS'a satir
+# ekledigi icin disaridan gelen kod sonraki her cagrida onaysiz calisiyordu.
+# Buraya yalnizca diske/sisteme yazmayan, disariya bir sey gondermeyen ve kod
+# calistirmayan araclar eklenir.
+_READONLY_TOOLS = frozenset({
+    "windows_system",      # sabit allowlist'li salt-okunur sistem sorgulari
+    "web_search",
+    "weather_report",
+    "system_status",
+    "github_arama",        # yalnizca arama API'si; hicbir sey indirmez
+    # GitHub'dan aday bulur, karantinaya INDIRIR ve LLM'e analiz ettirir; kodu
+    # calistirmaz, Jarvis'in koduna yazmaz. Yazan adim (entegrasyon_uygula)
+    # ayri ve her zaman onayli.
+    "github_arac_bul_ve_degerlendir",
+})
+
+# file_controller ve computer_settings eyleme gore degisir; burada da yalnizca
+# ACIKCA listelenen eylemler onaysizdir. file_controller icin liste
+# file_controller.READONLY_ACTIONS'tir (takma adlar dahil tek kaynak).
+# computer_settings'in diger eylemleri (type_text + enter bir terminale komut
+# yazabilir, close_app, toggle_wifi, bos action -> LLM ile tahmin ...) onay
+# ister.
+_SAFE_SETTINGS_ACTIONS = frozenset({
+    "volume", "volume_up", "volume_down", "volume_set",
+    "mute", "unmute", "toggle_mute",
+    "brightness", "brightness_up", "brightness_down",
+})
 
 
 def is_destructive(tool: str, parameters: dict) -> bool:
-    """Bu adimin geri donusu zor/riskli olup olmadigini belirler. Emin
-    olunamayan/beklenmedik bir durumda GUVENLI tarafta hata yapariz:
-    True (onay iste) don."""
+    """Bu adim kullanici onayi olmadan calistirilamaz mi? Fail-closed:
+    yalnizca acikca salt-okunur/guvenli isaretli araclar ve eylemler False
+    doner; geri kalan her sey (bilinmeyen ve entegre edilmis araclar dahil)
+    True."""
     params = parameters or {}
     action = str(params.get("action", "")).lower().strip()
 
@@ -215,33 +242,8 @@ def is_destructive(tool: str, parameters: dict) -> bool:
         from jarvis.actions.file_controller import is_readonly_action
         return not is_readonly_action(action)
     if tool == "computer_settings":
-        return action in _DESTRUCTIVE_SETTINGS_ACTIONS
-    if tool == "send_message":
-        # Kullanici adina disariya giden HER mesaj onay ister - bu,
-        # sistem talimatindaki "Sending any message on the user's
-        # behalf" kuraliyla birebir uyumlu.
-        return True
-    if tool == "discovery_register":
-        # Discovery.py'nin bulup Gemini'nin "tool" dedigi bir seyi kalici
-        # kayda gecirmek - internetten gelen bir seyi ilk defa Jarvis'in
-        # hafizasina almak oldugu icin savunma amacli hep onay ister,
-        # normalde zaten dogrudan awaiting_approval olarak olusturuluyor.
-        return True
-    if tool == "entegrasyon_uygula":
-        # GitHub'da bulunan bir adayi Jarvis'in GERCEK koduna (actions/,
-        # tools_kopru.py) yazar - discovery_register ile ayni sebeple
-        # (internetten gelen bir seyi ilk defa calisir hale getirmek) HER
-        # ZAMAN onay ister. github_arac_bul_ve_degerlendir'in KENDISI
-        # yikici DEGILDIR (sadece izole karantinaya indirir/analiz eder) -
-        # bu yuzden ayri, YIKICI bir ikinci arac olarak tutuluyor.
-        return True
-    if tool in {"backup_rollback", "vault_encrypt", "vault_decrypt"}:
-        return True
-    if tool in ALLOWED_TOOLS:
-        return False
-    # Taninmayan bir arac zaten call_tool() icinde NotAllowedTool ile
-    # reddedilecek, ama guvenlik icin burada da varsayilan True donelim.
-    return True
+        return action.replace(" ", "_").replace("-", "_") not in _SAFE_SETTINGS_ACTIONS
+    return tool not in _READONLY_TOOLS
 
 
 _APPROVED_TOOL: ContextVar[str | None] = ContextVar("jarvis_approved_tool", default=None)

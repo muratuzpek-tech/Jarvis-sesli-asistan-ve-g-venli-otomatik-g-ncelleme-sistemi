@@ -106,6 +106,7 @@ from jarvis.actions.audio_devices import (
 from jarvis.actions.resilience import CircuitBreaker
 from jarvis.actions.self_improve import self_improve
 from jarvis.actions.agent_loop import agent_loop_tool, start_background_loop as start_agent_loop
+from jarvis.actions.agent_loop import set_approval_hook as set_agent_loop_approval_hook
 from jarvis.actions.conversation_log import log_turn, recall_conversation
 from jarvis.actions.github_arama import github_search
 from jarvis.actions.discovered_topydo import run as discovered_topydo_run
@@ -682,18 +683,16 @@ TOOL_DECLARATIONS = [
             "candidates on its own and will ALWAYS ask for approval before integrating "
             "anything — it never does so silently. Use action=list when the "
             "user asks what background tasks are pending or what's awaiting approval. "
-            "CRITICAL: if a task is 'awaiting_approval' (a destructive step like deleting a file, "
-            "shutting down, or sending a message is waiting for permission) and the user says "
-            "something like 'onaylıyorum'/'evet yap'/'approve it' in that context, call this with "
-            "action=approve and that task's id. If they say 'iptal et'/'hayır'/'deny', use "
-            "action=deny with that task's id."
+            "Steps that wait for permission are asked to the user by Jarvis itself; only the "
+            "user's own spoken/written yes/no answer resolves them. This tool can NOT grant "
+            "permission. Use action=deny/cancel only when the user wants to drop a task."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":  {"type": "STRING", "description": "add | list | approve | deny"},
+                "action":  {"type": "STRING", "description": "add | list | deny | cancel | retry"},
                 "goal":    {"type": "STRING", "description": "The goal to work toward in the background (action=add only)."},
-                "task_id": {"type": "STRING", "description": "The short task id to approve/deny (action=approve or action=deny only)."},
+                "task_id": {"type": "STRING", "description": "The short task id (action=deny, cancel or retry only)."},
             },
             "required": ["action"]
         }
@@ -1200,6 +1199,91 @@ class JarvisLive:
         self.speak(f"[BRAIN_TEAM_ONAY_SONUC] {result}. Bunu kullanıcıya kısaca bildir.")
         return True
 
+    # ── Arka plan gorev dongusu (agent_loop) onayi ──────────────────────
+    # Brain Team ile ayni mekanizma: agent_loop onay bekleyen bir adimi
+    # set_approval_hook ile buraya bildirir; adim tek kullanimlik, 60 sn TTL'li
+    # yuvaya gorev kimligi + arac + argumanlardan olusan parmak iziyle
+    # kaydedilir. Gemini'nin agent_loop aracinda approve YOKTUR; onay yalnizca
+    # kullanicinin gercek turundaki "evet" ile verilir.
+    _agent_pending_task_id: str | None = None
+
+    @staticmethod
+    def _agent_loop_fingerprint_args(task_id: str, pending: dict | None) -> dict:
+        pending = pending or {}
+        return {"task_id": task_id, "tool": pending.get("tool"),
+                "parameters": pending.get("parameters")}
+
+    def request_agent_loop_approval(self, task_id: str, pending: dict, message: str) -> bool:
+        """agent_loop'un onay kancasi. Baska bir onay beklerken onun yuvasini
+        EZMEZ (kullanicinin X icin diyecegi "evet" Y'yi onaylamasin); ayni
+        adim zaten soruluyorsa tekrar konusmaz. Soruldu/soruluyorsa True."""
+        fingerprint = self._action_fingerprint(
+            "agent_loop", self._agent_loop_fingerprint_args(task_id, pending))
+        with self._confirmation_lock:
+            if self._pending_dangerous_action == "agent_loop":
+                return self._pending_dangerous_fingerprint == fingerprint
+            if self._pending_dangerous_action is not None:
+                return False
+            self._set_pending_dangerous("agent_loop", fingerprint)
+            self._agent_pending_task_id = task_id
+        try:
+            self.ui.write_log(f"[AGENT_LOOP_ONAY] {message}")
+        except Exception:
+            pass
+        self.speak(
+            f"[AGENT_LOOP_ONAY_ISTEGI] {message} Bunu kullanıcıya araç, argümanlar ve "
+            "hedefle birlikte aynen sor ve cevabını bekle. Onayı yalnızca kullanıcının "
+            "kendi cevabı verir; sen hiçbir araçla onay verme."
+        )
+        return True
+
+    def _handle_agent_loop_reply(self, text: str) -> bool:
+        """Kullanicinin GERCEK turu bekleyen agent_loop onayina cevapsa uygular:
+        "evet" -> approve_task, "hayir" -> deny_task. Islendiyse True."""
+        with self._confirmation_lock:
+            if self._pending_dangerous_action != "agent_loop" or not self._agent_pending_task_id:
+                return False
+            task_id = self._agent_pending_task_id
+        rejected = self._is_rejection(text)
+        confirmed = not rejected and self._is_confirmation(text)
+        if not (rejected or confirmed):
+            return False
+
+        from jarvis.actions import agent_loop as _agent_loop
+
+        if rejected:
+            with self._confirmation_lock:
+                if self._agent_pending_task_id != task_id:
+                    return True  # bu arada yeni bir istek duyuruldu; ona dokunma
+                self._set_pending_dangerous(None)
+                self._agent_pending_task_id = None
+            result = _agent_loop.deny_task(task_id)
+        else:
+            pending = _agent_loop.get_pending_action(task_id)
+            args = self._agent_loop_fingerprint_args(task_id, pending)
+            with self._confirmation_lock:
+                if not self._dangerous_confirmation_granted:
+                    self._grant_dangerous_confirmation()
+                ok = pending is not None and self._consume_dangerous_confirmation("agent_loop", args)
+                if not ok and self._pending_dangerous_action == "agent_loop":
+                    # Sure dolmus ya da adim degismis: hicbir sey calismaz,
+                    # guncel adim asagida yeniden sorulur.
+                    self._set_pending_dangerous(None)
+                self._agent_pending_task_id = None
+            if ok:
+                result = _agent_loop.approve_task(task_id, expected_action=pending)
+            else:
+                result = ("Onay uygulanmadı: onay süresi doldu ya da bekleyen adım "
+                          "değişti. Hiçbir şey çalıştırılmadı.")
+        try:
+            self.ui.write_log(f"[AGENT_LOOP] {result}")
+        except Exception:
+            pass
+        self.speak(f"[AGENT_LOOP_ONAY_SONUC] {result}. Bunu kullanıcıya kısaca bildir.")
+        # Siradaki bekleyen adim (ya da degismis adimin guncel hali) sorulur.
+        _agent_loop.announce_next_pending()
+        return True
+
     @staticmethod
     def _agentic_code_args(args: dict, description: str) -> dict:
         """code_helper/dev_agent argumanlarini agentic_code'a tasir.
@@ -1359,6 +1443,7 @@ class JarvisLive:
         self._dangerous_confirmation_granted = False
         self._tool_confirm_code = None
         self._brain_pending_task_id = None
+        self._agent_pending_task_id = None
         self._pending_terminal_command: dict | None = None
         self._confirmation_lock = threading.RLock()
         self._is_speaking         = False
@@ -1429,6 +1514,8 @@ class JarvisLive:
         # Bekleyen Brain Team onayina verilen cevap Gemini oturumu olmasa da
         # islenir (gorev orkestratorde bekliyor, Live baglantisi gerekmez).
         if self._handle_brain_team_reply(text):
+            return
+        if self._handle_agent_loop_reply(text):
             return
         if not self._loop or not self.session:
             return
@@ -2682,6 +2769,13 @@ class JarvisLive:
                             ):
                                 self._loop.run_in_executor(None, self._handle_brain_team_reply, full_in)
                                 full_in = ""
+                            elif (
+                                full_in
+                                and self._agent_pending_task_id
+                                and (self._is_confirmation(full_in) or self._is_rejection(full_in))
+                            ):
+                                self._loop.run_in_executor(None, self._handle_agent_loop_reply, full_in)
+                                full_in = ""
                             # Sesli komutlardan dosya islemlerini deterministik router'a aktar.
                             try:
                                 _voice_file_mod = match_file_modification(full_in)
@@ -3259,6 +3353,9 @@ class JarvisLive:
                     # bir kere baslatilir (start_background_loop guard'li),
                     # mic/hoparlor/Gemini oturumundan bagimsizdir.
                     try:
+                        # Onay bekleyen arka plan adimlari bu oturuma sorulur;
+                        # onay yalnizca kullanicinin gercek cevabindan gelir.
+                        set_agent_loop_approval_hook(self.request_agent_loop_approval)
                         start_agent_loop()
                     except Exception as e:
                         print(f"[JARVIS] ⚠️ agent_loop başlatılamadı: {e}")

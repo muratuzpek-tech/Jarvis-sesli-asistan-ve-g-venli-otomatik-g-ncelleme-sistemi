@@ -14,18 +14,14 @@ KULLANICIYLA BİRLİKTE KARARLAŞTIRILAN TASARIM SINIRLARI:
      tools_kopru.py'nin başındaki not — Downloads'ta bulunan başka
      Jarvis denemelerinde bunun ne kadar tehlikeli olabileceğini
      gördük).
-  3. Yıkıcı/geri dönüşü zor bir adım (dosya silme/taşıma, bilgisayarı
-     kapatma/yeniden başlatma, başkasına mesaj gönderme) ASLA doğrudan
-     çalıştırılmaz — kullanıcıya (best-effort) bir bildirim gönderilir
-     ve görev 'awaiting_approval' durumuna alınır. Kullanıcı normal
-     şekilde Jarvis'e "onaylıyorum" diyene kadar hiçbir şey yapılmaz.
-     TEK BİLİNÇLİ İSTİSNA: Downloads'ta keşfedilen bir aracın Jarvis'in
-     KENDİ KODUNA entegre edilmesi (bkz. _run_discovery_scan altındaki
-     not) — kullanıcı bunu AÇIKÇA, riski anlatıldıktan sonra istedi
-     ("sormadan kendisi entegre etsin"), bu yüzden bu TEK adım onay
-     BEKLEMEDEN çalışır; kalan tek güvenlik ağı entegrasyon.py'nin
-     yedek+doğrulama+geri-alma standardıdır, kullanıcıya SONRADAN
-     (whatsapp bildirimiyle) ne yapıldığı bildirilir.
+  3. Açıkça salt-okunur işaretli olmayan her adım (tools_kopru.
+     is_destructive, fail-closed: dosya değiştirme, mesaj gönderme,
+     entegrasyon ve entegre edilmiş araçlar dahil) ASLA doğrudan
+     çalıştırılmaz — görev 'awaiting_approval' durumuna alınır ve canlı
+     oturuma (set_approval_hook) araç/argüman/hedef ile sorulur. Onay
+     YALNIZCA kullanıcının gerçek bir sonraki turundaki "evet" cevabından
+     gelir; modelin agent_loop aracıyla gönderdiği task_id onay sayılmaz.
+     Keşfedilen bir aracın kaydı/entegrasyonu da istisnasız bu yoldan geçer.
   4. Tekrarlayan hatalar actions/resilience.py'nin error_log sistemiyle
      takip edilir — aynı sorun sürekli tekrarlarsa otomatik olarak daha
      sabırlı beklenir (devre kesici + artan backoff), sonsuz döngüyle
@@ -239,9 +235,12 @@ def _find_task(tasks: list[dict], task_id: str) -> dict | None:
     return None
 
 
-def approve_task(task_id: str) -> str:
-    """Onay bekleyen bir adimi GERCEKTEN calistirir - kullanici Jarvis'e
-    normal konusma icinde 'onaylıyorum' dedigi an bu cagrilir."""
+def approve_task(task_id: str, *, expected_action: dict) -> str:
+    """Onay bekleyen bir adimi GERCEKTEN calistirir. YALNIZCA main.py'nin
+    kullanici-turu onay yolu (_handle_agent_loop_reply) cagirir; Gemini
+    araci (agent_loop_tool) bu fonksiyona ulasamaz. expected_action,
+    kullaniciya sorulan ve onun onayladigi adimdir: gorevdeki bekleyen adim
+    o arada degistiyse hicbir sey calistirilmaz."""
     with _tasks_lock:
         tasks = _load_tasks()
         task = _find_task(tasks, task_id)
@@ -251,6 +250,10 @@ def approve_task(task_id: str) -> str:
             return f"'{task_id}' onay bekleyen bir görev değil (durum: {task['status']})."
 
         pending = task["pending_action"]
+        if pending != expected_action:
+            _log_event({"event": "approval_mismatch", "task_id": task_id})
+            return (f"'{task_id}' için bekleyen adım, onaylanan adımla aynı değil; "
+                    "hiçbir şey çalıştırılmadı.")
         try:
             result = call_approved_tool(pending["tool"], pending["parameters"])
             task["history"].append({
@@ -347,8 +350,95 @@ def _notify_pending_approval(task: dict, tool: str, parameters: dict, note: str)
     kayboldu goruldu - muhtemelen self_improve/entegrasyon bu dosyayi
     yeniden yazdi; eger tekrar kaybolursa, kok nedenini bulup
     KALICI hale getirin - bkz. konusma gecmisi 2026-09-15.)"""
-    print(f"[AgentLoop] ℹ️ Onay bekleyen adım (bildirim GÖNDERİLMEDİ - güvenlik "
-          f"nedeniyle devre dışı): görev='{task['goal'][:60]}' araç=[{tool}] not={note}")
+    print(f"[AgentLoop] ℹ️ Onay bekleyen adım: görev='{task['goal'][:60]}' "
+          f"araç=[{tool}] not={note}")
+    _announce(task)
+
+
+# --- Kullanici onayi (main.py'nin canli oturumu uzerinden) -------------------
+#
+# Onay bekleyen bir adim, main.py'nin Brain Team icin de kullandigi tek
+# kullanimlik, 60 sn TTL'li, parmak izi (gorev kimligi + arac + argumanlar)
+# bagli onay yuvasina kaydedilir; onay yalnizca kullanicinin gercek bir
+# sonraki turundaki "evet"/"hayir" cevabindan gelir. Modelin agent_loop
+# araciyla gonderdigi task_id ya da kod onay sayilmaz (bkz. agent_loop_tool).
+_approval_hook = None
+
+
+def set_approval_hook(hook) -> None:
+    """hook(task_id, pending_action, message) -> bool. Canli oturum bekleyen
+    adimi kullaniciya sorabildiyse True doner. Kayit aninda bekleyen en eski
+    gorev hemen sorulur (ör. onceki oturumdan kalan)."""
+    global _approval_hook
+    _approval_hook = hook
+    announce_next_pending()
+
+
+def get_pending_action(task_id: str) -> dict | None:
+    """Gorev hala onay bekliyorsa bekleyen adimin bir kopyasi."""
+    task = _find_task(_load_tasks(), task_id)
+    if task is None or task.get("status") != "awaiting_approval":
+        return None
+    pending = task.get("pending_action")
+    return json.loads(json.dumps(pending)) if isinstance(pending, dict) else None
+
+
+def _pending_target(tool: str, params: dict) -> str:
+    if tool == "file_controller":
+        try:
+            from jarvis.actions.file_controller import _resolve_path
+            base = _resolve_path(str(params.get("path") or "desktop"))
+            name = str(params.get("name") or "")
+            target = str((base / name if name else base).resolve())
+            if params.get("destination"):
+                target += f" → {_resolve_path(str(params['destination'])).resolve()}"
+            return target
+        except Exception:
+            return f"{params.get('path', '')}/{params.get('name', '')}"
+    for key in ("receiver", "source_name", "quarantine_path", "path", "file_path", "query"):
+        if params.get(key):
+            return str(params[key])
+    return "—"
+
+
+def describe_pending_action(task: dict) -> str:
+    pending = task.get("pending_action") or {}
+    tool = str(pending.get("tool") or "?")
+    params = pending.get("parameters") or {}
+    args = ", ".join(f"{k}={str(v)[:120]}" for k, v in params.items()) or "—"
+    return (
+        f"Onay gerekiyor: arka plan görevi '{str(task.get('goal', ''))[:80]}' şu adımı "
+        f"çalıştırmak istiyor. Araç: {tool}. Argümanlar: {args}. "
+        f"Hedef: {_pending_target(tool, params)}. "
+        f"Onaylamak için 'evet', iptal etmek için 'hayır' deyin. (görev id={task.get('id')})"
+    )
+
+
+def _announce(task: dict) -> bool:
+    hook = _approval_hook
+    pending = task.get("pending_action")
+    if hook is None or not isinstance(pending, dict):
+        return False
+    try:
+        return bool(hook(task["id"], json.loads(json.dumps(pending)),
+                         describe_pending_action(task)))
+    except Exception as e:
+        print(f"[AgentLoop] ⚠️ Onay isteği iletilemedi: {e}")
+        return False
+
+
+def announce_next_pending() -> None:
+    """Onay bekleyen en eski gorevi kullaniciya sorar. Ayni gorev zaten
+    soruluyorsa ya da baska bir onay bekliyorsa canli oturum bunu reddeder
+    (tekrar konusmaz, baskasinin onay yuvasini ezmez); _tick her turda
+    yeniden dener."""
+    if _approval_hook is None:
+        return
+    waiting = [t for t in _load_tasks()
+               if t.get("status") == "awaiting_approval" and t.get("pending_action")]
+    if waiting:
+        waiting.sort(key=lambda t: str(t.get("created_at", "")))
+        _announce(waiting[0])
 
 
 def _run_readonly_github_research(task: dict) -> bool:
@@ -597,15 +687,19 @@ def _tick() -> None:
         # A task becomes running while its planner/tool step is in flight.
         # Selecting only pending tasks left every such task permanently stuck.
         active = [t for t in tasks if t.get("status") in ("pending", "running")]
-        if not active:
-            if discovery_changed:
-                _save_tasks(tasks)
-            return
-        active.sort(key=lambda item: str(item.get("created_at", "")))
-        current = active[0]
-        current["status"] = "running"
-        current["updated_at"] = datetime.now().isoformat()
-        _save_tasks(tasks)
+        if active:
+            active.sort(key=lambda item: str(item.get("created_at", "")))
+            current = active[0]
+            current["status"] = "running"
+            current["updated_at"] = datetime.now().isoformat()
+            _save_tasks(tasks)
+        elif discovery_changed:
+            _save_tasks(tasks)
+    if not active:
+        # Kullanici onceki soruya cevap vermeden baska bir seyle devam ettiyse
+        # canli oturum bekleyen onayi temizler; gorev burada yeniden sorulur.
+        announce_next_pending()
+        return
 
     # LLM cagrisi (retry beklemeleri + Ollama yedegi dakikalar surebilir)
     # KILIT DISINDA yapilir. Eskiden kilit bu sure boyunca tutuluyordu;
@@ -623,6 +717,7 @@ def _tick() -> None:
                 latest[idx] = current
             break
         _save_tasks(latest)
+    announce_next_pending()
 
 
 def _worker_loop(interval_seconds: float) -> None:
@@ -658,7 +753,12 @@ def agent_loop_tool(parameters: dict | None = None, player=None) -> str:
     if action == "list":
         return list_tasks()
     if action == "approve":
-        return approve_task(params.get("task_id", ""))
+        # Model onay VEREMEZ: modelin gonderdigi task_id ya da kod onay
+        # sayilmaz. Onay yalnizca kullanicinin gercek "evet" cevabindan gelir
+        # (main.py: _handle_agent_loop_reply).
+        _log_event({"event": "model_approve_refused", "task_id": params.get("task_id", "")})
+        return ("Bu araçla onay verilemez. Onay bekleyen adım kullanıcıya soruldu; "
+                "yalnızca kullanıcının kendi 'evet' ya da 'hayır' cevabı geçerlidir.")
     if action == "deny":
         return deny_task(params.get("task_id", ""))
     # DUZELTME (kullanici onayli, 2026-09-16): "cancel" kanonik isim,
@@ -669,4 +769,4 @@ def agent_loop_tool(parameters: dict | None = None, player=None) -> str:
         return cancel_task(params.get("task_id", ""))
     if action == "retry":
         return retry_task(params.get("task_id", ""))
-    return f"Bilinmeyen action: '{action}'. add/list/approve/deny/cancel/retry kullanın."
+    return f"Bilinmeyen action: '{action}'. add/list/deny/cancel/retry kullanın."
