@@ -967,7 +967,118 @@ class JarvisLive:
     # GÜVENLİK DEĞİŞİKLİĞİ DEĞİL: Aynı değerler __init__'te zaten var.
     _pending_dangerous_action = None
     _dangerous_confirmation_granted = False
+    _dangerous_confirmation_at = 0.0
     _pending_terminal_command = None
+
+    # Kullanicinin acik onay ifadeleri (noktalama temizlenmis, kucuk harf).
+    _CONFIRMATION_WORDS = frozenset({
+        "onaylıyorum", "onayliyorum", "evet onaylıyorum", "evet onayliyorum",
+        "evet yap", "tamam onayla",
+        "tamam yap", "devam et", "approve", "approve it", "yes do it",
+    })
+    # Verilen onay bu kadar saniye gecerli; sonra yeniden sorulur.
+    _CONFIRMATION_TTL_S = 60.0
+
+    @staticmethod
+    def _normalize_confirmation(text: str) -> str:
+        cleaned = re.sub(r"[^\w\s]", " ", str(text or "").casefold())
+        return " ".join(cleaned.split())
+
+    # Cevap bu kelimelerden biriyle BASLIYORSA onay sayilir ("Evet.",
+    # "Evet devam edebilirsiniz", "evt onaylıyorum"). Canli testte birebir
+    # eslesme yetersiz kaldi: kullanici dogal olarak "Evet" diyor.
+    _AFFIRMATIVE_FIRST_WORDS = frozenset({
+        "evet", "evt", "tamam", "olur", "onay", "onaylıyorum", "onayliyorum",
+        "onayla", "devam", "yes", "approve", "ok", "okey",
+    })
+    # Cevabin herhangi bir yerinde bunlar varsa ASLA onay sayilmaz.
+    _NEGATIVE_WORDS = frozenset({
+        "hayır", "hayir", "iptal", "dur", "durdur", "vazgeç", "vazgec",
+        "yapma", "etme", "başlatma", "baslatma", "bekle", "istemiyorum",
+        "değil", "degil", "no", "cancel", "stop", "deny",
+    })
+
+    @classmethod
+    def _is_confirmation(cls, text: str) -> bool:
+        norm = cls._normalize_confirmation(text)
+        if not norm:
+            return False
+        tokens = norm.split()
+        if any(tok in cls._NEGATIVE_WORDS for tok in tokens):
+            return False
+        if norm in cls._CONFIRMATION_WORDS:
+            return True
+        if tokens[0] in cls._AFFIRMATIVE_FIRST_WORDS:
+            return True
+        # Canli ASR kelimeyi parcalara bolebiliyor ("onaylı yorum").
+        compact = norm.replace(" ", "")
+        return compact in {w.replace(" ", "") for w in cls._CONFIRMATION_WORDS}
+
+    def _grant_dangerous_confirmation(self) -> None:
+        self._dangerous_confirmation_granted = True
+        self._dangerous_confirmation_at = time.monotonic()
+
+    def _consume_dangerous_confirmation(self, action: str) -> bool:
+        """Bekleyen islem `action` ise ve gercek kullanici onayi son
+        _CONFIRMATION_TTL_S saniye icinde verildiyse True doner ve onayi
+        tuketir (tek kullanimlik)."""
+        fresh = (time.monotonic() - self._dangerous_confirmation_at) <= self._CONFIRMATION_TTL_S
+        if (
+            self._dangerous_confirmation_granted
+            and self._pending_dangerous_action == action
+            and fresh
+        ):
+            self._pending_dangerous_action = None
+            self._dangerous_confirmation_granted = False
+            return True
+        return False
+
+    @staticmethod
+    def _agentic_code_args(args: dict, description: str) -> dict:
+        """code_helper/dev_agent argumanlarini agentic_code'a tasir.
+        Eskiden project_name ve language dusuyordu; proje aciklamadan
+        uretilen bir klasore gidiyor, dil hep python oluyordu."""
+        out = {
+            "description": description,
+            "language": str(args.get("language") or "python"),
+        }
+        project_name = re.sub(r"[^\w\-]", "_", str(args.get("project_name") or "")).strip("_")
+        if project_name:
+            base = Path.home() / "jarvis_programs"
+            target = base / project_name
+            n = 2
+            # Dolu bir klasorun ustune yazma; agentic_coder'in otomatik
+            # klasor adlandirmasiyla ayni kural.
+            while target.exists() and any(target.iterdir()):
+                target = base / f"{project_name}_{n}"
+                n += 1
+            out["project_path"] = str(target)
+        return out
+
+    async def _execute_registry_tool(self, tool_name: str, args: dict) -> str:
+        """Jarvis 2.0 registry aracini ortak onay akisiyla calistirir.
+        CONFIRMATION_REQUIRED donerse islem bekleyen olarak isaretlenir;
+        model ayni araci ancak kullanici gercekten onayladiktan sonra
+        tekrar cagirdiginda calisir."""
+        ctx = _Jarvis2ToolContext(ui=self.ui, session=self.session)
+        ctx.dangerous_confirmed = self._consume_dangerous_confirmation(tool_name)
+        try:
+            result = await _jarvis2_registry.execute(tool_name, args, ctx=ctx)
+        except Exception as err:
+            print(f"[JARVIS 2.0] ❌ Registry error: {tool_name}: {err}")
+            return f"Tool error ({tool_name}): {type(err).__name__}: {str(err)[:120]}"
+        if isinstance(result, str) and result.startswith("CONFIRMATION_REQUIRED:"):
+            parts = result.split(":", 2)
+            self._pending_dangerous_action = parts[1] if len(parts) > 1 and parts[1] else tool_name
+            self._dangerous_confirmation_granted = False
+            return (
+                f"{result} Kullanıcıya ne yapılacağını TEK cümleyle anlat ve "
+                "'evet' veya 'onaylıyorum' demesini iste. Kullanıcı onay verdikten "
+                "SONRA aynı aracı aynı parametrelerle BİR KEZ tekrar çağır; onay "
+                "gelmeden çağırma. Bu yanıt bir sistem hatası değildir, 'sistemsel "
+                "sorun' deme."
+            )
+        return result
 
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
@@ -1050,21 +1161,17 @@ class JarvisLive:
             return
         # Tehlikeli işlem onayı yalnızca kullanıcının açıkça söylediği bir
         # sonraki turdan gelebilir; modelin tool-call argümanı onay sayılmaz.
-        normalized_text = " ".join(str(text).casefold().strip().split())
-        confirmation_words = {
-            "onaylıyorum", "onayliyorum", "evet yap", "evet, yap", "tamam onayla",
-            "tamam yap", "devam et", "approve", "approve it", "yes, do it",
-        }
+        is_confirmation = self._is_confirmation(text)
         if self._pending_dangerous_action is not None:
-            if normalized_text in confirmation_words:
-                self._dangerous_confirmation_granted = True
+            if is_confirmation:
+                self._grant_dangerous_confirmation()
             else:
                 # İlgisiz yeni bir tur, eski onayı ileride yanlışlıkla
                 # kullanılabilir bırakmamalıdır.
                 self._pending_dangerous_action = None
                 self._dangerous_confirmation_granted = False
         if self._pending_terminal_command is not None:
-            if normalized_text in confirmation_words:
+            if is_confirmation:
                 pending_terminal = dict(self._pending_terminal_command)
                 self._pending_terminal_command = None
                 terminal_result = terminal_tool(
@@ -1617,35 +1724,9 @@ class JarvisLive:
         # Yeni araçlar registry.execute() üzerinden çalışır.
         # Eski if/elif dispatch'e DOKUNULMAZ.
         if _JARVIS2_REGISTRY_AVAILABLE and name in _JARVIS2_REGISTRY_TOOL_NAMES:
-            _ctx = _Jarvis2ToolContext(ui=self.ui, session=self.session)
-            _dangerous_confirmed = (
-                self._dangerous_confirmation_granted
-                and self._pending_dangerous_action == name
-            )
-            _ctx.dangerous_confirmed = _dangerous_confirmed
-            if _dangerous_confirmed:
-                self._pending_dangerous_action = None
-                self._dangerous_confirmation_granted = False
-            try:
-                _result = await _jarvis2_registry.execute(name, args, ctx=_ctx)
-            except Exception as _reg_err:
-                _result = (
-                    f"Tool error ({name}): "
-                    f"{type(_reg_err).__name__}: {str(_reg_err)[:120]}"
-                )
-                print(f"[JARVIS 2.0] ❌ Registry error: {name}: {_reg_err}")
-            # CONFIRMATION_REQUIRED protokolünü mevcut sistemle entegre et
-            if isinstance(_result, str) and _result.startswith("CONFIRMATION_REQUIRED:"):
-                _parts = _result.split(":", 2)
-                _conf_action = _parts[1] if len(_parts) > 1 else name
-                _conf_prompt = _parts[2] if len(_parts) > 2 else _result
-                self._pending_dangerous_action = _conf_action
-                self._dangerous_confirmation_granted = False
-                return types.FunctionResponse(
-                    id=fc.id,
-                    name=fc.name,
-                    response={"output": _result},
-                )
+            # Onay akisi (CONFIRMATION_REQUIRED + tek kullanimlik, sureli
+            # kullanici onayi) _execute_registry_tool icinde.
+            _result = await self._execute_registry_tool(name, args)
             return types.FunctionResponse(
                 id=fc.id,
                 name=fc.name,
@@ -1843,11 +1924,9 @@ class JarvisLive:
                     _ch_desc = str(args.get("code") or args.get("description") or args.get("query") or "")
                     if _ch_desc:
                         print("[JARVIS] code_helper -> agentic_code redirect")
-                        _ch_ctx = _Jarvis2ToolContext(ui=self.ui, session=self.session)
-                        try:
-                            result = await _jarvis2_registry.execute("agentic_code", {"description": _ch_desc, "language": "python"}, ctx=_ch_ctx)
-                        except Exception as _che:
-                            result = f"Redirect error: {str(_che)[:100]}"
+                        result = await self._execute_registry_tool(
+                            "agentic_code", self._agentic_code_args(args, _ch_desc)
+                        )
                     else:
                         result = "HATA: Kod aciklamasi bos."
                 else:
@@ -1859,11 +1938,9 @@ class JarvisLive:
                     _da_desc = str(args.get("description") or args.get("code") or args.get("query") or "")
                     if _da_desc:
                         print("[JARVIS] dev_agent -> agentic_code redirect")
-                        _da_ctx = _Jarvis2ToolContext(ui=self.ui, session=self.session)
-                        try:
-                            result = await _jarvis2_registry.execute("agentic_code", {"description": _da_desc, "language": "python"}, ctx=_da_ctx)
-                        except Exception as _dae:
-                            result = f"Redirect error: {str(_dae)[:100]}"
+                        result = await self._execute_registry_tool(
+                            "agentic_code", self._agentic_code_args(args, _da_desc)
+                        )
                     else:
                         result = "HATA: Proje aciklamasi bos."
                 else:
@@ -2237,6 +2314,23 @@ class JarvisLive:
                                 self._last_user_speech = time.monotonic()
                                 note_user_turn()  # dev_agent onay kapisi: gercek kullanici girdisi
                                 approval_service.mark_user_turn()
+
+                                # Sesli onay: eskiden sadece yazili komut onay
+                                # bayragini kuruyordu, "onaylıyorum" demek
+                                # bekleyen islemi hic yetkilendirmiyordu. Bu
+                                # metin modelin degil kullanicinin gercek
+                                # konusmasinin transkripsiyonu.
+                                if self._pending_dangerous_action is not None:
+                                    _spoken = " ".join(in_buf)
+                                    if self._is_confirmation(_spoken):
+                                        if not self._dangerous_confirmation_granted:
+                                            print(f"[JARVIS] ✅ Sesli onay alındı: {self._pending_dangerous_action}")
+                                        self._grant_dangerous_confirmation()
+                                    elif self._dangerous_confirmation_granted:
+                                        # "Evet... hayır dur" gibi: cumlenin devami
+                                        # onayi geri aldiysa onayi iptal et.
+                                        self._dangerous_confirmation_granted = False
+                                        print("[JARVIS] ↩️ Sesli onay geri alındı.")
 
                                 # Turn complete gelmese bile dosya komutunu yakala.
 

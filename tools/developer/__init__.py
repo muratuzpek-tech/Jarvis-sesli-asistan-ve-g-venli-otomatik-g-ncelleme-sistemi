@@ -24,7 +24,10 @@ from tools.registry import registry, ToolContext
         },
         "required": ["description"],
     },
-    security="normal",
+    # Diske dosya yazar ve LLM'in urettigi kodu (pytest, cli.py) korumasiz
+    # calistirir -> her calistirma icin gercek kullanici onayi gerekir.
+    # "dangerous" yeterli degil: SecurityManager onu onaysiz gecirir.
+    security="destructive",
     category="developer",
 )
 async def _agentic_code_handler(args: dict, ctx: ToolContext) -> str:
