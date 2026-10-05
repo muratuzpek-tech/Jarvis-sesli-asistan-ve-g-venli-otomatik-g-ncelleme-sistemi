@@ -30,6 +30,7 @@ if _platform.system() == "Windows":
 
 import asyncio
 from .tool_gate import gate, audit_entry
+import json
 import os
 import re
 import threading
@@ -966,6 +967,7 @@ class JarvisLive:
     # test nesneleri için. Gerçek __init__() bunları değiştirir.
     # GÜVENLİK DEĞİŞİKLİĞİ DEĞİL: Aynı değerler __init__'te zaten var.
     _pending_dangerous_action = None
+    _pending_dangerous_fingerprint = None
     _dangerous_confirmation_granted = False
     _dangerous_confirmation_at = 0.0
     _pending_terminal_command = None
@@ -1018,17 +1020,29 @@ class JarvisLive:
         self._dangerous_confirmation_granted = True
         self._dangerous_confirmation_at = time.monotonic()
 
-    def _consume_dangerous_confirmation(self, action: str) -> bool:
-        """Bekleyen islem `action` ise ve gercek kullanici onayi son
-        _CONFIRMATION_TTL_S saniye icinde verildiyse True doner ve onayi
-        tuketir (tek kullanimlik)."""
+    @staticmethod
+    def _action_fingerprint(action: str, args: dict) -> str:
+        """Onaylanan islemin kimligi: arac adi + argumanlar. Kullanici
+        "hesap makinesi yaz"i onaylar, model ayni araci baska argumanlarla
+        cagirirsa bu onay gecmez. Sayilar registry.execute'taki gibi str'ye
+        cevrilir (3 ve "3" ayni islemdir)."""
+        if isinstance(args, dict):
+            args = {k: str(v) if isinstance(v, (int, float)) else v for k, v in args.items()}
+        return action + ":" + json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+
+    def _consume_dangerous_confirmation(self, action: str, args: dict) -> bool:
+        """Bekleyen islem ayni arac + ayni argumanlar ise ve gercek kullanici
+        onayi son _CONFIRMATION_TTL_S saniye icinde verildiyse True doner ve
+        onayi tuketir (tek kullanimlik)."""
         fresh = (time.monotonic() - self._dangerous_confirmation_at) <= self._CONFIRMATION_TTL_S
         if (
             self._dangerous_confirmation_granted
             and self._pending_dangerous_action == action
+            and self._pending_dangerous_fingerprint == self._action_fingerprint(action, args)
             and fresh
         ):
             self._pending_dangerous_action = None
+            self._pending_dangerous_fingerprint = None
             self._dangerous_confirmation_granted = False
             return True
         return False
@@ -1075,7 +1089,7 @@ class JarvisLive:
                 )
 
         ctx = _Jarvis2ToolContext(ui=self.ui, session=self.session)
-        ctx.dangerous_confirmed = self._consume_dangerous_confirmation(tool_name)
+        ctx.dangerous_confirmed = self._consume_dangerous_confirmation(tool_name, args)
         try:
             if tool_name in self._BACKGROUND_REGISTRY_TOOLS:
                 # Uzun suren arac: _receive_audio bu await'te beklerse Gemini'nin
@@ -1112,8 +1126,11 @@ class JarvisLive:
             print(f"[JARVIS 2.0] ❌ Registry error: {tool_name}: {err}")
             return f"Tool error ({tool_name}): {type(err).__name__}: {str(err)[:120]}"
         if isinstance(result, str) and result.startswith("CONFIRMATION_REQUIRED:"):
-            parts = result.split(":", 2)
-            self._pending_dangerous_action = parts[1] if len(parts) > 1 and parts[1] else tool_name
+            # Bekleyen islem CAGRILAN aractir; sonuc metnindeki ad degil.
+            # Normal bir aracin ciktisi (dis veri) "CONFIRMATION_REQUIRED:
+            # agentic_code:..." ile baslayip baska bir araci onaya acamaz.
+            self._pending_dangerous_action = tool_name
+            self._pending_dangerous_fingerprint = self._action_fingerprint(tool_name, args)
             self._dangerous_confirmation_granted = False
             return (
                 f"{result} Kullanıcıya ne yapılacağını TEK cümleyle anlat ve "
@@ -1184,6 +1201,7 @@ class JarvisLive:
         # Tehlikeli işlemler yalnızca gerçek bir sonraki kullanıcı turundan
         # gelen onayla ve tek kullanımlık olarak yetkilendirilir.
         self._pending_dangerous_action = None
+        self._pending_dangerous_fingerprint: str | None = None
         self._dangerous_confirmation_granted = False
         self._pending_terminal_command: dict | None = None
         self._is_speaking         = False
