@@ -1,7 +1,11 @@
 """security_gate.py — tek güvenlik kapısı (docs/GUVENLIK_KAPISI_PLAN.md).
 
-ADIM 0 + ADIM 1 (2026-10-05): DAVRANIŞ DEĞİŞMEZ. Bu modül henüz hiçbir
-dağıtıcı tarafından karar vermek için kullanılmıyor; yalnızca:
+ADIM 0 + ADIM 1 (2026-10-05): veri tipleri, onay deposu, araç tanımları.
+ADIM 2 (ilk yarı): authorize()/execute(). Şimdilik YALNIZCA sesli Gemini araç
+yolu (main.JarvisLive._execute_tool, Source.MODEL_LIVE) kapıdan geçer;
+registry/ReAct, agent_loop, Brain Team ve yönlendiriciler henüz geçmez.
+
+İçerik:
 
   * kapının veri tipleri (Source, Effect, Verdict, ResolvedCall, Decision),
   * onay deposu arayüzü (ApprovalStore) ve bugünkü TEK onay yuvasını
@@ -28,6 +32,7 @@ import ast
 import enum
 import json
 import os
+import re
 import shlex
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -111,6 +116,22 @@ class Decision:
     model_message: str
     user_prompt: str | None = None
     request_id: str | None = None   # iç kimlik; modele verilmez
+    # ALLOW kararında aracın KENDİ önizleme/onay kodu protokolü varsa
+    # (TOOL_CODE / TERMINAL_CODE): kod araçtan alınır, modele gösterilmez,
+    # yalnızca gerçek kullanıcı onayından sonra araca geri verilir.
+    protocol: str | None = None
+
+
+@dataclass(frozen=True)
+class Grant:
+    """Gerçek kullanıcı turundan gelen, TEK bir çağrıya (parmak izi) bağlı
+    onay. code: aracın kendi önizleme kodu (TOOL_CODE/TERMINAL_CODE)."""
+    fingerprint: str
+    code: str | None = None
+
+
+TOOL_CODE = "tool_code"          # "ONAY GEREKLİ ... confirm_code='X'" (file_controller, code_helper, self_improve)
+TERMINAL_CODE = "terminal_code"  # "ONAY GEREKLİ ...\nOnay kodu: X" (terminal_tool)
 
 
 # ── Onay deposu ───────────────────────────────────────────────────────────
@@ -138,6 +159,14 @@ class ApprovalStore(abc.ABC):
     @abc.abstractmethod
     def pending(self) -> tuple[str, str] | None:
         """(araç, parmak izi) ya da None."""
+
+    @abc.abstractmethod
+    def take_grant(self, decision: "Decision") -> Grant | None:
+        """Karar için verilmiş gerçek kullanıcı onayını tüketip Grant döner."""
+
+    @abc.abstractmethod
+    def remember_code(self, call: ResolvedCall, code: str) -> None:
+        """Aracın önizleme kodunu saklar ve çağrıyı onay bekleyen yapar."""
 
 
 class PendingSlotAdapter(ApprovalStore):
@@ -170,6 +199,31 @@ class PendingSlotAdapter(ApprovalStore):
             if action is None:
                 return None
             return action, self._owner._pending_dangerous_fingerprint
+
+    def take_grant(self, decision: "Decision") -> Grant | None:
+        call = decision.call
+        if call is None or decision.verdict is Verdict.DENY:
+            return None
+        owner = self._owner
+        if decision.verdict is Verdict.NEEDS_APPROVAL:
+            if owner._consume_dangerous_confirmation(call.tool, call.params):
+                return Grant(call.fingerprint)
+            return None
+        if decision.protocol in (TOOL_CODE, TERMINAL_CODE):
+            # Kod yalnızca bu araç için saklanmış bir önizleme varsa ve
+            # kullanıcı AYNI çağrıyı onayladıysa geri verilir.
+            stored = owner._tool_confirm_code
+            if stored and stored[0] == call.tool and \
+                    owner._consume_dangerous_confirmation(call.tool, call.params):
+                owner._tool_confirm_code = None
+                return Grant(call.fingerprint, stored[2] if stored[1] == call.fingerprint else None)
+        return None
+
+    def remember_code(self, call: ResolvedCall, code: str) -> None:
+        owner = self._owner
+        owner._discard_tool_confirm_code()   # önceki önizleme (terminal kaydı dahil) iptal
+        owner._tool_confirm_code = (call.tool, call.fingerprint, code)
+        owner._set_pending_dangerous(call.tool, call.fingerprint)
 
 
 # ── Araç tanımları (plan §3) ──────────────────────────────────────────────
@@ -225,6 +279,17 @@ def _save_flag(base: Effect) -> Callable[[Mapping], Effect]:
     return _effect
 
 
+_DESKTOP_READ_ACTIONS = frozenset({"list", "stats", "current_wallpaper"})
+_BROWSER_READ_ACTIONS = frozenset({"get_text", "get_url", "list_browsers"})
+
+
+def _action_effect(read_actions: frozenset, otherwise: Effect) -> Callable[[Mapping], Effect]:
+    def _effect(params: Mapping) -> Effect:
+        action = str(params.get("action", "")).lower().strip()
+        return Effect.READ if action in read_actions else otherwise
+    return _effect
+
+
 def _coder_ai_effect(params: Mapping) -> Effect:
     return Effect.READ if params.get("operation") == "analyze" else Effect.MUTATE
 
@@ -248,13 +313,13 @@ EFFECTS: dict[str, tuple[Effect, Callable[[Mapping], Effect] | None]] = {
     "screen_process": (Effect.READ, None),
     "close_camera": (Effect.MUTATE, None),
     "computer_settings": (Effect.SYSTEM, _computer_settings_effect),
-    "browser_control": (Effect.EXTERNAL, None),
+    "browser_control": (Effect.EXTERNAL, _action_effect(_BROWSER_READ_ACTIONS, Effect.EXTERNAL)),
     "file_controller": (Effect.MUTATE, _file_controller_effect),
     "task_manager": (Effect.MUTATE, None),
     "health_check": (Effect.READ, None),
     "start_parallel_task": (Effect.EXECUTE, None),
     "check_agent_board": (Effect.READ, None),
-    "desktop_control": (Effect.MUTATE, None),
+    "desktop_control": (Effect.MUTATE, _action_effect(_DESKTOP_READ_ACTIONS, Effect.MUTATE)),
     "code_helper": (Effect.EXECUTE, None),
     "code_search": (Effect.READ, None),
     "dev_agent": (Effect.EXECUTE, None),
@@ -503,11 +568,36 @@ def spec_for(name: str) -> ToolSpec | None:
     return _make_spec(name, ())
 
 
+# Kendi onay kodunu MODELDEN bekleyen eski akışlar (plan bulgusu B, Adım 6'da
+# kapıya taşınacak). Bunlarda modelin confirm_code'u araca aynen iletilir;
+# kodu doğrulayan araçtır (dev_agent.confirmation_problem).
+_MODEL_CODE_LEGACY = frozenset({"start_parallel_task", "dev_agent"})
+
+
+def _targets(tool: str, params: Mapping) -> tuple[str, ...]:
+    if tool == "file_controller":
+        try:
+            from jarvis.actions.file_controller import _resolve_path
+            base = _resolve_path(str(params.get("path") or "desktop"))
+            name = str(params.get("name") or "")
+            out = [str((base / name if name else base).resolve())]
+            if params.get("destination"):
+                out.append(str(_resolve_path(str(params["destination"])).resolve()))
+            return tuple(out)
+        except Exception:
+            return ()
+    for key in ("receiver", "url", "file_path", "path", "app_name", "command"):
+        if params.get(key):
+            return (str(params[key]),)
+    return ()
+
+
 def resolve(tool: str, args: Mapping | None, source: Source) -> ResolvedCall:
-    """Çağrıyı bir kez çözer. Modelin gönderdiği confirm_code hiçbir zaman
-    çağrının parçası değildir. Bilinmeyen araç en kötü etkiyle (SYSTEM)
-    döner - fail-closed."""
-    params = {k: v for k, v in dict(args or {}).items() if k != "confirm_code"}
+    """Çağrıyı bir kez çözer. Modelin gönderdiği confirm_code çağrının
+    parçası değildir (yalnızca _MODEL_CODE_LEGACY araçları hariç). Bilinmeyen
+    araç en kötü etkiyle (SYSTEM) döner - fail-closed."""
+    params = {k: v for k, v in dict(args or {}).items()
+              if k != "confirm_code" or tool in _MODEL_CODE_LEGACY}
     spec = spec_for(tool)
     effect = spec.effect_for(params) if spec else Effect.SYSTEM
     action = params.get("action")
@@ -515,5 +605,169 @@ def resolve(tool: str, args: Mapping | None, source: Source) -> ResolvedCall:
         from jarvis.actions.file_controller import normalize_action
         action = normalize_action(action)
     return ResolvedCall(tool=tool, action=str(action) if action not in (None, "") else None,
-                        params=params, targets=(), effect=effect,
+                        params=params, targets=_targets(tool, params), effect=effect,
                         fingerprint=fingerprint(tool, params))
+
+
+# ── Karar: authorize ──────────────────────────────────────────────────────
+
+ALLOW, APPROVE = "allow", "approve"
+
+
+def _truthy(value) -> bool:
+    return str(value).strip().lower() in ("true", "1", "yes", "evet")
+
+
+def _file_controller_live(params: Mapping) -> str:
+    from jarvis.actions.file_controller import is_readonly_action, normalize_action
+    action = normalize_action(params.get("action"))
+    if is_readonly_action(action):
+        return ALLOW
+    if action in ("move", "delete_all_files"):
+        return TOOL_CODE          # araç kendi önizlemesini ve kodunu üretir
+    return APPROVE
+
+
+def _save_memory_live(params: Mapping) -> str:
+    from jarvis.memory.sanitizer import instruction_markers
+    text = " ".join(str(params.get(k, "")) for k in ("category", "key", "value"))
+    return APPROVE if instruction_markers(text) else ALLOW
+
+
+# Sesli yol (MODEL_LIVE) politikası. Tabloda olmayan araç: READ -> ALLOW,
+# geri kalan her şey -> APPROVE (fail-closed). Tablodaki ALLOW'lar BUGÜNKÜ
+# davranışı korur ve gerekçesi yazılıdır.
+_LIVE_POLICY: dict[str, tuple[Callable[[Mapping], str], str]] = {
+    "terminal": (lambda p: TERMINAL_CODE, "salt-okunur komut hemen; diğerleri terminal_tool önizlemesi + kod"),
+    "self_improve": (lambda p: TOOL_CODE, "self_improve önizlemesi + kod"),
+    "code_helper": (lambda p: TOOL_CODE, "registry varsa agentic_code (kendi onayı); yoksa üzerine yazma önizlemesi"),
+    "file_controller": (_file_controller_live, "okuma serbest; taşıma/toplu silme önizleme+kod; diğer değişiklikler onay"),
+    "save_memory": (_save_memory_live, "yalnızca talimata benzeyen içerik onay ister"),
+    "youtube_video": (lambda p: APPROVE if _truthy(p.get("save", False)) else ALLOW,
+                      "save=true dosya yazar; oynatma/özet bugünkü gibi serbest"),
+    # Kendi onay akışı olanlar (main.py dalı _confirmation_granted_for ile):
+    "computer_settings": (lambda p: ALLOW, "restart/shutdown/lock kendi onay akışında"),
+    "game_updater": (lambda p: ALLOW, "shutdown_when_done kendi onay akışında"),
+    "shutdown_jarvis": (lambda p: ALLOW, "kendi onay akışında"),
+    "start_parallel_task": (lambda p: ALLOW, "dev_agent kod akışı (bulgu B, Adım 6)"),
+    "dev_agent": (lambda p: ALLOW, "registry'de agentic_code (kendi onayı); yoksa dev_agent kod akışı"),
+    # Bugün onaysız; plan Adım 7'de gözden geçirilecek:
+    "close_camera": (lambda p: ALLOW, "kamerayı kapatır; geri alınabilir"),
+    "task_manager": (lambda p: ALLOW, "ertelenmiş istem kaydı (bulgu E, Adım 7)"),
+    "agent_loop": (lambda p: ALLOW, "görev ekler; adımlar agent_loop'ta onaylanır"),
+    "flight_finder": (lambda p: ALLOW, "arama; save bugünkü gibi serbest"),
+}
+
+
+def _approval_texts(call: ResolvedCall) -> tuple[str, str]:
+    danger = "TEHLIKELI" if call.effect >= Effect.EXTERNAL else "DIKKAT"
+    ps = ", ".join(f"{k}={str(v)[:40]}" for k, v in call.params.items())
+    model_message = (
+        f"CONFIRMATION_REQUIRED:{call.tool}:{danger} arac cagrisi: {ps}. Kullaniciya "
+        f"ne yapilacagini TEK cumleyle anlat ve 'evet' ya da 'hayir' demesini iste. "
+        f"Kullanici bir sonraki mesajinda acikca onaylarsa araci AYNI parametrelerle "
+        f"BIR KEZ tekrar cagir; onay kodu yoktur, onay gelmeden cagirma."
+    )
+    target = ", ".join(call.targets) or "—"
+    user_prompt = (f"Onay gerekiyor: '{call.tool}' aracı çalıştırılacak. "
+                   f"Argümanlar: {ps or '—'}. Hedef: {target}.")
+    return model_message, user_prompt
+
+
+def authorize(tool: str, args: Mapping | None, source: Source) -> Decision:
+    """Tek karar noktası. Kayıtsız araç DENY; okuma dışı varsayılan
+    NEEDS_APPROVAL; modele giden hiçbir metinde onay kodu yoktur."""
+    call = resolve(tool, args, source)
+    if spec_for(tool) is None:
+        return Decision(Verdict.DENY, call, "kayıtsız araç",
+                        f"BLOCKED: '{tool}' kayıtlı bir araç değil; çağrılmadı.")
+    if source is Source.MODEL_LIVE and tool in _LIVE_POLICY:
+        policy_fn, reason = _LIVE_POLICY[tool]
+        policy = policy_fn(call.params)
+    else:
+        policy = ALLOW if call.effect is Effect.READ else APPROVE
+        reason = "okuma" if policy == ALLOW else "okuma dışı etki: onay gerekir"
+    if policy == APPROVE:
+        model_message, user_prompt = _approval_texts(call)
+        return Decision(Verdict.NEEDS_APPROVAL, call, reason, model_message,
+                        user_prompt=user_prompt, request_id=call.fingerprint)
+    protocol = policy if policy in (TOOL_CODE, TERMINAL_CODE) else None
+    return Decision(Verdict.ALLOW, call, reason, "", protocol=protocol)
+
+
+# ── Yürütme: prepare / finish / execute ───────────────────────────────────
+
+_CONFIRM_CODE_RE = re.compile(r"confirm_code\s*=\s*'?([0-9a-fA-F]+)'?")
+_TERMINAL_CODE_RE = re.compile(r"^Onay kodu:\s*(\S+)\s*$", re.M)
+
+
+def strip_terminal_code(text: str) -> tuple[str, str | None]:
+    """terminal_tool önizlemesinden "Onay kodu: X" satırını (ve kodla tekrar
+    çağır talimatını) çıkarır: (modele gidecek metin, kod)."""
+    text = str(text or "")
+    match = _TERMINAL_CODE_RE.search(text)
+    if not (text.startswith("ONAY GEREKL") and match):
+        return text, None
+    lines = [ln for ln in text.splitlines()
+             if not ln.startswith("Onay kodu:") and "confirm_code" not in ln]
+    return "\n".join(lines), match.group(1)
+
+
+def prepare(decision: Decision, grant: Grant | None) -> dict:
+    """Araca gidecek parametreler. DENY ya da eşleşen Grant'ı olmayan
+    NEEDS_APPROVAL için PermissionError - araç ÇAĞRILMAZ."""
+    call = decision.call
+    if decision.verdict is Verdict.DENY or call is None:
+        raise PermissionError(decision.model_message or "Araç reddedildi.")
+    if decision.verdict is Verdict.NEEDS_APPROVAL and (
+            grant is None or grant.fingerprint != call.fingerprint):
+        raise PermissionError(f"'{call.tool}' kullanıcı onayı olmadan çalıştırılamaz.")
+    params = dict(call.params)
+    if grant is not None and grant.code and grant.fingerprint == call.fingerprint:
+        params["confirm_code"] = grant.code
+    return params
+
+
+def finish(decision: Decision, result: Any, store: ApprovalStore | None) -> Any:
+    """Aracın önizleme çıktısındaki kodu saklar (store) ve modele KODSUZ bir
+    önizleme + onay talimatı döner. Protokolü olmayan araçta sonuç aynen."""
+    call = decision.call
+    if decision.protocol == TERMINAL_CODE:
+        text, code = strip_terminal_code(result)
+        if code is None:
+            return text
+        if store is not None:
+            store.remember_code(call, code)
+        return (
+            f"{text}\nKullanıcıya komutu TEK cümleyle anlat ve 'evet' ya da 'hayır' "
+            "demesini iste. Kullanıcı bir sonraki mesajında onay verdikten SONRA "
+            "terminal'i AYNI command ve cwd ile BİR KEZ tekrar çağır; onay gelmeden çağırma."
+        )
+    if decision.protocol == TOOL_CODE:
+        text = str(result or "")
+        head, sep, tail = text.partition("\n\n")
+        match = _CONFIRM_CODE_RE.search(head)
+        if not (head.startswith("ONAY GEREKL") and match):
+            return result
+        if store is not None:
+            store.remember_code(call, match.group(1))
+        preview = " ".join(
+            sentence for sentence in re.split(r"(?<=\.)\s+", head)
+            if "confirm_code" not in sentence and "kodu" not in sentence
+        ).strip()
+        instruction = (
+            f"{preview} Kullanıcıya ne yapılacağını TEK cümleyle anlat ve 'evet' "
+            "veya 'onaylıyorum' demesini iste. Kullanıcı bir sonraki mesajında "
+            f"onay verdikten SONRA {call.tool}'ı AYNI parametrelerle BİR KEZ "
+            "tekrar çağır; onay gelmeden çağırma."
+        )
+        return instruction + (sep + _CONFIRM_CODE_RE.sub("", tail) if tail else "")
+    return result
+
+
+def execute(decision: Decision, grant: Grant | None,
+            runner: Callable[[dict], Any], store: ApprovalStore | None = None) -> Any:
+    """Kararı uygular: yetki yoksa runner ÇAĞRILMAZ; aracın önizleme kodu
+    modele gitmez."""
+    params = prepare(decision, grant)
+    return finish(decision, runner(params), store)

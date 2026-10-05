@@ -29,8 +29,9 @@ if _platform.system() == "Windows":
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
-from .tool_gate import gate, audit_entry, needs_confirmation
+from .tool_gate import audit_entry
 from .security_gate import fingerprint as _gate_fingerprint
+from . import security_gate as _gate
 import json
 import os
 import re
@@ -1066,17 +1067,11 @@ class JarvisLive:
                 return True
             return False
 
-    # file_controller (move/delete_all_files) ve code_helper (mevcut dosyanin
-    # uzerine yazan edit/optimize) onizlemede bir confirm_code uretir. Bu kod
-    # MODELE GOSTERILMEZ: model onu ayni turda geri gondererek islemi
-    # kullanici onayi olmadan calistirabiliyordu. Kod burada saklanir ve
-    # yalnizca _consume_dangerous_confirmation gercek kullanici onayini (ayni
-    # arac + ayni argumanlar) dogruladiginda araca geri iletilir.
-    # terminal ve self_improve de ayni yolu kullanir (tool_gate'in eski kod
-    # akisi yerine): kod saklanir, modelin gonderdigi confirm_code atilir.
-    _CONFIRM_CODE_TOOLS = frozenset({"file_controller", "code_helper", "terminal", "self_improve"})
-    _CONFIRM_CODE_RE = re.compile(r"confirm_code\s*=\s*'?([0-9a-fA-F]+)'?")
-    _TERMINAL_CODE_RE = re.compile(r"^Onay kodu:\s*(\S+)\s*$", re.M)
+    # Arac onizleme kodlari (file_controller tasima/toplu silme, code_helper
+    # uzerine yazma, self_improve, terminal) MODELE GOSTERILMEZ. Kodu ayiklama,
+    # saklama ve gercek kullanici onayindan sonra araca geri verme artik
+    # security_gate'te (finish / PendingSlotAdapter.take_grant/remember_code);
+    # burada yalnizca saklama yeri ve "hayir"da iptal kaldi.
     _tool_confirm_code: tuple[str, str, str] | None = None  # (arac, parmak izi, kod)
 
     def _discard_tool_confirm_code(self) -> None:
@@ -1088,69 +1083,10 @@ class JarvisLive:
         if pending and pending[0] == "terminal":
             approval_service.cancel(pending[2])
 
-    @classmethod
-    def _strip_terminal_code(cls, text: str) -> tuple[str, str | None]:
-        """terminal_tool onizlemesinden "Onay kodu: X" satirini (ve kodla tekrar
-        cagir talimatini) cikarir: (modele gidecek metin, kod)."""
-        text = str(text or "")
-        match = cls._TERMINAL_CODE_RE.search(text)
-        if not (text.startswith("ONAY GEREKL") and match):
-            return text, None
-        lines = [ln for ln in text.splitlines()
-                 if not ln.startswith("Onay kodu:") and "confirm_code" not in ln]
-        return "\n".join(lines), match.group(1)
-
-    def _redact_terminal_result(self, clean: dict, result: str) -> str:
-        text, code = self._strip_terminal_code(result)
-        if code is None:
-            return text
-        self._discard_tool_confirm_code()
-        fingerprint = self._action_fingerprint("terminal", clean)
-        self._tool_confirm_code = ("terminal", fingerprint, code)
-        self._set_pending_dangerous("terminal", fingerprint)
-        return (
-            f"{text}\nKullanıcıya komutu TEK cümleyle anlat ve 'evet' ya da 'hayır' "
-            "demesini iste. Kullanıcı bir sonraki mesajında onay verdikten SONRA "
-            "terminal'i AYNI command ve cwd ile BİR KEZ tekrar çağır; onay gelmeden çağırma."
-        )
-
-    def _prepare_confirmed_args(self, tool: str, args: dict) -> tuple[dict, dict]:
-        """(onay parmak izi icin temiz argumanlar, araca gidecek argumanlar).
-        Modelin gonderdigi confirm_code her zaman atilir."""
-        clean = {k: v for k, v in (args or {}).items() if k != "confirm_code"}
-        call_args = dict(clean)
-        pending = self._tool_confirm_code
-        if pending and pending[0] == tool and self._consume_dangerous_confirmation(tool, clean):
-            _tool, fingerprint, code = pending
-            if fingerprint == self._action_fingerprint(tool, clean):
-                call_args["confirm_code"] = code
-            self._tool_confirm_code = None
-        return clean, call_args
-
-    def _redact_confirmation_result(self, tool: str, clean: dict, result: str) -> str:
-        """Onizleme sonucundaki kodu saklayip bekleyen islemi kaydeder; modele
-        kodsuz bir onizleme ve onay talimati doner. Ilk paragraftan sonraki
-        kisim (ör. code_helper'in kod onizlemesi) korunur."""
-        text = str(result or "")
-        head, sep, tail = text.partition("\n\n")
-        match = self._CONFIRM_CODE_RE.search(head)
-        if not (head.startswith("ONAY GEREKL") and match):
-            return text
-        fingerprint = self._action_fingerprint(tool, clean)
-        self._discard_tool_confirm_code()
-        self._tool_confirm_code = (tool, fingerprint, match.group(1))
-        self._set_pending_dangerous(tool, fingerprint)
-        preview = " ".join(
-            sentence for sentence in re.split(r"(?<=\.)\s+", head)
-            if "confirm_code" not in sentence and "kodu" not in sentence
-        ).strip()
-        instruction = (
-            f"{preview} Kullanıcıya ne yapılacağını TEK cümleyle anlat ve 'evet' "
-            "veya 'onaylıyorum' demesini iste. Kullanıcı bir sonraki mesajında "
-            f"onay verdikten SONRA {tool}'ı AYNI parametrelerle BİR KEZ "
-            "tekrar çağır; onay gelmeden çağırma."
-        )
-        return instruction + (sep + self._CONFIRM_CODE_RE.sub("", tail) if tail else "")
+    @staticmethod
+    def _strip_terminal_code(text: str) -> tuple[str, str | None]:
+        """Metin yonlendiricisi (E4) icin; tek uygulama security_gate'te."""
+        return _gate.strip_terminal_code(text)
 
     # ── Brain Team onayi ────────────────────────────────────────────────
     # Orkestrator HIGH riskli bir adimi beklemeye aldiginda (arka plan
@@ -2176,27 +2112,24 @@ class JarvisLive:
 
         r = None  # UnboundLocalError guard
 
-        if name in self._CONFIRM_CODE_TOOLS:
-            # Modelin gonderdigi confirm_code asla onay sayilmaz (bkz.
-            # _prepare_confirmed_args). Bu araclar kendi onizleme kodunu
-            # uretir; kod saklanir ve yalnizca gercek kullanici onayindan sonra
-            # araca iletilir - tool_gate'e girmezler.
-            args.pop("confirm_code", None)
-        elif needs_confirmation(name):
-            # ═══ MERKEZI TOOL GATE ═══
-            # Onay YALNIZCA kullanicinin gercek turundan gelir: bekleyen ayni
-            # arac + ayni argumanlar icin verilmis, 60 sn icindeki tek
-            # kullanimlik onay. Modelin gonderdigi confirm_code yok sayilir.
-            args.pop("confirm_code", None)
-            _approved = self._consume_dangerous_confirmation(name, args)
-            _gate_block = gate(name, args, user_approved=_approved)
-            if _gate_block:
-                self._set_pending_dangerous(name, self._action_fingerprint(name, args))
-                audit_entry(name, args, _gate_block, approved=False)
-                return types.FunctionResponse(
-                    id=fc.id, name=name,
-                    response={"result": _gate_block}
-                )
+        # ═══ TEK GUVENLIK KAPISI (security_gate, plan Adim 2) ═══
+        # Karar tek yerde: kayitsiz arac DENY, okuma disi varsayilan onay.
+        # Onay YALNIZCA kullanicinin gercek turundan gelir (ayni arac + ayni
+        # argumanlar, 60 sn, tek kullanim); modelin confirm_code'u yok sayilir.
+        # Aracin kendi onizleme kodu modele gitmez (security_gate.finish).
+        _decision = _gate.authorize(name, args, _gate.Source.MODEL_LIVE)
+        _store = _gate.PendingSlotAdapter(self)
+        if _decision.verdict is _gate.Verdict.DENY:
+            audit_entry(name, args, _decision.model_message, approved=False)
+            return types.FunctionResponse(id=fc.id, name=name,
+                                          response={"result": _decision.model_message})
+        _grant = _store.take_grant(_decision)
+        if _decision.verdict is _gate.Verdict.NEEDS_APPROVAL and _grant is None:
+            _store.request(_decision.call)
+            audit_entry(name, args, _decision.model_message, approved=False)
+            return types.FunctionResponse(id=fc.id, name=name,
+                                          response={"result": _decision.model_message})
+        args = _gate.prepare(_decision, _grant)
 
         if name == "code_search":
             import subprocess as _sp
@@ -2247,9 +2180,7 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "file_controller":
-                _fc_clean, _fc_call = self._prepare_confirmed_args("file_controller", args)
-                r = await loop.run_in_executor(None, lambda: file_controller(parameters=_fc_call, player=self.ui))
-                r = self._redact_confirmation_result("file_controller", _fc_clean, r)
+                r = await loop.run_in_executor(None, lambda: file_controller(parameters=args, player=self.ui))
                 result = r or "Done."
                 # Mirror listing/info results to the on-screen content panel.
                 # Sesli yanit genelde "listelendi efendim" gibi ozetleyip
@@ -2361,9 +2292,7 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "terminal":
-                _tm_clean, _tm_call = self._prepare_confirmed_args("terminal", args)
-                r = await loop.run_in_executor(None, lambda: terminal_tool(parameters=_tm_call))
-                r = self._redact_terminal_result(_tm_clean, r)
+                r = await loop.run_in_executor(None, lambda: terminal_tool(parameters=args))
                 result = r or "Done."
 
             elif name == "desktop_control":
@@ -2381,9 +2310,7 @@ class JarvisLive:
                     else:
                         result = "HATA: Kod aciklamasi bos."
                 else:
-                    _ch_clean, _ch_call = self._prepare_confirmed_args("code_helper", args)
-                    r = await loop.run_in_executor(None, lambda: code_helper(parameters=_ch_call, player=self.ui, speak=self.speak))
-                    r = self._redact_confirmation_result("code_helper", _ch_clean, r)
+                    r = await loop.run_in_executor(None, lambda: code_helper(parameters=args, player=self.ui, speak=self.speak))
                     result = r or "Done."
 
             elif name == "dev_agent":
@@ -2401,9 +2328,7 @@ class JarvisLive:
                     result = r or "Done."
 
             elif name == "self_improve":
-                _si_clean, _si_call = self._prepare_confirmed_args("self_improve", args)
-                r = await loop.run_in_executor(None, lambda: self_improve(parameters=_si_call, player=self.ui))
-                r = self._redact_confirmation_result("self_improve", _si_clean, r)
+                r = await loop.run_in_executor(None, lambda: self_improve(parameters=args, player=self.ui))
                 result = r or "Done."
 
             elif name == "agent_loop":
@@ -2510,6 +2435,9 @@ class JarvisLive:
             result = f"Tool '{name}' failed: {e}"
             traceback.print_exc()
             self.speak_error(name, e)
+
+        # Onizleme kodu (varsa) saklanir; modele kodsuz metin gider.
+        result = _gate.finish(_decision, result, _store)
 
         if not self.ui.muted:
             self.ui.set_state("LISTENING")

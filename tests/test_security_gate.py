@@ -290,15 +290,26 @@ def test_readonly_tools_of_agent_loop_are_read_or_documented():
         assert spec.effect is sg.Effect.READ or name in sg.KNOWN_UNGATED_NON_READ, name
 
 
-# ── Davranis degismedi: gate kullanilmiyor ──
+# ── Kapiyi yalnizca sesli arac yolu (main.py, Adim 2) kullaniyor ──
 
-def test_no_runtime_code_uses_the_gate_yet():
+def test_only_the_live_tool_path_imports_the_gate():
+    import ast
     root = Path(__file__).resolve().parents[1]
     users = []
     for path in list((root / "src").rglob("*.py")) + list((root / "tools").rglob("*.py")):
         if path.name == "security_gate.py":
             continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        if "security_gate" in text:
-            users.append(str(path.relative_to(root)))
-    assert users == ["src/jarvis/main.py"], users   # yalnizca parmak izi tek kaynaga baglandi
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            mods = []
+            if isinstance(node, ast.ImportFrom):
+                mods = [node.module or ""] + [f"{node.module or ''}.{a.name}" for a in node.names]
+            elif isinstance(node, ast.Import):
+                mods = [a.name for a in node.names]
+            if any(m.split(".")[-1] == "security_gate" for m in mods):
+                users.append(str(path.relative_to(root)))
+                break
+    assert users == ["src/jarvis/main.py"], users
