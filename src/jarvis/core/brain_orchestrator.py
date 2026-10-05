@@ -557,6 +557,12 @@ class BrainOrchestrator:
             }
             if file_mod.get("action") == "write":
                 params["append"] = bool(file_mod.get("append", False))
+        elif isinstance(file_mod, dict) and file_mod.get("action"):
+            # delete/move/list/... : file_modification'daki eylem AYNEN
+            # kullanilir - aciklamadan yeniden tahmin edilmez.
+            action = "file_controller"
+            params = {k: v for k, v in file_mod.items() if v not in (None, "")}
+            params.setdefault("path", base_path)
         else:
             action, params = self._resolve_executor_call(step, base_path)
 
@@ -715,7 +721,14 @@ class BrainOrchestrator:
 
         return self._infer_executor_action(desc, base_path)
 
-    def _risk_of_step(self, step: dict) -> tuple[str, str]:
+    def _resolve_step_call(self, task: dict | None, step: dict) -> tuple[str, dict]:
+        """Risk degerlendirmesinin, onay metninin ve yurutmenin ORTAK karar
+        noktasi: executor adiminin GERCEKTEN calistiracagi (tool, params)."""
+        task = task or {"payload": {}}
+        base_path = task.get("payload", {}).get("_active_folder", ".")
+        return self._resolve_action_with_file_modification(task, step, base_path)
+
+    def _risk_of_step(self, step: dict, task: dict | None = None) -> tuple[str, str]:
         """Riski BELİRLEYEN yer security_ai beynidir (deterministik kural
         tablosu + Gemini'den sadece okunabilir açıklama) - burada SADECE
         hangi (tool, action) çiftinin security_ai'ye sorulacağı seçilir, ve
@@ -756,11 +769,15 @@ class BrainOrchestrator:
             # başarısız olsa bile, _execute_step() içindeki mevcut
             # try/except tarafından düzgünce yakalanıp failed_steps'e
             # düşecek - burada sadece güvenli bir yer tutucuyla devam edilir.
+            # Risk, _execute_step'in calistiracagi AYNI cozumlemeden sorulur
+            # (eskiden yalnizca aciklamadan tahmin ediliyordu: "notlar3.txt
+            # olustur" -> info/LOW, yurutme -> create_file). Cozumleme hata
+            # verirse fail-closed HIGH.
             try:
-                inferred_action, inferred_params = self._resolve_executor_call(step)
-            except ValueError:
-                inferred_action = step.get("tool") or step.get("capability") or "unknown"
-                inferred_params = {}
+                inferred_action, inferred_params = self._resolve_step_call(task, step)
+            except Exception as e:
+                return "high", (f"Adım çözümlenemedi ({type(e).__name__}: {e}); "
+                                f"güvenli tarafta kalınarak HIGH risk.")
             if inferred_action == "file_controller":
                 # DÜZELTME: burası ÖNCEDEN HER ZAMAN "info" (LOW risk)
                 # hardcode ediyordu - yani _infer_executor_action()'ın
@@ -861,13 +878,12 @@ class BrainOrchestrator:
             # başarıyla oluşturulmuş bir klasör varsa (bkz. _finish_step),
             # bu adım o klasörün İÇİNDE çalışsın - eskiden hep "." (düz
             # çalışma dizini) kullanılıyordu.
-            base_path = task["payload"].get("_active_folder", ".")
             # YENİ mimari (2026-09-16, 2026-09-22 birlestirildi): action/params
             # karari artik TEK bir ortak metotta (_resolve_action_with_
             # file_modification) - hem burasi hem _verify_file_action AYNI
             # sonucu uretir, bir daha birbirinden sapmaz (bkz. o metodun
             # docstring'i).
-            action, params = self._resolve_action_with_file_modification(task, step, base_path)
+            action, params = self._resolve_step_call(task, step)
 
             # DUZELTME (code review bulgusu, 2026-09-28, PR #3): icerik
             # geri-kazanim + "sessizce bos yazma" korumasi ARTIK yukaridaki
@@ -1246,7 +1262,7 @@ class BrainOrchestrator:
                 self.tasks.update(task["id"], payload=payload)
                 return
 
-        risk, reason = self._risk_of_step(step)
+        risk, reason = self._risk_of_step(step, task)
         if risk == "high":
             step_with_risk = {**step, "risk": risk, "reason": reason}
             payload["pending_step"] = step_with_risk

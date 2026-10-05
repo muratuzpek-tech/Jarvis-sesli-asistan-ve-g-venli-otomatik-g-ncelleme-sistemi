@@ -118,7 +118,7 @@ def env(tmp_path, monkeypatch):
     from jarvis.core.task_manager import TaskManager
     orch = bo.BrainOrchestrator()
     orch.tasks = TaskManager(path=tmp_path / "brain_tasks.json")
-    orch._risk_of_step = lambda step: ("high", "test: HIGH risk")
+    orch._risk_of_step = lambda step, task=None: ("high", "test: HIGH risk")
     monkeypatch.setattr(bo, "get_orchestrator", lambda: orch)
 
     approved = []
