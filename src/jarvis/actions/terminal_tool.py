@@ -26,6 +26,21 @@ _READONLY_PROGRAMS = {"pwd", "ls", "cat", "head", "tail", "grep", "rg", "find", 
 _GIT_READONLY = {"status", "diff", "log", "show", "branch", " rev-parse"}
 _PYTHON_SAFE = {("--version",), ("-V",)}
 
+# Salt-okunur programlarin dosya silen/yazan veya baska program calistiran
+# bayraklari. Bunlardan biri varsa komut onay koduna duser.
+_FIND_WRITE_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir",
+                       "-fprint", "-fprint0", "-fprintf", "-fls"}
+_RG_EXEC_FLAGS = {"--pre"}
+_GIT_WRITE_FLAGS = {"--output"}
+# `git branch` sadece listeleme bayraklariyla salt-okunur; konumsal arguman
+# dal olusturur, -d/-D/-m/-c siler/tasir/kopyalar.
+_GIT_BRANCH_LIST_FLAGS = {"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
+                          "-l", "--list", "--show-current", "--no-color", "--color"}
+
+
+def _flag_name(token: str) -> str:
+    return token.split("=", 1)[0]
+
 
 def _display_command(argv: list[str]) -> str:
     return " ".join(shlex.quote(x) for x in argv)
@@ -63,10 +78,21 @@ def _is_readonly(argv: list[str]) -> bool:
         if token.startswith("../") or token == ".." or "/../" in token:
             if not _ro_prog:
                 return False
+    flags = {_flag_name(t) for t in args if t.startswith("-")}
+    if program == "find" and flags & _FIND_WRITE_ACTIONS:
+        return False
+    if program == "rg" and flags & _RG_EXEC_FLAGS:
+        return False
     if program in _READONLY_PROGRAMS:
         return True
     if program == "git":
-        return bool(args) and args[0] in {x.strip() for x in _GIT_READONLY}
+        if not args or args[0] not in {x.strip() for x in _GIT_READONLY}:
+            return False
+        if flags & _GIT_WRITE_FLAGS:
+            return False
+        if args[0] == "branch":
+            return all(t in _GIT_BRANCH_LIST_FLAGS for t in args[1:])
+        return True
     if program in {"python", "python3", Path(sys.executable).name.lower()}:
         return tuple(args) in _PYTHON_SAFE
     return False
