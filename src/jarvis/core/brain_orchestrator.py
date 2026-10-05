@@ -862,13 +862,23 @@ class BrainOrchestrator:
                 # (bu metodun dönüşünden sonra _finish_step -> Auditor ->
                 # gerekirse rollback). Hiçbir satır değiştirilmedi.
                 # 14. BACKUP KURALI: ONCE backup, SONRA degisiklik.
+                # Proje yedegi (src/jarvis) HEDEF dosyayi kapsamaz - hedef cogu
+                # zaman proje disindadir. Bu yuzden hedef dosyanin da ayrica
+                # yedegi alinir; otomatik geri alma YALNIZCA bu dosyayi geri
+                # yukler (bkz. _finish_step). Yedeklerden biri alinamazsa
+                # degisiklik YAPILMAZ.
+                target_backup = self._backup_modify_target(task, file_path)
                 backup_resp = self.bus.send("orchestrator", "executor_ai", "backup_create",
                                              payload={"action": "backup_create", "params": {}})
+                if backup_resp.get("status") != "completed":
+                    raise RuntimeError(f"Proje yedeği alınamadı, '{file_path}' değiştirilmedi: "
+                                       f"{backup_resp.get('result')}")
                 resp = self.bus.send("orchestrator", "coder_ai", desc,
                                       payload={"file_path": file_path, "change_request": desc})
                 resp.setdefault("result", {})
                 if isinstance(resp["result"], dict):
                     resp["result"]["backup"] = backup_resp.get("result")
+                    resp["result"]["target_backup"] = str(target_backup)
                 return resp
             finally:
                 lock.release()
@@ -993,6 +1003,40 @@ class BrainOrchestrator:
         except Exception as e:
             evidence["error"] = f"'{target}' kontrol edilirken hata: {e}"
         return evidence
+
+    @staticmethod
+    def _step_key(task: dict) -> str:
+        return str(task["payload"].get("step_index", 0))
+
+    def _backup_modify_target(self, task: dict, file_path: str):
+        """Hedef dosyanin yedegini alir. Ayni adim tekrar denenirse (denetim
+        turlari) ILK degisiklikten onceki yedek korunur - geri alma
+        kullanicinin orijinal dosyasina doner. Hata yukseltilir."""
+        from jarvis.backup_tool import JarvisBackupTool
+        backups = task["payload"].setdefault("target_backups", {})
+        key = self._step_key(task)
+        if key in backups:
+            return backups[key]["backup"]
+        folder = JarvisBackupTool.for_jarvis().backup_file(file_path)
+        backups[key] = {"file": str(Path(file_path).resolve()), "backup": str(folder)}
+        return str(folder)
+
+    def _restore_modify_target(self, task: dict) -> None:
+        from jarvis.backup_tool import JarvisBackupTool
+        entry = task["payload"].get("target_backups", {}).get(self._step_key(task))
+        record = {"step_index": task["payload"].get("step_index", 0)}
+        if not entry:
+            record.update(ok=False, error="bu adım için hedef dosya yedeği yok")
+        else:
+            tool = JarvisBackupTool.for_jarvis()
+            try:
+                ok = tool.restore_file(entry["backup"])
+                record.update(ok=ok, file=entry["file"], error=None if ok else tool.last_error)
+            except Exception as e:
+                record.update(ok=False, file=entry["file"], error=f"{type(e).__name__}: {e}")
+        task["payload"].setdefault("rollbacks", []).append(record)
+        if not record["ok"]:
+            print(f"[BrainTeam] ❌ Otomatik geri alma BAŞARISIZ: {record.get('error')}")
 
     def _finish_step(self, task: dict, step: dict, result) -> None:
         # "6. Result verification": agent "tamamlandı" dedi diye görev
@@ -1135,12 +1179,15 @@ class BrainOrchestrator:
                 # yukleyip veri kaybina yol acabilirdi. operation == "modify"
                 # (ya da eski/operation'siz gorevler) icin davranis AYNEN
                 # KORUNDU.
+                # DUZELTME (2026-10-06): eskiden burada executor backup_rollback
+                # cagriliyordu - Jarvis'in KENDI klasorunun (src/jarvis) TAMAMI
+                # silinip en son yedekten yeniden yaziliyordu, degistirilen
+                # HEDEF dosya ise (cogu zaman proje disinda) hic geri
+                # alinmiyordu. Artik yalnizca o hedef dosya, adimin ILK
+                # degisikliginden onceki yedeginden geri yuklenir; sonuc (basari
+                # ya da hata) gorev kaydina yazilir, yutulmaz.
                 if step.get("agent") == "coder_ai" and step.get("operation") != "analyze":
-                    try:
-                        self.bus.send("orchestrator", "executor_ai", "rollback",
-                                       payload={"action": "backup_rollback", "params": {}})
-                    except Exception:
-                        pass
+                    self._restore_modify_target(task)
                 task["payload"]["step_index"] = task["payload"].get("step_index", 0) + 1
                 task["payload"]["audit_retries"] = 0
                 task["payload"].setdefault("failed_steps", []).append(step.get("description", ""))

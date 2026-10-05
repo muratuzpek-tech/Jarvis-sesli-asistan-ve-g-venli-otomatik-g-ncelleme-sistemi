@@ -396,7 +396,7 @@ def self_improve(parameters: dict = None, player=None) -> str:
     original = target.read_text(encoding="utf-8")
 
     from jarvis.backup_tool import JarvisBackupTool
-    backup_tool = JarvisBackupTool(BASE_DIR)
+    backup_tool = JarvisBackupTool.for_jarvis()   # kok dizin tek yerden
     if player:
         player.write_log(f"[SelfImprove] '{rel_str}' için değişiklik öncesi tam yedek alınıyor...")
     print(f"[SelfImprove] Yedek alınıyor (hedef: {rel_str})...")

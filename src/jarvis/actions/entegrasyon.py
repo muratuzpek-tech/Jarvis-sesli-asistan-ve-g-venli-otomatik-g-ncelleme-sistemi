@@ -356,7 +356,7 @@ def integrate_discovered_tool(item: dict) -> str:
 
     try:
         from jarvis.backup_tool import JarvisBackupTool
-        backup_path = JarvisBackupTool(BASE_DIR).create_backup()
+        backup_path = JarvisBackupTool.for_jarvis().create_backup()   # kok dizin tek yerden
     except Exception as e:
         msg = f"Yedek alınamadı, güvenlik için entegrasyon iptal edildi: {e}"
         _log({"source_name": source_name, "status": "failed", "reason": msg})
