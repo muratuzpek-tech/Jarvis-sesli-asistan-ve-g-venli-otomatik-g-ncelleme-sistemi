@@ -405,6 +405,50 @@ def _read(name: str) -> str:
     return (STATIC_DIR / name).read_text(encoding="utf-8")
 
 
+# QR hedefi. Anahtar sunucu tarafinda sayfaya HIC yazilmaz (yansitma/XSS
+# yok); betik onu location.search'ten okuyup POST ile gonderir.
+_AUTO_LOGIN_HTML = """<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width">
+<meta name="robots" content="noindex">
+<style>
+body{background:#07090f;color:#dde3ed;font-family:sans-serif;
+display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center}
+h2{color:#f87171;margin-bottom:12px}p{color:#5e6a7e;font-size:14px}
+</style></head>
+<body><div id="box"><p>Connecting to JARVIS…</p></div>
+<script>
+(function () {
+  var key = new URLSearchParams(location.search).get('key') || '';
+  function expired() {
+    var box = document.getElementById('box');
+    box.textContent = '';
+    var h = document.createElement('h2'); h.textContent = 'Link Expired';
+    var p = document.createElement('p');
+    p.textContent = 'Press Remote Control in JARVIS to get a new QR code.';
+    box.appendChild(h); box.appendChild(p);
+  }
+  // Anahtari adres cubugundan/gecmisten temizle.
+  history.replaceState(null, '', location.pathname);
+  if (!key) { expired(); return; }
+  fetch('/auto-login', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({key: key})
+  }).then(function (r) { return r.json().then(function (d) { return [r.ok, d]; }); })
+    .then(function (res) {
+      var d = res[1];
+      if (!res[0] || !d.ok) { expired(); return; }
+      sessionStorage.setItem('jarvis_token', d.token);
+      sessionStorage.setItem('jarvis_key', d.key);
+      localStorage.setItem('jarvis_device_token', d.device_token);
+      location.replace('/');
+    })
+    .catch(expired);
+})();
+</script>
+</body></html>"""
+
+
 # ── DashboardServer ───────────────────────────────────────────────────────────
 
 class DashboardServer:
@@ -542,6 +586,15 @@ class DashboardServer:
                 )
             return response
 
+        def _rate_limited(client_ip: str, now: float) -> bool:
+            attempts = [t for t in self._login_attempts.get(client_ip, [])
+                        if now - t < self._LOGIN_WINDOW_SECS]
+            self._login_attempts[client_ip] = attempts
+            return len(attempts) >= self._LOGIN_MAX_ATTEMPTS
+
+        def _record_failure(client_ip: str, now: float) -> None:
+            self._login_attempts.setdefault(client_ip, []).append(now)
+
         def _auth(req: Request) -> bool:
             auth = req.headers.get("authorization", "").strip()
             if not auth.lower().startswith("bearer "):
@@ -581,9 +634,7 @@ class DashboardServer:
             now = time.time()
 
             # Hiz sinirlama: bu IP'nin son 60sn icindeki basarisiz denemelerini say.
-            attempts = self._login_attempts.get(client_ip, [])
-            attempts = [t for t in attempts if now - t < self._LOGIN_WINDOW_SECS]
-            if len(attempts) >= self._LOGIN_MAX_ATTEMPTS:
+            if _rate_limited(client_ip, now):
                 return JSONResponse(
                     {"ok": False, "error": "Too many attempts, try again shortly"},
                     status_code=429,
@@ -610,29 +661,47 @@ class DashboardServer:
                 return JSONResponse({"ok": True, "token": tok})
 
             # Basarisiz deneme - kaydet.
-            attempts.append(now)
-            self._login_attempts[client_ip] = attempts
+            _record_failure(client_ip, now)
             return JSONResponse({"ok": False, "error": "Invalid or expired key"},
                                 status_code=401)
 
-        @app.get("/auto-login")
-        async def auto_login(key: str = ""):
-            """QR code target — validates one-time key, creates session, redirects phone."""
+        # GUVENLIK: GET /auto-login DURUMSUZDUR. Eskiden anahtari GET'te
+        # harciyor ve token'lari HTML'e gomuyordu; QR URL'si bir sohbet
+        # uygulamasina yapistirilinca ya da QR okuyucu linki onceden acinca
+        # (link preview/prefetch) oturumu o servis aliyordu. Artik GET sadece
+        # asagidaki sayfayi doner (anahtar sayfaya yansitilmaz, sayfa onu
+        # location'dan okur); anahtari harcayan islem sayfadaki betigin
+        # attigi POST'tur ve /login ile ayni hiz sinirina tabidir.
+        @app.get("/auto-login", response_class=HTMLResponse)
+        async def auto_login_page():
+            return HTMLResponse(_AUTO_LOGIN_HTML)
+
+        @app.post("/auto-login")
+        async def auto_login(req: Request):
+            """QR code target — validates one-time key, creates session."""
+            client_ip = req.client.host if req.client else "unknown"
             now = time.time()
-            if not key or key not in self._pending_keys or self._pending_keys[key] <= now:
-                return HTMLResponse("""<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width">
-<style>
-  body{background:#07090f;color:#dde3ed;font-family:sans-serif;
-       display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center}
-  h2{color:#f87171;margin-bottom:12px}p{color:#5e6a7e;font-size:14px}
-</style></head>
-<body><div><h2>Link Expired</h2>
-<p>Press <strong style="color:#dde3ed">Remote Control</strong> in JARVIS to get a new QR code.</p>
-</div></body></html>""")
+            if _rate_limited(client_ip, now):
+                return JSONResponse(
+                    {"ok": False, "error": "Too many attempts, try again shortly"},
+                    status_code=429,
+                )
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"ok": False, "error": "Invalid request"}, status_code=400)
+            key = body.get("key") if isinstance(body, dict) else None
+            if not isinstance(key, str) or not key.strip():
+                _record_failure(client_ip, now)
+                return JSONResponse({"ok": False, "error": "Invalid request"}, status_code=400)
+            key = key.strip().upper()
+            if key not in self._pending_keys or self._pending_keys[key] <= now:
+                _record_failure(client_ip, now)
+                return JSONResponse({"ok": False, "error": "Link expired"}, status_code=401)
 
             del self._pending_keys[key]
-            tok     = self._issue_token(key)
+            self._login_attempts.pop(client_ip, None)
+            tok = self._issue_token(key)
             dev_tok = secrets.token_urlsafe(32)
             self._device_sessions[dev_tok] = {"session_key": key}
 
@@ -641,33 +710,8 @@ class DashboardServer:
             asyncio.create_task(self.broadcast(
                 {"type": "sys", "text": "Remote connection established via QR code."}
             ))
-
-            # DUZELTME (2026-09-28, CodeQL: reflected XSS bulgusu): asagidaki
-            # degerler daha once duz '{{deger}}' seklinde JS string'ine
-            # gomuluyordu. `key` /auto-login?key=... sorgu parametresinden
-            # geliyor (bkz. _KEY_CHARS: sadece buyuk harf+rakam oldugu icin
-            # su an pratikte kacis karakteri iceremez), ama bu baska bir
-            # dosyadaki bir sabite guvenen kirilgan bir varsayim. json.dumps
-            # kullanmak bu bagimliligi tamamen ortadan kaldirir.
-            tok_js = json.dumps(tok)
-            key_js = json.dumps(key)
-            dev_tok_js = json.dumps(dev_tok)
-            return HTMLResponse(f"""<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width">
-<style>
-  body{{background:#07090f;color:#dde3ed;font-family:sans-serif;
-       display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center}}
-  p{{color:#5e6a7e;font-size:14px}}
-</style></head>
-<body>
-<script>
-  sessionStorage.setItem('jarvis_token',{tok_js});
-  sessionStorage.setItem('jarvis_key',{key_js});
-  localStorage.setItem('jarvis_device_token',{dev_tok_js});
-  setTimeout(function(){{location.replace('/')}},400);
-</script>
-<p>Connecting to JARVIS…</p>
-</body></html>""")
+            return JSONResponse({"ok": True, "token": tok, "key": key,
+                                 "device_token": dev_tok})
 
         @app.post("/api/device-login")
         async def device_login_ep(req: Request):
