@@ -150,9 +150,7 @@ class ExperimentsIsolationValidator:
         try:
             from jarvis.self_improvement.virtual_brain.orchestrator.experiment_task_manager import (
                 ExperimentTaskManager,
-                EXPERIMENTS_PATH,
             )
-            from jarvis.core.task_manager import TaskManager
             from jarvis.paths import tasks_dir
 
             etm = ExperimentTaskManager()

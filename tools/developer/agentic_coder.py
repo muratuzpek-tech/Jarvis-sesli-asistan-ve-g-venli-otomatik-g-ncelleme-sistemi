@@ -228,7 +228,9 @@ def _fn_role_hints(filename: str, task) -> str:
 
 
 def _verify_project(task, run_pytest=True):
-    import subprocess, sys, re as _vt
+    import subprocess
+    import sys
+    import re as _vt
     problems = []
     for _fn, _fc in task.files_written.items():
         _fp = _contained_path(task.project_path, _fn)

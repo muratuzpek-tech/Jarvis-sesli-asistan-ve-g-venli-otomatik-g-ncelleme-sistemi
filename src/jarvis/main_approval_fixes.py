@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any
 
 # ══════════════════════════════════════════════════════════════
 # FIX #5: Optional Import Error Handling

@@ -101,10 +101,10 @@ class ResolvedCall:
     targets: tuple[str, ...]
     effect: Effect
     fingerprint: str
-    source: "Source | None" = None
+    source: Source | None = None
 
     @classmethod
-    def for_pending(cls, action: str, args: dict) -> "ResolvedCall":
+    def for_pending(cls, action: str, args: dict) -> ResolvedCall:
         """Brain Team / agent_loop gibi sözde eylemler için (onay yuvası
         bunları 'brain_team' / 'agent_loop' adıyla tutar)."""
         return cls(tool=action, action=None, params=dict(args), targets=(),
@@ -164,7 +164,7 @@ class ApprovalStore(abc.ABC):
         """(araç, parmak izi) ya da None."""
 
     @abc.abstractmethod
-    def take_grant(self, decision: "Decision") -> Grant | None:
+    def take_grant(self, decision: Decision) -> Grant | None:
         """Karar için verilmiş gerçek kullanıcı onayını tüketip Grant döner."""
 
     @abc.abstractmethod
@@ -203,7 +203,7 @@ class PendingSlotAdapter(ApprovalStore):
                 return None
             return action, self._owner._pending_dangerous_fingerprint
 
-    def take_grant(self, decision: "Decision") -> Grant | None:
+    def take_grant(self, decision: Decision) -> Grant | None:
         call = decision.call
         if call is None or decision.verdict is Verdict.DENY:
             return None
@@ -392,7 +392,7 @@ def _dict_name_values(node: ast.AST) -> list[str]:
     names = []
     for sub in ast.walk(node):
         if isinstance(sub, ast.Dict):
-            for k, v in zip(sub.keys, sub.values):
+            for k, v in zip(sub.keys, sub.values, strict=True):
                 if (isinstance(k, ast.Constant) and k.value == "name"
                         and isinstance(v, ast.Constant) and isinstance(v.value, str)):
                     names.append(v.value)

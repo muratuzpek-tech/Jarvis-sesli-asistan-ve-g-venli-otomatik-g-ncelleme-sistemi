@@ -26,7 +26,6 @@ import importlib
 import logging
 import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 

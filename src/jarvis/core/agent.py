@@ -25,6 +25,7 @@ from jarvis.core.llm_client import call_llm
 from jarvis.memory.memory_manager import load_memory, format_memory_for_prompt, remember
 from jarvis.core.context_engine import ContextEngine
 from jarvis.core.plugin_manager import PluginManager
+from jarvis.core.p0_critical_fixes import get_plugin_gate
 
 MAX_STEPS = 8
 MAX_OUTPUT = 6000
@@ -275,6 +276,9 @@ class JarvisAgent:
         self.context = ContextEngine()
         self.plugins = PluginManager()
         self.plugins.discover()
+        # Plugin'ler varsayılan olarak allowlist dışıdır; canlı dispatch,
+        # handler'a ulaşmadan önce merkezi security_gate tarafından doğrulanır.
+        self.plugin_gate = get_plugin_gate()
         self.system_prompt = self._build_system_prompt()
 
     def _build_system_prompt(self) -> str:
@@ -325,7 +329,15 @@ class JarvisAgent:
                 else:
                     if name in self.plugins.tools:
                         try:
-                            result = self.plugins.call(name, args)
+                            authorized, reason = self.plugin_gate.authorize_plugin_call(
+                                plugin_name=name,
+                                handler_name=name,
+                                args=args,
+                            )
+                            if not authorized:
+                                result = {"error": f"Plugin '{name}' blocked: {reason}"}
+                            else:
+                                result = self.plugins.call(name, args)
                         except Exception as exc:
                             result = {"error": str(exc)}
                     elif name not in TOOLS:

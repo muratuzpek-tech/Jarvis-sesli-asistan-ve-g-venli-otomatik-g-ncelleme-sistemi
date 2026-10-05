@@ -102,7 +102,7 @@ def _is_readonly(argv: list[str]) -> bool:
             except OSError:
                 if not _ro_prog:
                     return False
-        if token.startswith("../") or token == ".." or "/../" in token:
+        if token.startswith("../") or token == ".." or "/../" in token:  # noqa: S105 - token is a path fragment
             if not _ro_prog:
                 return False
     flags = {_flag_name(t) for t in args if t.startswith("-")}

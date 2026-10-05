@@ -19,13 +19,15 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Any
 import sys
+
+from jarvis.paths import data_dir
 
 def _get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    return data_dir()
 
 BASE_DIR = _get_base_dir()
 CONSISTENCY_LOG_PATH = BASE_DIR / "logs" / "queue_consistency.log"
@@ -39,7 +41,7 @@ class TaskSnapshot:
     status: str
     payload_keys: set  # Hangi anahtar varsa
     retry_count: int
-    error: Optional[str]
+    error: str | None
     
     def __hash__(self):
         return hash(self.task_id)
@@ -68,7 +70,7 @@ class QueueConsistencyChecker:
     def __init__(self, log_path: Path = CONSISTENCY_LOG_PATH):
         self.log_path = log_path
         self._logger = self._make_logger()
-        self._snapshots: Dict[str, TaskSnapshot] = {}  # Last known state per task_id
+        self._snapshots: dict[str, TaskSnapshot] = {}  # Last known state per task_id
     
     def _make_logger(self) -> logging.Logger:
         logger = logging.getLogger("jarvis.queue_consistency")
@@ -136,7 +138,7 @@ class QueueConsistencyChecker:
         task_id: str, 
         old_task: dict, 
         new_task: dict,
-        allowed_key_loss: Optional[List[str]] = None
+        allowed_key_loss: list[str] | None = None
     ) -> bool:
         """Payload integrity kontrolü.
         
@@ -168,7 +170,7 @@ class QueueConsistencyChecker:
         
         return True
     
-    def detect_json_corruption(self, file_path: Path) -> tuple[bool, Optional[str]]:
+    def detect_json_corruption(self, file_path: Path) -> tuple[bool, str | None]:
         """JSON corruption detection.
         
         Args:

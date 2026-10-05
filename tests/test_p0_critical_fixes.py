@@ -6,12 +6,11 @@ P0 Kritik Fix'leri doğrulayan regresyon testleri:
 - FIX #15: Virtual Brain State Migration
 """
 import multiprocessing
-import os
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, Mock
 
 import pytest
@@ -46,7 +45,6 @@ class TestPluginSecurityGate:
         plugin_gate.register_plugin("my_readonly_plugin", safety_level="readonly")
         
         with patch("jarvis.security_gate.authorize") as mock_auth:
-            from jarvis.security_gate import Verdict
             mock_decision = Mock()
             mock_decision.verdict.value = "allow"
             mock_decision.reason = "test"
@@ -285,23 +283,30 @@ class TestVirtualBrainStateManager:
         assert "sandbox" in str(hyp_path)
 
     def test_migration_copies_old_files(self, tmp_path, monkeypatch):
-        """Eski dosyalar kopyalanır."""
+        """Eski state dosyaları kullanıcı veri dizinine taşınır."""
         from jarvis.core.p0_critical_fixes import VirtualBrainStateManager
-        
-        # Fake source dir oluştur
+
         source_vb = tmp_path / "source" / "self_improvement" / "virtual_brain"
-        source_vb.mkdir(parents=True)
         old_experiments = source_vb / "orchestrator" / "experiments.json"
         old_experiments.parent.mkdir(parents=True)
         old_experiments.write_text('{"old": true}')
-        
-        # Fake data dir
-        monkeypatch.setenv("JARVIS_HOME", str(tmp_path / "userdata"))
-        
-        # Şimdilik migrate işleminin test edilmesi karmaşık
-        # Ancak get_experiments_path()'in doğru konumda olması yeterli
-        new_path = VirtualBrainStateManager.get_experiments_path()
-        assert "sandbox" in str(new_path)
+        old_reports = source_vb / "reports"
+        old_reports.mkdir(parents=True)
+        (old_reports / "report.json").write_text('{"report": true}')
+        old_hypotheses = source_vb / "hypotheses.jsonl"
+        old_hypotheses.write_text('{"hypothesis": true}\n')
+
+        user_data = tmp_path / "userdata"
+        monkeypatch.setenv("JARVIS_HOME", str(user_data))
+        VirtualBrainStateManager.migrate_from_source_tree(source_root=source_vb)
+
+        sandbox = user_data / "sandbox"
+        assert (sandbox / "experiments.json").read_text() == '{"old": true}'
+        assert (sandbox / "reports" / "report.json").read_text() == '{"report": true}'
+        assert (sandbox / "hypotheses.jsonl").read_text() == '{"hypothesis": true}\n'
+        assert not old_experiments.exists()
+        assert not old_reports.exists()
+        assert not old_hypotheses.exists()
 
     def test_readonly_package_install(self, tmp_path, monkeypatch):
         """Read-only paket yüklenmesinde deney yazılır."""
@@ -370,15 +375,50 @@ class TestRegressionNoBypass:
 
     def test_plugin_no_direct_call_without_gate(self):
         """Plugin handler doğrudan çağrı yok (gate kontrol edilir)."""
-        # Eğer main.py'de plugin çağrısı still plugin_gate'i bypass ediyorsa test başarısız
-        # Bu test fix'in gerçek entegre edilmesini doğrular
-        pass
+        import jarvis.core.agent as agent_module
+
+        handler = MagicMock(return_value="should not run")
+        fake_plugins = SimpleNamespace(
+            tools={
+                "blocked_plugin": (
+                    {"type": "function", "function": {"name": "blocked_plugin"}},
+                    handler,
+                )
+            },
+            call=MagicMock(return_value="should not run"),
+            schemas=lambda: [],
+        )
+        fake_context = SimpleNamespace(add=MagicMock(), build_prompt_block=MagicMock(return_value=""))
+        fake_gate = agent_module.get_plugin_gate()
+        agent = agent_module.JarvisAgent.__new__(agent_module.JarvisAgent)
+        agent.max_steps = 1
+        agent.messages = []
+        agent.context = fake_context
+        agent.plugins = fake_plugins
+        agent.plugin_gate = fake_gate
+        agent.system_prompt = "test"
+
+        tool_response = {
+            "content": "",
+            "tool_calls": [{
+                "id": "call-1",
+                "function": {"name": "blocked_plugin", "arguments": {}},
+            }],
+        }
+        with patch.object(agent_module, "call_llm", return_value=tool_response):
+            agent.ask("plugin çalıştır")
+
+        fake_plugins.call.assert_not_called()
+        handler.assert_not_called()
 
     def test_no_silent_state_loss_on_corruption(self):
         """Bozuk JSON sessiz liste döndürmez (fail-stop)."""
-        # queue_consistency.py ve approval_registry.py'de corruption handling
-        # Bu test recovery behavior'u doğrular
-        pass
+        from jarvis.core.queue_consistency import QueueConsistencyChecker
+
+        checker = QueueConsistencyChecker()
+        path = Path(tempfile.mkdtemp()) / "broken.json"
+        path.write_text("{broken", encoding="utf-8")
+        assert checker.detect_json_corruption(path)[0] is False
 
 
 if __name__ == "__main__":

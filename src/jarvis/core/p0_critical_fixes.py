@@ -6,15 +6,17 @@ FIX #15: Virtual Brain State → User Data Dir
 """
 from __future__ import annotations
 
-import fcntl
-import json
 import logging
 import os
 import sys
-import tempfile
 import threading
+import time
 from pathlib import Path
-from typing import Any
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 # ══════════════════════════════════════════════════════════════
 # FIX #13: Plugin Security Gate Integration (FAIL-CLOSED)
@@ -63,7 +65,7 @@ class PluginSecurityGate:
         Returns:
             (authorized: bool, reason: str)
         """
-        from jarvis.security_gate import authorize, Source, resolve
+        from jarvis.security_gate import authorize, Source
 
         with self._lock:
             # FIX #13: Allowlist kontrol
@@ -73,7 +75,6 @@ class PluginSecurityGate:
                 return False, reason
 
         # Merkezi security_gate'ten geç
-        call = resolve(plugin_name, args, Source.PLUGIN)
         decision = authorize(plugin_name, args, Source.PLUGIN)
 
         if decision.verdict.value == "allow":
@@ -138,50 +139,45 @@ class OSLevelProcessLock:
 
         self.lock_file.parent.mkdir(parents=True, exist_ok=True)
 
-        try:
-            # Kilit dosyasını aç (create if needed)
-            self._lock_fd = os.open(
-                str(self.lock_file),
-                os.O_CREAT | os.O_WRONLY | os.O_CLOEXEC,
-                0o600,
-            )
-
-            # OS-specific lock
-            if sys.platform == "win32":
-                import msvcrt
-                try:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            try:
+                self._lock_fd = os.open(
+                    str(self.lock_file),
+                    os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0),
+                    0o600,
+                )
+                if sys.platform == "win32":
+                    # msvcrt.locking locks bytes from the current file position.
+                    if os.fstat(self._lock_fd).st_size == 0:
+                        os.write(self._lock_fd, b"\0")
+                    os.lseek(self._lock_fd, 0, os.SEEK_SET)
                     msvcrt.locking(self._lock_fd, msvcrt.LK_NBLCK, 1)
-                    self._lock_held = True
-                    self._logger.info(f"OS-level lock acquired: {self.lock_file}")
-                    return True
-                except OSError as e:
-                    if self._lock_fd is not None:
-                        os.close(self._lock_fd)
-                        self._lock_fd = None
-                    self._logger.warning(f"Lock acquisition failed (Windows): {e}")
-                    return False
-            else:
-                # Unix: fcntl.flock()
-                try:
+                else:
                     fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    self._lock_held = True
-                    self._logger.info(f"OS-level lock acquired: {self.lock_file}")
-                    return True
-                except BlockingIOError:
-                    os.close(self._lock_fd)
+                self._lock_held = True
+                self._logger.info(f"OS-level lock acquired: {self.lock_file}")
+                return True
+            except (BlockingIOError, OSError) as exc:
+                if self._lock_fd is not None:
+                    try:
+                        os.close(self._lock_fd)
+                    except OSError:
+                        pass
                     self._lock_fd = None
-                    self._logger.warning(f"Lock already held (would block)")
+                if time.monotonic() >= deadline:
+                    self._logger.warning(f"Lock acquisition timeout: {self.lock_file}: {exc}")
                     return False
-
-        except Exception as e:
-            if self._lock_fd is not None:
-                try:
-                    os.close(self._lock_fd)
-                except Exception:
-                    pass
-                self._lock_fd = None
-            self._logger.error(f"Lock acquisition error: {e}")
-            return False
+                time.sleep(0.1)
+            except Exception as exc:
+                if self._lock_fd is not None:
+                    try:
+                        os.close(self._lock_fd)
+                    except OSError:
+                        pass
+                    self._lock_fd = None
+                self._logger.error(f"Lock acquisition error: {exc}")
+                return False
 
     def release(self) -> bool:
         """Kilit bırak."""
@@ -190,7 +186,6 @@ class OSLevelProcessLock:
 
         try:
             if sys.platform == "win32":
-                import msvcrt
                 msvcrt.locking(self._lock_fd, msvcrt.LK_UNLCK, 1)
             else:
                 fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
@@ -206,7 +201,8 @@ class OSLevelProcessLock:
             return False
 
     def __enter__(self):
-        self.acquire()
+        if not self.acquire():
+            raise RuntimeError(f"Lock acquisition failed: {self.lock_file}")
         return self
 
     def __exit__(self, *args):
@@ -278,7 +274,7 @@ class VirtualBrainStateManager:
         return sandbox_dir / "hypotheses.jsonl"
 
     @staticmethod
-    def migrate_from_source_tree() -> None:
+    def migrate_from_source_tree(source_root: Path | None = None) -> None:
         """ESKI konumdan YENİ konuma taşı (one-time migration).
         
         Adımlar:
@@ -291,16 +287,22 @@ class VirtualBrainStateManager:
 
         logger = logging.getLogger("jarvis.vb_state_migration")
 
-        # ESKI konumlar (source tree)
-        source_root = Path(__file__).resolve().parent.parent.parent / "self_improvement" / "virtual_brain"
+        # ESKI konumlar (source tree).  p0_critical_fixes.py, src/jarvis/core
+        # altında olduğundan jarvis kökü iki parent yukarıdadır.
+        source_root = source_root or (
+            Path(__file__).resolve().parent.parent / "self_improvement" / "virtual_brain"
+        )
         old_experiments = source_root / "orchestrator" / "experiments.json"
         old_reports = source_root / "reports"
         old_hypotheses = source_root / "hypotheses.jsonl"
 
         # YENİ konumlar (user data dir)
-        new_experiments = VirtualBrainStateManager.get_experiments_path()
-        new_reports = VirtualBrainStateManager.get_reports_dir()
-        new_hypotheses = VirtualBrainStateManager.get_hypotheses_path()
+        from jarvis.paths import data_dir
+        sandbox_dir = data_dir() / "sandbox"
+        sandbox_dir.mkdir(parents=True, exist_ok=True)
+        new_experiments = sandbox_dir / "experiments.json"
+        new_reports = sandbox_dir / "reports"
+        new_hypotheses = sandbox_dir / "hypotheses.jsonl"
 
         moved = []
 

@@ -291,8 +291,8 @@ def test_readonly_tools_of_agent_loop_are_read_or_documented():
 
 
 # ── Kapiyi yalnizca kapidan gecirilmis yollar kullaniyor (Adim 2) ──
-# E1/E2: main.py; E3: tools/agent/react_runtime.py. Yeni bir kullanici
-# eklenirse bu liste bilincli olarak guncellenmeli.
+# E1/E2: main.py; E3: tools/agent/react_runtime.py; E16: P0 plugin gate.
+# Yeni bir kullanici eklenirse bu liste bilincli olarak guncellenmeli.
 
 def test_only_the_gated_paths_import_the_gate():
     import ast
@@ -314,4 +314,8 @@ def test_only_the_gated_paths_import_the_gate():
             if any(m.split(".")[-1] == "security_gate" for m in mods):
                 users.append(str(path.relative_to(root)))
                 break
-    assert sorted(users) == ["src/jarvis/main.py", "tools/agent/react_runtime.py"], users
+    assert sorted(users) == [
+        "src/jarvis/core/p0_critical_fixes.py",
+        "src/jarvis/main.py",
+        "tools/agent/react_runtime.py",
+    ], users

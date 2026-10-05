@@ -24,9 +24,8 @@ import secrets
 import threading
 import tempfile
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any
 from enum import Enum
 
 # Başlatma
@@ -58,10 +57,10 @@ class ApprovalRequest:
     fingerprint: str                   # action integrity hash (action tekrar çağrılırsa aynı code döner)
     issued_at: float                   # monotonic time
     expires_at: float                  # TTL sonrası invalid
-    metadata: Dict[str, Any]           # Type-specific data
+    metadata: dict[str, Any]           # Type-specific data
     status: str = "pending"            # pending, confirmed, rejected, expired
-    confirmed_at: Optional[float] = None
-    user_message: Optional[str] = None # Kullanıcının "evet"/"hayır" mesajı
+    confirmed_at: float | None = None
+    user_message: str | None = None # Kullanıcının "evet"/"hayır" mesajı
 
     def is_valid(self, now: float) -> bool:
         """TTL'si geçmiş mi?"""
@@ -113,7 +112,7 @@ class ApprovalRegistry:
                 pass
         return logger
 
-    def _load(self) -> Dict[str, ApprovalRequest]:
+    def _load(self) -> dict[str, ApprovalRequest]:
         """Disk'ten yükle."""
         try:
             if self.path.is_file():
@@ -123,7 +122,7 @@ class ApprovalRegistry:
             self._logger.error(f"Registry yükleme hatası: {e}")
         return {}
 
-    def _save(self, registry: Dict[str, ApprovalRequest]) -> None:
+    def _save(self, registry: dict[str, ApprovalRequest]) -> None:
         """Disk'e kaydet (atomic)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         data = {code: req.to_dict() for code, req in registry.items()}

@@ -14,7 +14,6 @@ IZOLASYON: entegrasyon.BASE_DIR tmp_path'e cevrilir (eski kod bu klasorde
 `import actions.<mod>` calistirdigi icin kirmizi test gercek repoya
 dokunmadan kaniti uretir). HOME/JARVIS_HOME tmp_path; ag/LLM cagrisi yok.
 """
-import os
 import subprocess
 from pathlib import Path
 

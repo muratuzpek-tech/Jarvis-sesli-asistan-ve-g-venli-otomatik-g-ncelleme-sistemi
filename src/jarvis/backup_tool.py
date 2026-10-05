@@ -73,7 +73,7 @@ class JarvisBackupTool:
         self.last_error: str | None = None
 
     @classmethod
-    def for_jarvis(cls) -> "JarvisBackupTool":
+    def for_jarvis(cls) -> JarvisBackupTool:
         """Jarvis'in kendi klasörü (src/jarvis) için araç. Kapsam: yalnızca
         bu paket; kullanıcı verisi ve depo kökü kapsam dışı."""
         return cls(jarvis_project_root())

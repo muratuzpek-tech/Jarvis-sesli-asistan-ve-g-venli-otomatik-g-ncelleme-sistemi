@@ -12,13 +12,11 @@ import json
 import logging
 import os
 import shutil
-import sys
 import tempfile
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 # ══════════════════════════════════════════════════════════════
 # FIX #10: Konsistent zaman kaynağı
@@ -127,7 +125,7 @@ class TaskManager:
                     Path(temp_name).unlink()
                 except Exception:
                     pass
-            raise RuntimeError(f"Atomik yazma başarısız: {e}")
+            raise RuntimeError(f"Atomik yazma başarısız: {e}") from e
 
     def create(
         self, name: str, agent: str = "orchestrator", priority: str = "medium",

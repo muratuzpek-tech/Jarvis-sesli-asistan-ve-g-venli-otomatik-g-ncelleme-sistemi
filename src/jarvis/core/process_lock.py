@@ -14,18 +14,19 @@ from __future__ import annotations
 
 import json
 import os
-import time
 import tempfile
 import logging
 from pathlib import Path
-from typing import Optional
 from dataclasses import dataclass, asdict
 
 import sys
+from jarvis.paths import data_dir
+
+
 def _get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
+    return data_dir()
 
 BASE_DIR = _get_base_dir()
 QUEUES_LOCK_PATH = BASE_DIR / "config" / "queues_lock.json"
@@ -66,6 +67,10 @@ class ProcessLockManager:
         self.lock_path = lock_path
         self.stale_timeout = stale_timeout
         self.pid = os.getpid()
+        from jarvis.core.p0_critical_fixes import OSLevelProcessLock
+        self._os_lock = OSLevelProcessLock(lock_file=lock_path)
+        self._held = False
+        self._holder_name = "unknown"
         self._logger = self._make_logger()
     
     def _make_logger(self) -> logging.Logger:
@@ -82,7 +87,7 @@ class ProcessLockManager:
                 pass
         return logger
     
-    def _load_lock(self) -> Optional[ProcessLock]:
+    def _load_lock(self) -> ProcessLock | None:
         """Lock dosyasını oku."""
         try:
             if self.lock_path.is_file():
@@ -120,74 +125,48 @@ class ProcessLockManager:
         Returns:
             True if acquired, False if timeout
         """
-        now = time.monotonic()
-        deadline = now + timeout
-        
-        while time.monotonic() < deadline:
-            # Mevcut lock var mı?
-            existing_lock = self._load_lock()
-            
-            if existing_lock is None:
-                # Lock boş → al!
-                new_lock = ProcessLock(
-                    pid=self.pid,
-                    holder_name=holder_name,
-                    acquired_at=time.monotonic(),
-                    heartbeat_at=time.monotonic()
-                )
-                self._save_lock(new_lock)
-                self._logger.info(f"Lock alındı: pid={self.pid}, holder={holder_name}")
-                return True
-            
-            # Stale mi?
-            if existing_lock.is_stale(time.monotonic(), self.stale_timeout):
-                self._logger.warning(
-                    f"Stale lock temizlendi: pid={existing_lock.pid}, holder={existing_lock.holder_name}"
-                )
-                self._delete_lock()
-                continue
-            
-            # Zaten bu process tutuyorsa → OK
-            if existing_lock.pid == self.pid:
-                self._logger.info(f"Lock zaten bu process'te: {holder_name}")
-                return True
-            
-            # Beklemeyi devam et
-            time.sleep(0.1)
-        
+        if self._held:
+            return True
+        acquired = self._os_lock.acquire(timeout=max(0.0, timeout))
+        if acquired:
+            self._held = True
+            self._holder_name = holder_name
+            self._logger.info(f"OS-level lock alındı: pid={self.pid}, holder={holder_name}")
+            return True
         self._logger.error(f"Lock timeout: {holder_name} ({timeout}s)")
         return False
     
     def heartbeat(self) -> None:
         """Lock'u tutan process "ben hala hayattayım" diyor."""
-        lock = self._load_lock()
-        if lock and lock.pid == self.pid:
-            lock.heartbeat_at = time.monotonic()
-            self._save_lock(lock)
+        # OS lock process sonlandığında otomatik bırakılır; heartbeat dosyası
+        # artık sahiplik mekanizması değildir ve yarış penceresi oluşturmaz.
+        if self._held:
+            return
     
     def release(self) -> None:
         """Lock'u bırak."""
-        lock = self._load_lock()
-        if lock and lock.pid == self.pid:
-            self._delete_lock()
+        if not self._held:
+            self._logger.warning("Lock'u serbest bırakamadık: bu manager lock sahibi değil")
+            return
+        if self._os_lock.release():
+            self._held = False
             self._logger.info(f"Lock serbest bırakıldı: pid={self.pid}")
-        else:
-            self._logger.warning(f"Lock'u serbest bırakamadık: yabancı pid veya lock yok")
     
     def is_locked(self) -> bool:
         """Lock var mı?"""
-        lock = self._load_lock()
-        if lock is None:
+        if self._held:
+            return True
+        from jarvis.core.p0_critical_fixes import OSLevelProcessLock
+        probe = OSLevelProcessLock(lock_file=self.lock_path)
+        if probe.acquire(timeout=0.0):
+            probe.release()
             return False
-        return not lock.is_stale(time.monotonic(), self.stale_timeout)
+        return True
     
     def force_release_stale(self) -> bool:
         """Stale lock'ları zorla serbest bırak."""
-        lock = self._load_lock()
-        if lock and lock.is_stale(time.monotonic(), self.stale_timeout):
-            self._delete_lock()
-            self._logger.warning(f"Stale lock force-released: pid={lock.pid}")
-            return True
+        # OS-level locks are released by the kernel when the owner dies;
+        # deleting the lock file would be unsafe while another process owns it.
         return False
 
 
