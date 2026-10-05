@@ -1060,10 +1060,54 @@ class JarvisLive:
         CONFIRMATION_REQUIRED donerse islem bekleyen olarak isaretlenir;
         model ayni araci ancak kullanici gercekten onayladiktan sonra
         tekrar cagirdiginda calisir."""
+        # Ayni arac zaten arka planda calisiyorsa ikinci kopyayi BASLATMA.
+        # Canli testte model "saat kac?" sorusuna cevap yerine agentic_code'u
+        # tekrar cagirdi; onay verilince 3 kodlama paralel calisti (GPU %98,
+        # Gemini istekleri katlandi). Onay da tuketilmez.
+        if tool_name in self._BACKGROUND_REGISTRY_TOOLS and self._bg_tasks:
+            if any(t.get_name() == f"bg:{tool_name}" and not t.done() for t in self._bg_tasks):
+                print(f"[JARVIS] ⏳ {tool_name} zaten çalışıyor — ikinci çağrı reddedildi")
+                return (
+                    f"ZATEN_CALISIYOR: '{tool_name}' görevi hâlâ arka planda çalışıyor. "
+                    "Bu aracı TEKRAR ÇAĞIRMA ve onay İSTEME. Kullanıcının asıl sorusunu "
+                    "(ör. saat, sohbet) normal şekilde cevapla; görev bitince sonuç "
+                    "[ARKA_PLAN_SONUC] ile gelecek."
+                )
+
         ctx = _Jarvis2ToolContext(ui=self.ui, session=self.session)
         ctx.dangerous_confirmed = self._consume_dangerous_confirmation(tool_name)
         try:
-            result = await _jarvis2_registry.execute(tool_name, args, ctx=ctx)
+            if tool_name in self._BACKGROUND_REGISTRY_TOOLS:
+                # Uzun suren arac: _receive_audio bu await'te beklerse Gemini'nin
+                # cevaplari hic okunmaz ve kullanici kodlama bitene kadar Jarvis'le
+                # konusamaz ("saat kac" cevapsiz kaliyordu). Kisa surede biterse
+                # (onay istegi, hata) sonucu normal don; bitmezse arka plana al.
+                task = asyncio.ensure_future(
+                    _jarvis2_registry.execute(tool_name, args, ctx=ctx)
+                )
+                task.set_name(f"bg:{tool_name}")
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.shield(task), timeout=self._BACKGROUND_START_WAIT_S
+                    )
+                except asyncio.TimeoutError:
+                    if self._bg_tasks is None:
+                        self._bg_tasks = set()
+                    self._bg_tasks.add(task)
+                    task.add_done_callback(
+                        lambda t, n=tool_name: self._on_background_tool_done(n, t)
+                    )
+                    print(f"[JARVIS] ⏳ {tool_name} arka plana alındı (konuşma devam ediyor)")
+                    self.ui.write_log(f"SYS: {tool_name} arka planda başladı.")
+                    return (
+                        f"ARKA_PLANDA_BASLADI: '{tool_name}' görevi arka planda çalışıyor "
+                        "(birkaç dakika sürebilir). Kullanıcıya bunu TEK cümleyle söyle; "
+                        "bu sırada onunla normal konuşmaya devam et. Görev bitince gerçek "
+                        "sonuç sana [ARKA_PLAN_SONUC] mesajıyla gelecek; o gelmeden sonucu "
+                        "UYDURMA ve bu aracı tekrar çağırma."
+                    )
+            else:
+                result = await _jarvis2_registry.execute(tool_name, args, ctx=ctx)
         except Exception as err:
             print(f"[JARVIS 2.0] ❌ Registry error: {tool_name}: {err}")
             return f"Tool error ({tool_name}): {type(err).__name__}: {str(err)[:120]}"
@@ -1078,10 +1122,60 @@ class JarvisLive:
                 "gelmeden çağırma. Bu yanıt bir sistem hatası değildir, 'sistemsel "
                 "sorun' deme."
             )
+        if isinstance(result, str):
+            result += self._no_auto_retry_note(result)
         return result
+
+    # Arka planda calistirilan registry araclari ve calisan gorevleri
+    # (referans tutulmazsa asyncio gorevi cop toplayiciya gidebilir).
+    _BACKGROUND_REGISTRY_TOOLS = frozenset({"agentic_code"})
+    _BACKGROUND_START_WAIT_S = 2.0
+    _bg_tasks: set | None = None
+
+    def _on_background_tool_done(self, tool_name: str, task: asyncio.Task) -> None:
+        """Arka plan araci bitince sonucu UI'a yaz ve Jarvis'e seslendirt."""
+        if self._bg_tasks is not None:
+            self._bg_tasks.discard(task)
+        if task.cancelled():
+            outcome = f"{tool_name} iptal edildi."
+        elif task.exception() is not None:
+            exc = task.exception()
+            outcome = f"{tool_name} hata verdi: {type(exc).__name__}: {str(exc)[:300]}"
+        else:
+            outcome = str(task.result())
+        print(f"[JARVIS] 🏁 Arka plan görevi bitti: {tool_name}")
+        try:
+            self.ui.write_log(f"[{tool_name.upper()}_SONUC]\n{outcome}")
+        except Exception:
+            pass
+        try:
+            log_turn("jarvis", outcome[:2000])
+        except Exception as e:
+            print(f"[JARVIS] ⚠️ conversation_log (background result): {e}")
+        self.speak(
+            f"[ARKA_PLAN_SONUC:{tool_name}] Arka planda çalışan görev bitti. Gerçek sonuç:\n"
+            f"{outcome[:3000]}\n"
+            "Kullanıcıya kısa ve doğal Türkçe ile özetle: başarılı mı, kaç dosya, "
+            "nerede, varsa hangi hata. Ham listeyi okuma, sonuç uydurma."
+            + self._no_auto_retry_note(outcome)
+        )
+
+    @staticmethod
+    def _no_auto_retry_note(result: str) -> str:
+        """Basarisiz kodlama sonucunda modelin kendi kendine tekrar
+        denemesini (her seferinde yeni onay isteyerek) engeller."""
+        text = str(result or "")
+        if "NOT ACCEPTED" in text or "DOGRULAMA BASARISIZ" in text or text.startswith("❌"):
+            return (
+                " Görev BAŞARISIZ oldu: kendiliğinden TEKRAR DENEME ve tekrar onay "
+                "isteme. Kullanıcıya ne olduğunu söyle ve ne yapmak istediğini sor "
+                "(ör. dosya listesini netleştirmek, tekrar denemek ya da vazgeçmek)."
+            )
+        return ""
 
     def __init__(self, ui: JarvisUI):
         self.ui             = ui
+        self._bg_tasks: set = set()
         self.session              = None
         self.audio_in_queue       = None
         self.out_queue            = None

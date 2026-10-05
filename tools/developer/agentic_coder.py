@@ -128,19 +128,31 @@ def _pick_ollama_coder_model() -> str:
 def _note_gemini_failure(exc: Exception) -> None:
     """429/kota hatasinda Gemini'yi API'nin soyledigi sure kadar atla."""
     global _gemini_disabled_until
-    text = str(exc)
-    if "429" not in text and "RESOURCE_EXHAUSTED" not in text.upper():
-        return
-    match = _RETRY_DELAY_RE.search(text)
-    if match:
-        wait = float(match.group(1))
-    elif "perday" in text.lower():
-        wait = 3600.0
-    else:
-        wait = 60.0
     import time as _time
-    _gemini_disabled_until = _time.monotonic() + wait
-    logger.warning(f"[Coder] Gemini kotası dolu → {wait:.0f}sn boyunca doğrudan Ollama")
+    text = str(exc)
+    upper = text.upper()
+    if "429" in text or "RESOURCE_EXHAUSTED" in upper:
+        match = _RETRY_DELAY_RE.search(text)
+        if match:
+            wait = float(match.group(1))
+        elif "perday" in text.lower():
+            wait = 3600.0
+        else:
+            wait = 60.0
+        reason = "kotası dolu"
+    elif (
+        type(exc).__name__ == "ServerError"
+        or "UNAVAILABLE" in upper
+        or re.search(r"\b50[0-4]\b", text)
+    ):
+        # 503 "high demand": canli testte her iterasyon once Gemini'ye gidip
+        # ayni hatayi alip sonra Ollama'ya dusuyordu. Kisa bir ara ver.
+        wait = 120.0
+        reason = "aşırı yüklü (5xx)"
+    else:
+        return
+    _gemini_disabled_until = max(_gemini_disabled_until, _time.monotonic() + wait)
+    logger.warning(f"[Coder] Gemini {reason} → {wait:.0f}sn boyunca doğrudan Ollama")
 
 
 def _gemini_available() -> bool:
@@ -340,6 +352,22 @@ def _validate_code(code: str, language: str = "python") -> tuple[bool, str]:
             return False, f"SYNTAX_ERROR: line {e.lineno}: {e.msg}"
 
     return True, "OK"
+
+
+_LANG_EXT = {
+    "python": "py", "py": "py", "javascript": "js", "js": "js", "node": "js",
+    "typescript": "ts", "ts": "ts", "go": "go", "golang": "go", "ruby": "rb",
+    "php": "php", "bash": "sh", "shell": "sh", "sh": "sh", "rust": "rs",
+    "java": "java", "c": "c", "cpp": "cpp", "c++": "cpp",
+}
+
+
+def _lang_ext(language: str) -> str:
+    """'python' -> 'py'. Eskiden dosya adi f"main.{language}" ile
+    uretiliyordu; beklenen dosya 'main.python' oluyor, model de bu adla
+    gercekten bir dosya yaziyordu."""
+    lang = (language or "python").strip().lower()
+    return _LANG_EXT.get(lang, lang)
 
 
 _CODE_SUFFIXES = {".py", ".js", ".ts", ".go", ".rb", ".php", ".sh", ".java", ".rs", ".c", ".cpp"}
@@ -583,15 +611,25 @@ class AgenticCoder:
         # 2. Ollama fallback
         try:
             import ollama
-            resp = ollama.chat(
+            _ollama_kwargs = dict(
                 model=_pick_ollama_coder_model(),
                 messages=[{"role": "user", "content": prompt}],
-                format="json",
                 options={"temperature": 0.2, "num_predict": 8192, "num_ctx": 16384},
             )
+            try:
+                resp = ollama.chat(format="json", **_ollama_kwargs)
+            except ollama.ResponseError as json_err:
+                # Canli testte format="json" istekleri ~170 token sonra HTTP
+                # 500 ile kesildi (ayni istek Jarvis disinda 200). JSON
+                # kisitini kaldirip bir kez daha dene; cikti zaten
+                # _parse_model_response + json_repair ile ayristiriliyor.
+                logger.warning(
+                    f"[Coder] Ollama format=json hatası ({str(json_err)[:200]}) → kısıtsız tekrar"
+                )
+                resp = ollama.chat(**_ollama_kwargs)
             return resp.get("message", {}).get("content", "")
         except Exception as e:
-            logger.warning(f"[Coder] Ollama da yok ({type(e).__name__})")
+            logger.warning(f"[Coder] Ollama da yok ({type(e).__name__}: {str(e)[:200]})")
             return json.dumps({
                 "thought": "LLM bulunamadı",
                 "action": "error",
@@ -628,6 +666,15 @@ class AgenticCoder:
                 if '/' in str(_pp) and len(str(_pp)) > 5:
                     project_path = str(_pp)
         
+        # Goreli yol ("StockFlow") calisma dizinine gore cozuluyordu; Jarvis
+        # repo kokunden calistigi icin proje Jarvis'in KENDI reposuna
+        # yaziliyordu. Goreli yollar her zaman ~/jarvis_programs altina gider.
+        if project_path:
+            _pp = Path(str(project_path)).expanduser()
+            if not _pp.is_absolute():
+                _pp = Path.home() / "jarvis_programs" / _pp
+            project_path = str(_pp)
+
         # SECURITY: enforce $HOME containment for project paths
         _candidate = (Path(project_path) if project_path
                       else _auto_project_dir(description)).expanduser().resolve()
@@ -652,7 +699,7 @@ class AgenticCoder:
         if target_filename and target_filename not in task.expected_files:
             task.expected_files.append(target_filename)
         if not task.expected_files:
-            task.expected_files = [f"main.{language}"]
+            task.expected_files = [f"main.{_lang_ext(language)}"]
         # Always require README.md and tests/ for multi-file projects
         if 'README.md' not in task.expected_files:
             task.expected_files.append('README.md')
@@ -686,6 +733,7 @@ class AgenticCoder:
             pass
 
         llm_error: str | None = None
+        _llm_error_streak = 0
 
         # NOT: Bu coroutine Jarvis'in canli ses oturumuyla AYNI event loop'ta
         # calisiyor. LLM, dosya calistirma ve pytest gibi bloklayan isler
@@ -729,8 +777,17 @@ class AgenticCoder:
                 llm_error = response or "HATA: Kullanılabilir LLM yok (Gemini/Ollama)"
                 steps.append(CodingStep(step_num=i + 1, thought=thought, action="error",
                                         detail=llm_error, success=False))
+                _llm_error_streak += 1
+                # Tek bir gecici hata (Ollama mesgul/GPU dolu, ag kopmasi) tum
+                # gorevi bitirmesin: 2 kez kisa bekleyip tekrar dene.
+                if _llm_error_streak <= 2:
+                    self._ui_progress(f"    ⚠️ {llm_error} — 10sn sonra tekrar denenecek ({_llm_error_streak}/2)")
+                    await asyncio.sleep(10)
+                    continue
                 self._ui_progress(f"    ❌ {llm_error}")
                 break
+            _llm_error_streak = 0
+            llm_error = None
 
             self._ui_progress(f"    🎯 action={action} file={args.get('filename','?')} thought={thought[:60]}")
             step = CodingStep(step_num=i + 1, thought=thought, action=action)
@@ -784,7 +841,7 @@ class AgenticCoder:
                         steps.append(step)
                         continue
             if action in ("write", "fix"):
-                filename = args.get("filename") or target_filename or f"main.{task.language}"
+                filename = args.get("filename") or target_filename or f"main.{_lang_ext(task.language)}"
                 content = args.get("content", "")
 
                 # Same file write tracking + force rotate
@@ -943,8 +1000,9 @@ class AgenticCoder:
         task.accepted = _ok
         if not task.accepted:
             task.errors.extend(_vp[:5])
+            _cause = f"LLM'e ulaşılamadı ({llm_error}) — " if llm_error else ""
             task.final_response = (
-                f"DOGRULAMA BASARISIZ ({len(_vp)} sorun): "
+                f"{_cause}DOGRULAMA BASARISIZ ({len(_vp)} sorun): "
                 + "; ".join(_vp[:5])
             )
         elif not task.final_response:
