@@ -115,7 +115,9 @@ class ToolRegistry:
             requires_context:  Handler ToolContext alıyor mu?
             after_execute:     Post-processing callback (result, ctx) → result
         """
-        # String security → enum
+        # String security → enum. Taninmayan bir ad sessizce NORMAL'a
+        # dusuyordu: "destuctive" gibi bir yazim hatasi, destructive bir
+        # araci onaysiz birakiyordu. Artik kayit sirasinda patlar.
         if isinstance(security, str):
             sec_map = {
                 "read_only": SecurityLevel.READ_ONLY,
@@ -123,7 +125,13 @@ class ToolRegistry:
                 "dangerous": SecurityLevel.DANGEROUS,
                 "destructive": SecurityLevel.DESTRUCTIVE,
             }
-            security = sec_map.get(security.lower(), SecurityLevel.NORMAL)
+            key = security.lower()
+            if key not in sec_map:
+                raise ValueError(
+                    f"Bilinmeyen guvenlik seviyesi {security!r} (tool: {name}). "
+                    f"Gecerli degerler: {', '.join(sorted(sec_map))}"
+                )
+            security = sec_map[key]
 
         def _add(fn: Callable) -> Callable:
             # HIGH FIX: Duplicate registration warn

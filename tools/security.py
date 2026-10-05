@@ -119,14 +119,19 @@ class SecurityManager:
                 reason="DESTRUCTIVE — user confirmation required",
             )
 
+        # allowed=True donmek requires_confirmation'i etkisiz birakiyordu:
+        # registry.execute her iki kontrolunde de `not verdict.allowed`
+        # ariyor, dolayisiyla arac onay sorulmadan calisiyordu. Dosyanin
+        # basindaki "DANGEROUS -> kullanici ONAYI gerekir" kurali artik
+        # kodda da gecerli.
         if level >= SecurityLevel.DANGEROUS and not user_confirmed:
             prompt = f"⚠️ '{tool_name}' tehlikeli olabilir. Devam edilsin mi?"
-            self._audit(tool_name, args, blocked=False, reason="dangerous_passed")
+            self._audit(tool_name, args, blocked=True, reason="confirmation_required")
             return SecurityVerdict(
-                allowed=True,
+                allowed=False,
                 requires_confirmation=True,
                 confirm_prompt=prompt,
-                reason="DANGEROUS — proceeding with caution",
+                reason="DANGEROUS — user confirmation required",
             )
 
         self._audit(tool_name, args, blocked=False, reason="allowed")
