@@ -29,7 +29,7 @@ if _platform.system() == "Windows":
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
-from .tool_gate import gate, audit_entry
+from .tool_gate import gate, audit_entry, needs_confirmation
 import json
 import os
 import re
@@ -331,7 +331,8 @@ TOOL_DECLARATIONS = [
         "name": "terminal",
         "description": (
             "Runs a controlled terminal command. Read-only allowlisted commands run immediately; "
-            "other commands are previewed and require explicit user approval with confirm_code. "
+            "other commands are only previewed; after the user explicitly approves in their next "
+            "message, call again with the SAME command and cwd. "
             "Never use shell syntax, pipes, redirects, sudo, shutdown, reboot, or rm commands."
         ),
         "parameters": {
@@ -339,7 +340,6 @@ TOOL_DECLARATIONS = [
             "properties": {
                 "command": {"type": "STRING", "description": "Command and arguments, without shell pipes or redirects"},
                 "cwd": {"type": "STRING", "description": "Working directory inside the user's home directory"},
-                "confirm_code": {"type": "STRING", "description": "Code from a prior preview after explicit user approval"},
             },
             "required": ["command"]
         }
@@ -650,18 +650,17 @@ TOOL_DECLARATIONS = [
             "before keeping it. If verification fails it retries up to 3 times, then restores the "
             "original file automatically. Use this when the user asks Jarvis to improve/refactor "
             "its own code, fix itself, or 'kendini geliştir'. If no file is named, picks the "
-            "actions/ file that hasn't been reviewed the longest. The first call (no confirm_code) "
-            "never touches the file, it only returns a preview and a confirm_code. You MUST relay "
-            "which file and goal to the user and wait for their explicit confirmation in their "
-            "next message before calling 'self_improve' again with that confirm_code. Never chain "
-            "both calls in the same turn without a real user confirmation in between."
+            "actions/ file that hasn't been reviewed the longest. Security/approval files (main.py, "
+            "tool_gate.py, terminal_tool.py, ...) are never targets. The first call never touches "
+            "the file, it only returns a preview. You MUST relay which file and goal to the user "
+            "and wait for their explicit confirmation in their next message before calling "
+            "'self_improve' again with the SAME file_path and goal."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "file_path":    {"type": "STRING", "description": "Optional path (relative to the project root) of the file to improve, e.g. 'actions/weather_report.py'. If omitted, Jarvis picks one itself."},
                 "goal":         {"type": "STRING", "description": "Optional description of what to improve (e.g. 'add better error handling'). Defaults to a general code-quality pass."},
-                "confirm_code": {"type": "STRING", "description": "The code returned by a PRIOR unconfirmed call, after the user has explicitly confirmed. Leave empty on the first attempt."},
             },
             "required": []
         }
@@ -1074,9 +1073,47 @@ class JarvisLive:
     # kullanici onayi olmadan calistirabiliyordu. Kod burada saklanir ve
     # yalnizca _consume_dangerous_confirmation gercek kullanici onayini (ayni
     # arac + ayni argumanlar) dogruladiginda araca geri iletilir.
-    _CONFIRM_CODE_TOOLS = frozenset({"file_controller", "code_helper"})
+    # terminal ve self_improve de ayni yolu kullanir (tool_gate'in eski kod
+    # akisi yerine): kod saklanir, modelin gonderdigi confirm_code atilir.
+    _CONFIRM_CODE_TOOLS = frozenset({"file_controller", "code_helper", "terminal", "self_improve"})
     _CONFIRM_CODE_RE = re.compile(r"confirm_code\s*=\s*'?([0-9a-fA-F]+)'?")
+    _TERMINAL_CODE_RE = re.compile(r"^Onay kodu:\s*(\S+)\s*$", re.M)
     _tool_confirm_code: tuple[str, str, str] | None = None  # (arac, parmak izi, kod)
+
+    def _discard_tool_confirm_code(self) -> None:
+        """Saklanan onizleme kodunu birakir. terminal kodlari approval_service'te
+        300 sn yasar; kullanici reddettiginde ya da yeni bir onizleme geldiginde
+        kayit hemen iptal edilir."""
+        pending = self._tool_confirm_code
+        self._tool_confirm_code = None
+        if pending and pending[0] == "terminal":
+            approval_service.cancel(pending[2])
+
+    @classmethod
+    def _strip_terminal_code(cls, text: str) -> tuple[str, str | None]:
+        """terminal_tool onizlemesinden "Onay kodu: X" satirini (ve kodla tekrar
+        cagir talimatini) cikarir: (modele gidecek metin, kod)."""
+        text = str(text or "")
+        match = cls._TERMINAL_CODE_RE.search(text)
+        if not (text.startswith("ONAY GEREKL") and match):
+            return text, None
+        lines = [ln for ln in text.splitlines()
+                 if not ln.startswith("Onay kodu:") and "confirm_code" not in ln]
+        return "\n".join(lines), match.group(1)
+
+    def _redact_terminal_result(self, clean: dict, result: str) -> str:
+        text, code = self._strip_terminal_code(result)
+        if code is None:
+            return text
+        self._discard_tool_confirm_code()
+        fingerprint = self._action_fingerprint("terminal", clean)
+        self._tool_confirm_code = ("terminal", fingerprint, code)
+        self._set_pending_dangerous("terminal", fingerprint)
+        return (
+            f"{text}\nKullanıcıya komutu TEK cümleyle anlat ve 'evet' ya da 'hayır' "
+            "demesini iste. Kullanıcı bir sonraki mesajında onay verdikten SONRA "
+            "terminal'i AYNI command ve cwd ile BİR KEZ tekrar çağır; onay gelmeden çağırma."
+        )
 
     def _prepare_confirmed_args(self, tool: str, args: dict) -> tuple[dict, dict]:
         """(onay parmak izi icin temiz argumanlar, araca gidecek argumanlar).
@@ -1101,6 +1138,7 @@ class JarvisLive:
         if not (head.startswith("ONAY GEREKL") and match):
             return text
         fingerprint = self._action_fingerprint(tool, clean)
+        self._discard_tool_confirm_code()
         self._tool_confirm_code = (tool, fingerprint, match.group(1))
         self._set_pending_dangerous(tool, fingerprint)
         preview = " ".join(
@@ -1236,6 +1274,36 @@ class JarvisLive:
             "kendi cevabı verir; sen hiçbir araçla onay verme."
         )
         return True
+
+    def _apply_spoken_confirmation(self, spoken: str) -> None:
+        """Canli sesli transkript (kismi tur) bekleyen tehlikeli isleme cevapsa
+        uygular: "evet" onay verir; acik "hayir" bekleyen islemi ve terminal
+        onay kaydini iptal eder; onaydan sonra gelen "...hayir dur" onayi geri
+        alir. Brain Team / agent_loop cevaplari tur tamamlaninca kendi
+        isleyicilerinde cozulur, burada yalnizca onaylanir."""
+        spoken_ok = self._is_confirmation(spoken)
+        rejected = self._is_rejection(spoken)
+        with self._confirmation_lock:
+            if self._pending_dangerous_action is not None:
+                if spoken_ok:
+                    if not self._dangerous_confirmation_granted:
+                        print(f"[JARVIS] ✅ Sesli onay alındı: {self._pending_dangerous_action}")
+                    self._grant_dangerous_confirmation()
+                elif rejected and self._pending_dangerous_action not in ("brain_team", "agent_loop"):
+                    self._set_pending_dangerous(None)
+                    self._discard_tool_confirm_code()
+                    print("[JARVIS] ⛔ Sesli ret: bekleyen işlem iptal edildi.")
+                elif self._dangerous_confirmation_granted:
+                    # "Evet... hayır dur" gibi: cumlenin devami
+                    # onayi geri aldiysa onayi iptal et.
+                    self._set_pending_dangerous(
+                        self._pending_dangerous_action,
+                        self._pending_dangerous_fingerprint,
+                    )
+                    print("[JARVIS] ↩️ Sesli onay geri alındı.")
+            if rejected and self._pending_terminal_command is not None:
+                approval_service.cancel(self._pending_terminal_command.get("confirm_code", ""))
+                self._pending_terminal_command = None
 
     def _handle_agent_loop_reply(self, text: str) -> bool:
         """Kullanicinin GERCEK turu bekleyen agent_loop onayina cevapsa uygular:
@@ -1517,10 +1585,10 @@ class JarvisLive:
             return
         if self._handle_agent_loop_reply(text):
             return
-        if not self._loop or not self.session:
-            return
         # Tehlikeli işlem onayı yalnızca kullanıcının açıkça söylediği bir
         # sonraki turdan gelebilir; modelin tool-call argümanı onay sayılmaz.
+        # Gemini oturumu olmasa da işlenir: "hayır" bekleyen onayı her durumda
+        # iptal etmeli.
         is_confirmation = self._is_confirmation(text)
         pending_terminal = None
         with self._confirmation_lock:
@@ -1529,12 +1597,17 @@ class JarvisLive:
                     self._grant_dangerous_confirmation()
                 else:
                     # İlgisiz yeni bir tur, eski onayı ileride yanlışlıkla
-                    # kullanılabilir bırakmamalıdır.
+                    # kullanılabilir bırakmamalıdır (terminal kaydı dahil).
                     self._set_pending_dangerous(None)
+                    self._discard_tool_confirm_code()
             if self._pending_terminal_command is not None:
                 if is_confirmation:
                     pending_terminal = dict(self._pending_terminal_command)
+                else:
+                    approval_service.cancel(self._pending_terminal_command.get("confirm_code", ""))
                 self._pending_terminal_command = None
+        if not self._loop or not self.session:
+            return
         if pending_terminal is not None:
             terminal_result = terminal_tool(
                 pending_terminal,
@@ -1684,15 +1757,18 @@ class JarvisLive:
         terminal_params = match_terminal_command(text)
         if terminal_params:
             terminal_result = terminal_tool(terminal_params)
-            if terminal_result.startswith("ONAY GEREKLİ"):
-                code_line = next(
-                    (line for line in terminal_result.splitlines() if line.startswith("Onay kodu:")),
-                    "",
+            # Onay kodu modele (ve log paneline) gitmez; kod burada saklanir ve
+            # yalnizca kullanicinin bir sonraki turundaki "evet" ile kullanilir.
+            terminal_result, code = self._strip_terminal_code(terminal_result)
+            if code:
+                with self._confirmation_lock:
+                    if self._pending_terminal_command is not None:
+                        approval_service.cancel(self._pending_terminal_command.get("confirm_code", ""))
+                    self._pending_terminal_command = {**terminal_params, "confirm_code": code}
+                terminal_result += (
+                    "\nKomut yalnızca kullanıcının bir sonraki mesajındaki açık onayıyla "
+                    "çalışır; terminal aracını bunun için kendin çağırma."
                 )
-                code = code_line.split(":", 1)[1].strip() if ":" in code_line else ""
-                if code:
-                    with self._confirmation_lock:
-                        self._pending_terminal_command = {**terminal_params, "confirm_code": code}
             self.ui.write_log(f"[TERMINAL_ROUTER] {terminal_result}")
             self.speak(
                 f"[TERMINAL_SONUC] {terminal_result}. "
@@ -2103,18 +2179,25 @@ class JarvisLive:
 
         if name in self._CONFIRM_CODE_TOOLS:
             # Modelin gonderdigi confirm_code asla onay sayilmaz (bkz.
-            # _prepare_confirmed_args); gate'e de onay gibi gitmesin.
+            # _prepare_confirmed_args). Bu araclar kendi onizleme kodunu
+            # uretir; kod saklanir ve yalnizca gercek kullanici onayindan sonra
+            # araca iletilir - tool_gate'e girmezler.
             args.pop("confirm_code", None)
-
-        # ═══ MERKEZI TOOL GATE ═══
-        _cc = args.get("confirm_code", "")
-        _gate_block = gate(name, args, user_approved=(bool(_cc) or getattr(self, '_tool_approved', False)))
-        if _gate_block:
-            audit_entry(name, args, _gate_block, approved=False)
-            return types.FunctionResponse(
-                id=fc.id, name=name,
-                response={"result": _gate_block}
-            )
+        elif needs_confirmation(name):
+            # ═══ MERKEZI TOOL GATE ═══
+            # Onay YALNIZCA kullanicinin gercek turundan gelir: bekleyen ayni
+            # arac + ayni argumanlar icin verilmis, 60 sn icindeki tek
+            # kullanimlik onay. Modelin gonderdigi confirm_code yok sayilir.
+            args.pop("confirm_code", None)
+            _approved = self._consume_dangerous_confirmation(name, args)
+            _gate_block = gate(name, args, user_approved=_approved)
+            if _gate_block:
+                self._set_pending_dangerous(name, self._action_fingerprint(name, args))
+                audit_entry(name, args, _gate_block, approved=False)
+                return types.FunctionResponse(
+                    id=fc.id, name=name,
+                    response={"result": _gate_block}
+                )
 
         if name == "code_search":
             import subprocess as _sp
@@ -2279,7 +2362,9 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "terminal":
-                r = await loop.run_in_executor(None, lambda: terminal_tool(parameters=args))
+                _tm_clean, _tm_call = self._prepare_confirmed_args("terminal", args)
+                r = await loop.run_in_executor(None, lambda: terminal_tool(parameters=_tm_call))
+                r = self._redact_terminal_result(_tm_clean, r)
                 result = r or "Done."
 
             elif name == "desktop_control":
@@ -2317,7 +2402,9 @@ class JarvisLive:
                     result = r or "Done."
 
             elif name == "self_improve":
-                r = await loop.run_in_executor(None, lambda: self_improve(parameters=args, player=self.ui))
+                _si_clean, _si_call = self._prepare_confirmed_args("self_improve", args)
+                r = await loop.run_in_executor(None, lambda: self_improve(parameters=_si_call, player=self.ui))
+                r = self._redact_confirmation_result("self_improve", _si_clean, r)
                 result = r or "Done."
 
             elif name == "agent_loop":
@@ -2688,21 +2775,7 @@ class JarvisLive:
                                 # metin modelin degil kullanicinin gercek
                                 # konusmasinin transkripsiyonu.
                                 _spoken = " ".join(in_buf)
-                                _spoken_ok = self._is_confirmation(_spoken)
-                                with self._confirmation_lock:
-                                    if self._pending_dangerous_action is not None:
-                                        if _spoken_ok:
-                                            if not self._dangerous_confirmation_granted:
-                                                print(f"[JARVIS] ✅ Sesli onay alındı: {self._pending_dangerous_action}")
-                                            self._grant_dangerous_confirmation()
-                                        elif self._dangerous_confirmation_granted:
-                                            # "Evet... hayır dur" gibi: cumlenin devami
-                                            # onayi geri aldiysa onayi iptal et.
-                                            self._set_pending_dangerous(
-                                                self._pending_dangerous_action,
-                                                self._pending_dangerous_fingerprint,
-                                            )
-                                            print("[JARVIS] ↩️ Sesli onay geri alındı.")
+                                self._apply_spoken_confirmation(_spoken)
 
                                 # Turn complete gelmese bile dosya komutunu yakala.
 

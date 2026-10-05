@@ -53,7 +53,7 @@ LOG_PATH        = memory_dir() / "self_improve_log.jsonl"
 # Otomatik döngünün dokunabileceği TEK yer projenin kendi kodu - dışarıdan
 # gelen hiçbir dosya buraya giremez.
 ALLOWED_DIRS        = ("actions", "core", "dashboard")
-ALLOWED_ROOT_FILES  = ("main.py", "ui.py", "jarvis_cli.py")
+ALLOWED_ROOT_FILES  = ("ui.py", "jarvis_cli.py")   # main.py korumali (PROTECTED_FILES)
 NO_IMPORT_CHECK     = {"main", "ui"}  # bunlari import etmek ses/GUI acar - sadece sozdizimi kontrol edilir
 
 # Onay bekleyen (henuz uygulanmamis) self_improve istekleri - file_controller.py'deki
@@ -62,10 +62,36 @@ NO_IMPORT_CHECK     = {"main", "ui"}  # bunlari import etmek ses/GUI acar - sade
 _pending_self_improve: dict[str, dict] = {}
 
 
+# Guvenlik sinirini olusturan dosyalar: LLM'in yeniden yazdigi bir surum onay
+# kapilarini sessizce kaldirabilir (bkz. agent_loop.py'deki "bu duzeltme bir
+# kere daha kayboldu" notu). Otomatik iyilestirme bunlara ASLA dokunmaz;
+# degisiklik yalnizca elle, gozden gecirilerek yapilir.
+PROTECTED_FILES = frozenset({
+    "main.py",
+    "tool_gate.py",
+    "actions/terminal_tool.py",
+    "actions/tools_kopru.py",
+    "actions/agent_loop.py",
+    "actions/entegrasyon.py",
+    "actions/file_controller.py",
+    "actions/code_helper.py",
+    "actions/computer_settings.py",
+    "actions/self_improve.py",
+    "core/approval_service.py",
+    "core/brain_orchestrator.py",
+})
+
+
+def _is_protected(rel: Path) -> bool:
+    return rel.as_posix() in PROTECTED_FILES
+
+
 def _is_allowed_target(path: Path) -> bool:
     try:
         rel = path.resolve().relative_to(BASE_DIR)
     except Exception:
+        return False
+    if _is_protected(rel):
         return False
     if len(rel.parts) == 1:
         return rel.parts[0] in ALLOWED_ROOT_FILES
@@ -76,7 +102,8 @@ def _pick_target() -> Path | None:
     """Belirli bir dosya verilmezse: actions/ altında en uzun süredir bu
     döngüde incelenmemiş .py dosyasını seçer (round-robin gibi çalışır,
     her seferinde aynı dosyaya takılıp kalmaz)."""
-    candidates = sorted((BASE_DIR / "actions").glob("*.py"))
+    candidates = sorted(p for p in (BASE_DIR / "actions").glob("*.py")
+                        if _is_allowed_target(p))
     if not candidates:
         return None
 
@@ -334,9 +361,10 @@ def self_improve(parameters: dict = None, player=None) -> str:
 
     if not _is_allowed_target(target):
         return (f"'{file_arg or target}' kendi kendini geliştirme kapsamının dışında. Sadece "
-                f"projenin kendi kod dosyalarını (main.py, ui.py, jarvis_cli.py, actions/, core/, "
-                f"dashboard/) otomatik değiştirebilirim — dışarıdan gelen bir dosyayı otomatik "
-                f"entegre etmem.")
+                f"projenin kendi kod dosyalarını (ui.py, jarvis_cli.py, actions/, core/, "
+                f"dashboard/) otomatik değiştirebilirim; güvenlik/onay dosyalarına "
+                f"(ör. main.py, tool_gate.py, terminal_tool.py) ve dışarıdan gelen "
+                f"dosyalara dokunmam.")
 
     if not target.exists():
         return f"Dosya bulunamadı: {target}"

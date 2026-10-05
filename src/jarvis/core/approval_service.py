@@ -67,6 +67,12 @@ class ApprovalService:
             del self._pending[item.code]
             return True
 
+    def cancel(self, code: str) -> bool:
+        """Kullanici reddettiginde bekleyen onayi hemen gecersiz kilar
+        (TTL dolana kadar yasamasin)."""
+        with self._lock:
+            return self._pending.pop(str(code or "").strip(), None) is not None
+
     def peek(self, code: str, action: str) -> PendingApproval | None:
         now = time.monotonic()
         with self._lock:
