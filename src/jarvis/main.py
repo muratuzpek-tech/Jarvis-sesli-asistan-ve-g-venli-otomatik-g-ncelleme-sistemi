@@ -30,6 +30,7 @@ if _platform.system() == "Windows":
 
 import asyncio
 from .tool_gate import gate, audit_entry, needs_confirmation
+from .security_gate import fingerprint as _gate_fingerprint
 import json
 import os
 import re
@@ -1045,10 +1046,8 @@ class JarvisLive:
         """Onaylanan islemin kimligi: arac adi + argumanlar. Kullanici
         "hesap makinesi yaz"i onaylar, model ayni araci baska argumanlarla
         cagirirsa bu onay gecmez. Sayilar registry.execute'taki gibi str'ye
-        cevrilir (3 ve "3" ayni islemdir)."""
-        if isinstance(args, dict):
-            args = {k: str(v) if isinstance(v, (int, float)) else v for k, v in args.items()}
-        return action + ":" + json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+        cevrilir (3 ve "3" ayni islemdir). Tek kaynak: security_gate.fingerprint."""
+        return _gate_fingerprint(action, args)
 
     def _consume_dangerous_confirmation(self, action: str, args: dict) -> bool:
         """Bekleyen islem ayni arac + ayni argumanlar ise ve gercek kullanici
