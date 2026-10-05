@@ -702,10 +702,9 @@ class BrainOrchestrator:
                 # hardcode ediyordu - yani _infer_executor_action()'ın
                 # GERÇEKTE hangi iç eylemi (create_file/create_folder/
                 # delete/move/...) seçtiği risk değerlendirmesine hiç
-                # yansımıyordu. security_ai.py'nin kendi kural tablosu
-                # create_file/create_folder için zaten MEDIUM, delete/move
-                # için HIGH diyor - ama bu tablo hiç SORULMUYORDU. Artık
-                # gerçek iç eylem security_ai'ye soruluyor.
+                # yansımıyordu. security_ai salt-okunur eylemler dışındaki
+                # her file_controller eylemine HIGH diyor - ama hiç
+                # SORULMUYORDU. Artık gerçek iç eylem security_ai'ye soruluyor.
                 tool, action = "file_controller", inferred_params.get("action", "info")
             elif inferred_action == "windows_system":
                 # windows_system SALT-OKUNUR (madde 11) - is_destructive()

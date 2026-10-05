@@ -198,11 +198,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
 
 
 # Yikici sayilan (action, tool) kombinasyonlari - agent_loop bunlari asla
-# dogrudan calistirmaz, once kullaniciya sorar.
-_DESTRUCTIVE_FILE_ACTIONS = {
-    "create_file", "create_folder", "delete", "delete_all_files",
-    "move", "copy", "rename", "write", "find_replace", "organize_desktop", "extract",
-}
+# dogrudan calistirmaz, once kullaniciya sorar. file_controller icin liste
+# TUTULMAZ: salt-okunur eylemler (file_controller.READONLY_ACTIONS) disindaki
+# her eylem - takma adlar ve bilinmeyen adlar dahil - yikicidir.
 _DESTRUCTIVE_SETTINGS_ACTIONS = {"shutdown", "restart", "lock_screen", "lock"}
 
 
@@ -214,7 +212,8 @@ def is_destructive(tool: str, parameters: dict) -> bool:
     action = str(params.get("action", "")).lower().strip()
 
     if tool == "file_controller":
-        return action in _DESTRUCTIVE_FILE_ACTIONS
+        from jarvis.actions.file_controller import is_readonly_action
+        return not is_readonly_action(action)
     if tool == "computer_settings":
         return action in _DESTRUCTIVE_SETTINGS_ACTIONS
     if tool == "send_message":

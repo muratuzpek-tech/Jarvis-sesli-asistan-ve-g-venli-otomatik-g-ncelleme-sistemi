@@ -1348,6 +1348,42 @@ def get_file_info(path: str, name: str = "") -> str:
     except Exception as e:
         return f"Could not get file info: {e}"
 
+# Sesli model bazen şema içindeki "delete" yerine doğal dil aliası
+# gönderebiliyor. TEK kaynak: dispatcher, tools_kopru.is_destructive ve
+# SecurityAI.classify_risk eylem adını bu tablodan geçirir; ayrı tablolar
+# kayınca 'trash'/'oluştur' gibi adlar onaysız silme/oluşturma yapıyordu.
+ACTION_ALIASES: dict[str, str] = {
+    "sil": "delete",
+    "sil_file": "delete",
+    "delete_file": "delete",
+    "remove": "delete",
+    "trash": "delete",
+    "delete_all": "delete_all_files",
+    "delete_all_files": "delete_all_files",
+    "bulk_delete": "delete_all_files",
+    "tümünü sil": "delete_all_files",
+    "tumunu sil": "delete_all_files",
+    "oluştur": "create_file",
+    "olustur": "create_file",
+}
+
+# Diske HİÇBİR ŞEY yazmayan eylemler. Sınıflandırıcılar fail-closed çalışır:
+# bu kümede olmayan her eylem (takma adlar ve bilinmeyen adlar dahil)
+# yıkıcı / HIGH risk sayılır.
+READONLY_ACTIONS: frozenset[str] = frozenset({
+    "list", "read", "find", "largest", "disk_usage", "info",
+})
+
+
+def normalize_action(action) -> str:
+    a = str(action or "").lower().strip()
+    return ACTION_ALIASES.get(a, a)
+
+
+def is_readonly_action(action) -> bool:
+    return normalize_action(action) in READONLY_ACTIONS
+
+
 def file_controller(
     parameters: dict = None,
     response=None,
@@ -1355,25 +1391,7 @@ def file_controller(
     session_memory=None,
 ) -> str:
     params = parameters or {}
-    action = str(params.get("action", "")).lower().strip()
-    # Sesli model bazen şema içindeki "delete" yerine doğal dil aliası
-    # gönderebiliyor. Güvenli silme yolu yine yalnızca delete_file üzerinden
-    # geçtiği için bu aliaslar davranışı genişletmez; sadece doğru dispatcher
-    # dalına ulaşmayı sağlar.
-    action = {
-        "sil": "delete",
-        "sil_file": "delete",
-        "delete_file": "delete",
-        "remove": "delete",
-        "trash": "delete",
-        "delete_all": "delete_all_files",
-        "delete_all_files": "delete_all_files",
-        "bulk_delete": "delete_all_files",
-        "tümünü sil": "delete_all_files",
-        "tumunu sil": "delete_all_files",
-        "oluştur": "create_file",
-        "olustur": "create_file",
-    }.get(action, action)
+    action = normalize_action(params.get("action", ""))
     path   = params.get("path", "desktop")
     name   = _normalize_file_name(params.get("name", ""))
     path, name = _normalize_path_name(path, name)

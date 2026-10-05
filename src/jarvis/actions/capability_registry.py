@@ -42,7 +42,8 @@ TOOLS_KOPRU_PATH = BASE_DIR / "actions" / "tools_kopru.py"
 #     entegrasyon_uygula - bkz. tools_kopru.is_destructive())
 _ALWAYS_HIGH_RISK = {"send_message", "discovery_register", "entegrasyon_uygula"}
 #   - riski action/parametreye göre değişen araçlar (file_controller,
-#     computer_settings - bkz. _DESTRUCTIVE_FILE_ACTIONS/_SETTINGS_ACTIONS)
+#     computer_settings - bkz. file_controller.READONLY_ACTIONS ve
+#     tools_kopru._DESTRUCTIVE_SETTINGS_ACTIONS)
 #     + salt-okunur olsa da sistem/ağ bilgisi ifşa eden windows_system
 #     (bkz. windows_shell.py ekleme planı - bilinçli olarak "conditional").
 _CONDITIONAL_RISK = {"file_controller", "computer_settings", "windows_system"}

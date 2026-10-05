@@ -19,9 +19,10 @@ from jarvis.brains.base_brain import BaseBrain, BrainError
 
 # 15. RİSK SİSTEMİ + 5. bölümdeki "kontrol edeceği işlemler" listesiyle
 # birebir uyumlu, deterministik eşleme. (tool, action) -> risk seviyesi.
+# file_controller BU TABLOLARDA YOK: classify_risk onu fail-closed olarak
+# file_controller.READONLY_ACTIONS ile siniflandirir (salt-okunur -> LOW,
+# geri kalan her sey -> HIGH).
 _HIGH_RISK = {
-    ("file_controller", "delete"),
-    ("file_controller", "move"),
     ("computer_settings", "shutdown"),
     ("computer_settings", "restart"),
     ("computer_settings", "lock_screen"),
@@ -40,25 +41,12 @@ _HIGH_RISK = {
     ("coder_ai", "modify_critical_file"),
     ("install_program", None),
     ("download_file", None),
-    # GUARD: executor farkli adlarla gönderebilir (2026-10-03 güvenlik fix)
-    ("file_controller", "delete_file"),
-    ("file_controller", "delete_folder"),
-    ("file_controller", "remove_file"),
-    ("file_controller", "remove"),
-    ("file_controller", "move_file"),
-    ("file_controller", "rename"),
-    ("file_controller", "rename_file"),
 }
 _MEDIUM_RISK = {
-    ("file_controller", "create_file"),
-    ("file_controller", "create_folder"),
-    ("file_controller", "copy"),
     ("coder_ai", "write_new_file"),
     ("backup_create", None),
 
     # GUARD: executor varyasyonları (2026-10-03 güvenlik fix)
-    ("file_controller", "write_file"),
-    ("file_controller", "write_new_file"),
     ("coder_ai", "write_file"),
 }
 # Geri kalan her şey (okuma, analiz, araştırma, loglama) varsayılan olarak LOW.
@@ -131,6 +119,12 @@ class SecurityAI(BaseBrain):
 
     @staticmethod
     def classify_risk(tool: str, action: str | None) -> str:
+        if tool == "file_controller":
+            # Fail-closed: tablo yerine file_controller'in kendi takma ad ve
+            # salt-okunur eylem listesi. Listede olmayan her eylem (ör.
+            # 'trash', 'write', 'extract' ya da bilinmeyen bir ad) HIGH.
+            from jarvis.actions.file_controller import is_readonly_action
+            return "low" if is_readonly_action(action) else "high"
         norm_action = SecurityAI._normalize_action(action)
         # Hem orijinal hem normalize edilmiş halini kontrol et
         for act in (norm_action, action):
