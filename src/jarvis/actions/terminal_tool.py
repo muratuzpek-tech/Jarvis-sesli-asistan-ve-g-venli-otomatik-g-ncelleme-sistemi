@@ -57,9 +57,32 @@ def _resolve_cwd(raw: str | None) -> Path:
     return resolved
 
 
+def _expand_home_tokens(argv: list[str]) -> list[str]:
+    """Komutlar shell=False ile calistigi icin "~" kabukca genisletilmez:
+    `touch ~/x` ev dizinine degil calisma klasorundeki "~" klasorune yazar,
+    onizleme de kullaniciya genisletilmemis yolu gosterirdi. Tam olarak "~"
+    olan ve "~/" ile baslayan token'lar os.path.expanduser ile genisletilir;
+    "~kullanici", "--opt=~/x" ve ortasinda "~" gecenler degistirilmez."""
+    return [os.path.expanduser(t) if t == "~" or t.startswith("~/") else t for t in argv]
+
+
+def _escapes_home(token: str, home: Path) -> bool:
+    """Mutlak ve ".." bileseni iceren bir yol ev dizininin disina mi cikiyor?
+    (ör. genisletilmis "~/../etc/passwd")."""
+    if not token.startswith("/") or ".." not in Path(token).parts:
+        return False
+    try:
+        return not Path(token).resolve().is_relative_to(home)
+    except OSError:
+        return True
+
+
 def _is_readonly(argv: list[str]) -> bool:
     if not argv:
         return False
+    # Yol denetimleri GENISLETILMIS yol uzerinden yapilir; terminal_tool ve
+    # security_gate (terminal etkisi) ayni sonucu alsin diye burada da.
+    argv = _expand_home_tokens(argv)
     program = Path(argv[0]).name.lower()
     args = argv[1:]
     home = Path.home().resolve()
@@ -67,6 +90,10 @@ def _is_readonly(argv: list[str]) -> bool:
     for token in args:
         if token.startswith("-"):
             continue
+        # ".." ile ev dizininden DISARI cikan yol hicbir programda salt-okunur
+        # sayilmaz (salt-okunur programlar dahil).
+        if _escapes_home(token, home):
+            return False
         if token.startswith("/"):
             try:
                 if not Path(token).resolve().is_relative_to(home):
@@ -165,6 +192,9 @@ def terminal_tool(
         return f"Komut ayrıştırılamadı: {exc}"
     if not argv:
         return "Komut belirtilmedi."
+    # Onizlemeden, onay ozetinden ve calistirmadan ONCE: kullanicinin gordugu
+    # ve onayladigi komut, calisacak komutun aynisi olsun.
+    argv = _expand_home_tokens(argv)
 
     try:
         cwd = _resolve_cwd(params.get("cwd"))
