@@ -23,7 +23,7 @@ _MAX_OUTPUT = 12000
 _TIMEOUT = 60
 
 _READONLY_PROGRAMS = {"pwd", "ls", "cat", "head", "tail", "grep", "rg", "find", "which", "whoami", "uname", "df", "du"}
-_GIT_READONLY = {"status", "diff", "log", "show", "branch", " rev-parse"}
+_GIT_READONLY = {"status", "diff", "log", "show", "branch", "rev-parse"}
 _PYTHON_SAFE = {("--version",), ("-V",)}
 
 # Salt-okunur programlarin dosya silen/yazan veya baska program calistiran

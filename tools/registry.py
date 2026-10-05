@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import inspect
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -148,7 +149,7 @@ class ToolRegistry:
                 security=security,
                 category=category,
                 handler=fn,
-                is_async=async_handler or asyncio.iscoroutinefunction(fn),
+                is_async=async_handler or inspect.iscoroutinefunction(fn),
                 requires_context=requires_context,
                 after_execute=after_execute,
             )
