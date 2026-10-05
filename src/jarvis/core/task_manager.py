@@ -23,7 +23,10 @@ from datetime import datetime
 from pathlib import Path
 from jarvis.paths import logs_dir, tasks_dir
 
-VALID_STATUSES = {"pending", "running", "waiting_approval", "completed", "failed", "cancelled"}
+# Onay bekleyen gorevin durum adi - orkestrator, UI ve main.py bu TEK sabiti
+# kullanir (UI eskiden "awaiting_approval" ariyordu, gorev hic gorunmuyordu).
+WAITING_APPROVAL = "waiting_approval"
+VALID_STATUSES = {"pending", "running", WAITING_APPROVAL, "completed", "failed", "cancelled"}
 
 
 def _get_base_dir() -> Path:

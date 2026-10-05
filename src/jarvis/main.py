@@ -1116,6 +1116,90 @@ class JarvisLive:
         )
         return instruction + (sep + self._CONFIRM_CODE_RE.sub("", tail) if tail else "")
 
+    # ── Brain Team onayi ────────────────────────────────────────────────
+    # Orkestrator HIGH riskli bir adimi beklemeye aldiginda (arka plan
+    # thread'inden) request_brain_team_approval'i cagirir. Bekleyen adim
+    # ayni tek kullanimlik, 60 sn TTL'li, parmak izi bagli mekanizmaya
+    # kaydedilir; parmak izi task_id + adim icerigini kapsar. Onaylanacak
+    # gorevin kimligi MODELDEN DEGIL, orkestratorun duyurusundan gelir;
+    # Gemini'ye brain_team approve araci yoktur.
+    _brain_pending_task_id: str | None = None
+
+    @staticmethod
+    def _brain_team_fingerprint_args(task_id: str, step: dict | None) -> dict:
+        return {"task_id": task_id, "step": step}
+
+    def request_brain_team_approval(self, task_id: str, step: dict, message: str) -> None:
+        fingerprint = self._action_fingerprint(
+            "brain_team", self._brain_team_fingerprint_args(task_id, step))
+        with self._confirmation_lock:
+            self._set_pending_dangerous("brain_team", fingerprint)
+            self._brain_pending_task_id = task_id
+        try:
+            self.ui.write_log(f"[BRAIN_TEAM_ONAY] {message}")
+        except Exception:
+            pass
+        self.speak(
+            f"[BRAIN_TEAM_ONAY_ISTEGI] {message} Bunu kullanıcıya hedef yolu ile "
+            "birlikte aynen sor ve cevabını bekle. Onayı yalnızca kullanıcının "
+            "kendi cevabı verir; sen hiçbir araçla onay verme."
+        )
+
+    @classmethod
+    def _is_rejection(cls, text: str) -> bool:
+        tokens = cls._normalize_confirmation(text).split()
+        return any(tok in cls._NEGATIVE_WORDS for tok in tokens)
+
+    def _handle_brain_team_reply(self, text: str) -> bool:
+        """Kullanicinin GERCEK turu (yazili komut ya da tamamlanan sesli tur)
+        bekleyen Brain Team onayina cevapsa uygular. "evet" -> approve,
+        "hayir" -> deny. Islendiyse True."""
+        with self._confirmation_lock:
+            if self._pending_dangerous_action != "brain_team" or not self._brain_pending_task_id:
+                return False
+            task_id = self._brain_pending_task_id
+        rejected = self._is_rejection(text)
+        confirmed = not rejected and self._is_confirmation(text)
+        if not (rejected or confirmed):
+            return False
+
+        from jarvis.core.brain_orchestrator import get_orchestrator
+        from jarvis.core.task_manager import WAITING_APPROVAL
+        orch = get_orchestrator()
+
+        if rejected:
+            with self._confirmation_lock:
+                if self._brain_pending_task_id != task_id:
+                    return True  # bu arada yeni bir istek duyuruldu; ona dokunma
+                self._set_pending_dangerous(None)
+                self._brain_pending_task_id = None
+            result = orch.deny(task_id)
+        else:
+            task = orch.tasks.get(task_id) or {}
+            step = task.get("payload", {}).get("pending_step") if task.get("status") == WAITING_APPROVAL else None
+            args = self._brain_team_fingerprint_args(task_id, step)
+            with self._confirmation_lock:
+                if not self._dangerous_confirmation_granted:
+                    self._grant_dangerous_confirmation()
+                ok = step is not None and self._consume_dangerous_confirmation("brain_team", args)
+                if ok:
+                    self._brain_pending_task_id = None
+                elif self._pending_dangerous_action == "brain_team":
+                    # Sure dolmus ya da adim degismis: verilen onayi dusur ki
+                    # kullanici yeniden "evet" diyebilsin; gorev calismaz.
+                    self._set_pending_dangerous("brain_team", self._pending_dangerous_fingerprint)
+            if ok:
+                result = orch.approve(task_id)
+            else:
+                result = ("Onay uygulanmadı: onay süresi doldu ya da bekleyen adım "
+                          "değişti. Görev hâlâ onay bekliyor; tekrar 'evet' ya da 'hayır' deyin.")
+        try:
+            self.ui.write_log(f"[BRAIN_TEAM] {result}")
+        except Exception:
+            pass
+        self.speak(f"[BRAIN_TEAM_ONAY_SONUC] {result}. Bunu kullanıcıya kısaca bildir.")
+        return True
+
     @staticmethod
     def _agentic_code_args(args: dict, description: str) -> dict:
         """code_helper/dev_agent argumanlarini agentic_code'a tasir.
@@ -1274,6 +1358,7 @@ class JarvisLive:
         self._pending_dangerous_fingerprint: str | None = None
         self._dangerous_confirmation_granted = False
         self._tool_confirm_code = None
+        self._brain_pending_task_id = None
         self._pending_terminal_command: dict | None = None
         self._confirmation_lock = threading.RLock()
         self._is_speaking         = False
@@ -1341,6 +1426,10 @@ class JarvisLive:
         self._on_text_command(text)
 
     def _on_text_command(self, text: str):
+        # Bekleyen Brain Team onayina verilen cevap Gemini oturumu olmasa da
+        # islenir (gorev orkestratorde bekliyor, Live baglantisi gerekmez).
+        if self._handle_brain_team_reply(text):
+            return
         if not self._loop or not self.session:
             return
         # Tehlikeli işlem onayı yalnızca kullanıcının açıkça söylediği bir
@@ -2581,6 +2670,18 @@ class JarvisLive:
                                         "text": full_in,
                                         "ts": datetime.now().isoformat(),
                                     }))
+                            # Bekleyen Brain Team onayina sesli cevap: kismi
+                            # transkriptte degil, TUR TAMAMLANINCA uygulanir
+                            # ("evet... hayir dur" yanlislikla onay vermez).
+                            # approve adimi calistirdigi icin olay dongusu
+                            # bloklanmaz.
+                            if (
+                                full_in
+                                and self._brain_pending_task_id
+                                and (self._is_confirmation(full_in) or self._is_rejection(full_in))
+                            ):
+                                self._loop.run_in_executor(None, self._handle_brain_team_reply, full_in)
+                                full_in = ""
                             # Sesli komutlardan dosya islemlerini deterministik router'a aktar.
                             try:
                                 _voice_file_mod = match_file_modification(full_in)

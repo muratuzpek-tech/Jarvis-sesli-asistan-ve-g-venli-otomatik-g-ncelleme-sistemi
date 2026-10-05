@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
 
 from jarvis.core.secure_config import get_gemini_api_key, load_config, save_config, api_keys_path
 from jarvis.paths import memory_dir, tasks_dir
+from jarvis.core.task_manager import WAITING_APPROVAL
 
 
 def _base_dir() -> Path:
@@ -1859,11 +1860,11 @@ class MainWindow(QMainWindow):
             return
         tasks = self._read_task_files()
         counts = {status: sum(1 for task in tasks if task.get("status") == status) for status in
-                  ("pending", "running", "awaiting_approval", "completed", "done", "failed", "cancelled")}
-        active = next((task for task in tasks if task.get("status") in ("pending", "running", "awaiting_approval")), None)
+                  ("pending", "running", WAITING_APPROVAL, "completed", "done", "failed", "cancelled")}
+        active = next((task for task in tasks if task.get("status") in ("pending", "running", WAITING_APPROVAL)), None)
         if active:
             status = str(active.get("status", "pending"))
-            status_text = {"pending": "Bekliyor", "running": "Çalışıyor", "awaiting_approval": "Onay bekliyor"}.get(status, status)
+            status_text = {"pending": "Bekliyor", "running": "Çalışıyor", WAITING_APPROVAL: "Onay bekliyor"}.get(status, status)
             goal = str(active.get("goal", active.get("name", "Görev")))
             self._task_status_lbl.setText(f"{status_text} · {active.get('id', '—')}")
             self._task_detail_lbl.setText(goal[:150])
@@ -1903,7 +1904,7 @@ class MainWindow(QMainWindow):
     def _format_task_summary(tasks: list[dict], counts: dict[str, int]) -> str:
         lines = [
             f"Toplam görev: {len(tasks)}",
-            f"Bekleyen: {counts['pending']}   Çalışan: {counts['running']}   Onay: {counts['awaiting_approval']}",
+            f"Bekleyen: {counts['pending']}   Çalışan: {counts['running']}   Onay: {counts[WAITING_APPROVAL]}",
             f"Tamamlanan: {counts['completed'] + counts['done']}   Başarısız: {counts['failed']}   İptal: {counts['cancelled']}",
             "", "SON GÖREVLER",
         ]

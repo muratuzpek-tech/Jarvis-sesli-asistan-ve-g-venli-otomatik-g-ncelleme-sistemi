@@ -86,7 +86,7 @@ from jarvis.brains.memory_ai import MemoryAI
 from jarvis.brains.executor_ai import ExecutorAI
 from jarvis.brains.auditor_ai import AuditorAI
 from jarvis.core.message_bus import MessageBus
-from jarvis.core.task_manager import TaskManager, TASKS_PATH
+from jarvis.core.task_manager import TaskManager, TASKS_PATH, WAITING_APPROVAL
 from jarvis.core import watchdog
 from jarvis.actions import capability_resolver
 
@@ -273,6 +273,70 @@ class BrainOrchestrator:
                 except Exception as e:
                     print(f"[BrainTeam] ⚠️ Sesli bildirim başarısız (sonuç yine de loglandı): {e}")
 
+    def _describe_pending_step(self, task: dict, step: dict) -> dict:
+        """Onay isteginde gosterilecek arac/eylem/hedef. Hedef, adimi GERCEKTEN
+        calistiracak karar noktasiyla (_resolve_action_with_file_modification)
+        ayni yerden cozulur - kullanicinin gordugu yol, yazilacak yoldur."""
+        if step.get("agent") == "coder_ai":
+            return {"tool": "coder_ai", "action": "modify_critical_file",
+                    "target": step.get("file_path") or "—"}
+        base_path = task.get("payload", {}).get("_active_folder", ".")
+        try:
+            tool, params = self._resolve_action_with_file_modification(task, step, base_path)
+        except Exception:
+            tool, params = step.get("tool") or step.get("agent") or "?", dict(step.get("parameters") or {})
+        action = params.get("action") or step.get("action") or "?"
+        target = "—"
+        if tool == "file_controller":
+            try:
+                from jarvis.actions.file_controller import _resolve_path
+                base = _resolve_path(str(params.get("path") or "."))
+                name = params.get("name") or ""
+                target = str((base / name if name else base).resolve())
+                if params.get("destination"):
+                    target += f" → {_resolve_path(str(params['destination'])).resolve()}"
+            except Exception:
+                target = f"{params.get('path', '')}/{params.get('name', '')}"
+        elif params:
+            target = ", ".join(f"{k}={str(v)[:60]}" for k, v in params.items() if k != "content")
+        return {"tool": tool, "action": action, "target": target}
+
+    def _request_approval(self, task: dict) -> None:
+        """HIGH riskli adim beklemeye alindiginda kullaniciya ONAY ISTEGI
+        gonderir (sonuc ozeti degil). Canli oturum (JarvisLive) bunu
+        request_brain_team_approval ile tek kullanimlik, parmak izi bagli
+        onay mekanizmasina kaydeder; onay ancak kullanicinin gercek bir
+        sonraki turundan gelir."""
+        step = task["payload"].get("pending_step") or {}
+        info = self._describe_pending_step(task, step)
+        message = (
+            f"Onay gerekiyor: AI Beyin Takımı '{info['tool']}' aracıyla "
+            f"'{info['action']}' işlemi yapacak. Hedef: {info['target']}. "
+            f"Onaylamak için 'evet', iptal etmek için 'hayır' deyin. "
+            f"(görev id={task['id']}, risk={step.get('risk', '?')})"
+        )
+        try:
+            self._results_logger.info(f"[{WAITING_APPROVAL.upper()}] (id={task['id']}) {message}")
+        except Exception as e:
+            print(f"[BrainTeam] ⚠️ Onay istegi loglanamadi: {e}")
+
+        player = self._last_player
+        if player is None:
+            return
+        hook = getattr(player, "request_brain_team_approval", None)
+        try:
+            if callable(hook):
+                hook(task["id"], step, message)
+                return
+            log_fn = getattr(player, "write_log", None) or getattr(getattr(player, "ui", None), "write_log", None)
+            if callable(log_fn):
+                log_fn(f"[BrainTeam] {message}")
+            speak_fn = getattr(player, "speak", None)
+            if callable(speak_fn):
+                speak_fn(f"[BRAIN_TEAM_ONAY_ISTEGI] {message}")
+        except Exception as e:
+            print(f"[BrainTeam] ⚠️ Onay istegi iletilemedi (loglandi): {e}")
+
     def get_team_health(self) -> str:
         """"2. Heartbeat/health check": her beynin gerçekten çalışıyor mu
         yoksa takılı mı olduğunu (status + o durumda ne kadar süredir
@@ -307,7 +371,7 @@ class BrainOrchestrator:
         lines = []
         for t in all_tasks[-15:]:
             extra = ""
-            if t["status"] == "waiting_approval" and t["payload"].get("pending_step"):
+            if t["status"] == WAITING_APPROVAL and t["payload"].get("pending_step"):
                 ps = t["payload"]["pending_step"]
                 extra = f" — ONAY BEKLİYOR: [{ps.get('agent')}] {ps.get('description', '')[:60]} (risk={ps.get('risk')})"
             lines.append(f"[{t['id']}] {t['status']}: {t['name'][:70]}{extra}")
@@ -317,7 +381,7 @@ class BrainOrchestrator:
         task = self.tasks.get(task_id)
         if task is None:
             return f"'{task_id}' id'li AI takım görevi bulunamadı."
-        if task["status"] != "waiting_approval" or not task["payload"].get("pending_step"):
+        if task["status"] != WAITING_APPROVAL or not task["payload"].get("pending_step"):
             return f"'{task_id}' onay bekleyen bir AI takım görevi değil (durum: {task['status']})."
 
         step = task["payload"]["pending_step"]
@@ -1186,9 +1250,12 @@ class BrainOrchestrator:
         if risk == "high":
             step_with_risk = {**step, "risk": risk, "reason": reason}
             payload["pending_step"] = step_with_risk
-            self.tasks.update(task["id"], status="waiting_approval", payload=payload)
+            self.tasks.update(task["id"], status=WAITING_APPROVAL, payload=payload)
             print(f"[BrainTeam] ℹ️ Onay bekleyen adım (id={task['id']}): "
                   f"[{step.get('agent')}] {step.get('description', '')[:80]} — risk={risk} ({reason})")
+            # Eskiden burada kullaniciya HIC bildirim gitmiyordu; gorev
+            # sessizce, suresiz bekliyordu.
+            self._request_approval(self.tasks.get(task["id"]))
             return
 
         try:
