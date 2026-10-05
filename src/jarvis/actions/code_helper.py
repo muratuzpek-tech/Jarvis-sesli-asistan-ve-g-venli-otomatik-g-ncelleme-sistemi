@@ -182,6 +182,23 @@ def _is_within_home(path: Path) -> bool:
         return False
 
 
+# Ev dizini icinde olmak YETMIYOR: ~/.bashrc, ~/.profile, ~/.ssh/authorized_keys
+# ve ~/.claude/settings.json de ev dizinindedir, ama bunlara yazmak kalici kod
+# calistirma demektir (.bashrc her kabuk acilisinda calisir). output_path model
+# ciktisidir ve model web icerigi de okuyor (web_search, github_arama), yani yol
+# dolayli olarak disaridan etkilenebilir. Gizli yollar kod yazma hedefi olamaz;
+# kullanici gercekten bir nokta dosyasi duzenlemek isterse file_controller veya
+# dogrudan editor var.
+def _is_hidden_target(path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+        home = Path.home().resolve()
+        rel = Path(".") if resolved == home else resolved.relative_to(home)
+    except Exception:
+        return True      # cozulemeyen yol: kapali tarafta hata ver
+    return any(part.startswith(".") and part not in (".", "..") for part in rel.parts)
+
+
 class UnsafeWriteTarget(Exception):
     """resolve_write_target() hedefin kullanici ev dizini disinda oldugunu
     tespit ettiginde firlatilir - diske HICBIR yazma yapilmadan."""
@@ -197,6 +214,12 @@ def resolve_write_target(output_path: str, language: str) -> Path:
             f"Güvenlik: '{target}' kullanıcı ana dizini dışında olduğu için "
             f"buraya yazma reddedildi. Lütfen Masaüstü, Belgeler veya proje "
             f"klasörünüz gibi ana dizin içinde bir konum belirtin."
+        )
+    if _is_hidden_target(target):
+        raise UnsafeWriteTarget(
+            f"Güvenlik: '{target}' gizli bir yol (nokta ile başlayan dosya ya da "
+            f"klasör). Kabuk ve uygulama ayar dosyaları kod yazma hedefi olamaz. "
+            f"Masaüstü, Belgeler veya normal bir proje klasörü belirtin."
         )
     return target
 
