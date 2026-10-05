@@ -65,6 +65,89 @@ def _scan_project(description, root):
     return "\n\n".join(findings)[:3000]
 
 
+# ── LLM secimi ────────────────────────────────────────────────
+# Gemini modeli: JARVIS_CODER_GEMINI_MODEL ile degistirilebilir. Eskiden
+# "gemini-2.0-flash" sabitti; "-latest" takma adi her zaman gecerli bir
+# modele isaret eder. NOT: bu takma ad agent_loop ile ayni gunluk kotayi
+# paylasir; kota dolunca asagidaki devre kesici Gemini'yi sureli kapatir.
+_GEMINI_CODER_MODEL = os.environ.get("JARVIS_CODER_GEMINI_MODEL", "gemini-flash-latest")
+
+# Ollama yedegi: OLLAMA_CODER_MODEL verilmemisse kurulu ilk KOD modeli.
+# 7b once: her iterasyon bir LLM cagrisi, hiz onemli (canli testte
+# qwen2.5-coder:7b 3 iterasyonda bitirdi; genel qwen2.5:7b 25'te bitiremedi).
+_OLLAMA_PREFERRED = ("qwen2.5-coder:7b", "qwen2.5-coder:14b", "qwen2.5-coder", "qwen2.5:7b")
+_OLLAMA_BASE = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+if not _OLLAMA_BASE.startswith("http"):
+    _OLLAMA_BASE = f"http://{_OLLAMA_BASE}"
+_ollama_model_cache: str | None = None
+
+# 429 sonrasi Gemini'nin tekrar denenmeyecegi zaman (monotonic). Eskiden her
+# iterasyon dolu kotaya bir istek daha atip ancak sonra Ollama'ya dusuyordu.
+_gemini_disabled_until = 0.0
+_RETRY_DELAY_RE = re.compile(r"retryDelay['\"]?\s*:\s*['\"]?(\d+(?:\.\d+)?)s", re.IGNORECASE)
+
+
+def _gemini_api_key() -> str:
+    """Once ortam degiskeni, sonra Jarvis'in kendi guvenli ayar dosyasi.
+    Eskiden sadece os.environ okunuyordu; anahtar ayar dosyasindaysa
+    (normal kurulum) kodlama HIC Gemini kullanmadan Ollama'ya gidiyordu."""
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if key:
+        return key
+    try:
+        from jarvis.core.secure_config import get_gemini_api_key
+        return get_gemini_api_key()
+    except Exception:
+        return ""
+
+
+def _pick_ollama_coder_model() -> str:
+    global _ollama_model_cache
+    explicit = os.environ.get("OLLAMA_CODER_MODEL", "").strip()
+    if explicit:
+        return explicit
+    if _ollama_model_cache:
+        return _ollama_model_cache
+    chosen = _OLLAMA_PREFERRED[-1]
+    try:
+        import requests
+        resp = requests.get(f"{_OLLAMA_BASE}/api/tags", timeout=3)
+        resp.raise_for_status()
+        installed = {m.get("name", "") for m in resp.json().get("models", [])}
+        for name in _OLLAMA_PREFERRED:
+            if name in installed:
+                chosen = name
+                break
+    except Exception:
+        pass
+    _ollama_model_cache = chosen
+    logger.info(f"[Coder] Ollama kod modeli: {chosen}")
+    return chosen
+
+
+def _note_gemini_failure(exc: Exception) -> None:
+    """429/kota hatasinda Gemini'yi API'nin soyledigi sure kadar atla."""
+    global _gemini_disabled_until
+    text = str(exc)
+    if "429" not in text and "RESOURCE_EXHAUSTED" not in text.upper():
+        return
+    match = _RETRY_DELAY_RE.search(text)
+    if match:
+        wait = float(match.group(1))
+    elif "perday" in text.lower():
+        wait = 3600.0
+    else:
+        wait = 60.0
+    import time as _time
+    _gemini_disabled_until = _time.monotonic() + wait
+    logger.warning(f"[Coder] Gemini kotası dolu → {wait:.0f}sn boyunca doğrudan Ollama")
+
+
+def _gemini_available() -> bool:
+    import time as _time
+    return _time.monotonic() >= _gemini_disabled_until
+
+
 # ── Sabitler ──────────────────────────────────────────────────
 MAX_ITERATIONS = 25
 _MAX_OUTPUT_CHARS = 2000
@@ -459,9 +542,11 @@ class AgenticCoder:
         Kullanılamazsa Ollama fallback.
         """
         # 1. Gemini dene (CRITICAL FIX: API key kontrolü ÖNCE, client leak önleme)
-        api_key = os.environ.get("GEMINI_API_KEY", "")
+        api_key = _gemini_api_key()
         if not api_key:
-            logger.info("[Coder] GEMINI_API_KEY yok → Ollama")
+            logger.info("[Coder] Gemini API anahtarı yok → Ollama")
+        elif not _gemini_available():
+            logger.info("[Coder] Gemini kotası dolu (bekleme süresi) → Ollama")
         else:
             try:
                 from google import genai
@@ -469,11 +554,15 @@ class AgenticCoder:
                 try:
                     from google.genai import types as _gtypes
                     resp = client.models.generate_content(
-                        model="gemini-2.0-flash",
+                        model=_GEMINI_CODER_MODEL,
                         contents=prompt,
                         config=_gtypes.GenerateContentConfig(
                             max_output_tokens=8192,
                             temperature=0.3,
+                            # Ollama'daki format="json" karsiligi: cevap
+                            # dogrudan JSON gelsin, markdown citi olmasin.
+                            response_mime_type="application/json",
+                            automatic_function_calling=_gtypes.AutomaticFunctionCallingConfig(disable=True),
                         ),
                     )
                     return resp.text or ""
@@ -488,13 +577,14 @@ class AgenticCoder:
                     except Exception:
                         pass
             except Exception as e:
+                _note_gemini_failure(e)
                 logger.warning(f"[Coder] Gemini hatası ({type(e).__name__}) → Ollama")
 
         # 2. Ollama fallback
         try:
             import ollama
             resp = ollama.chat(
-                model=os.environ.get("OLLAMA_CODER_MODEL", "qwen2.5:7b"),
+                model=_pick_ollama_coder_model(),
                 messages=[{"role": "user", "content": prompt}],
                 format="json",
                 options={"temperature": 0.2, "num_predict": 8192, "num_ctx": 16384},
@@ -866,7 +956,7 @@ class AgenticCoder:
             import sys as _s
             _s.path.insert(0, str(Path(__file__).parent.parent / "src"))
             from jarvis.path_utils import register_project
-            register_project(name=task.project_path.name, root=task.project_path, entry="main.py", status="accepted" if task.accepted else "needs_fix")
+            register_project(name=task.project_path.name, root=task.project_path, entry=self._entry_file(task) or "main.py", status="accepted" if task.accepted else "needs_fix")
         except Exception:
             pass
         return summary
@@ -942,12 +1032,31 @@ class AgenticCoder:
 
     # ── Summary ────────────────────────────────────────────────
 
+    @staticmethod
+    def _entry_file(task: CodingTask) -> str | None:
+        """Gercek giris dosyasi: main.py > cli.py > app.py > ilk test-disi .py.
+        Eskiden ozet her projede 'python3 main.py' diyordu (main.py olmasa da)."""
+        py_files = [f for f in task.files_written if f.endswith(".py")]
+        for preferred in ("main.py", "cli.py", "app.py"):
+            if preferred in py_files:
+                return preferred
+        for f in py_files:
+            name = Path(f).name
+            if not name.startswith("test_") and name != "__init__.py" and "/" not in f:
+                return f
+        return None
+
     def _build_summary(self, task: CodingTask, steps: list[CodingStep]) -> str:
+        _entry = self._entry_file(task)
+        _run_line = (
+            f"▶️ Çalıştır: cd {task.project_path} && python3 {_entry}"
+            if _entry else "▶️ Çalıştır: (çalıştırılabilir giriş dosyası yok)"
+        )
         lines = [
             f"🔧 AGENTIC CODING — {task.description}",
             f"📂 Konum: {task.project_path}",
             f"📊 Durum: {'tamamlandi' if task.accepted else 'hatali'}",
-            f"▶️ Çalıştır: cd {task.project_path} && python3 main.py",
+            _run_line,
             f"📊 {task.iterations} iterasyon, {len(task.files_written)} dosya, "
             f"{len(task.errors)} hata, {'ACCEPTED ✅' if task.accepted else 'NOT ACCEPTED ⚠️'}",
             "",
