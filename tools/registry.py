@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from collections.abc import Callable
 
-from tools.security import SecurityLevel, security
+from tools.security import SecurityLevel, security as security_manager
 from tools.schemas import ToolSchema, register_schema
 
 logger = logging.getLogger("tools.registry")
@@ -79,7 +79,7 @@ class ToolRegistry:
     Flow:
         Gemini → function_call(name, args)
           → registry.execute(name, args, ctx)
-            → security.check(name, args)
+            → security_manager.check(name, args)
             → entry.handler(args, ctx)
             → entry.after_execute(result, ctx)  ← optional
             → return result string
@@ -189,7 +189,7 @@ class ToolRegistry:
 
         # Güvenlik kontrolü
         user_confirmed = bool(ctx and ctx.dangerous_confirmed)
-        verdict = security.check(
+        verdict = security_manager.check(
             name, args,
             level=entry.security,
             user_confirmed=user_confirmed,

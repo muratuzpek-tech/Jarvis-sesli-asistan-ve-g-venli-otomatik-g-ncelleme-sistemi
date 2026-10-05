@@ -231,7 +231,10 @@ def _verify_project(task, run_pytest=True):
     import subprocess, sys, re as _vt
     problems = []
     for _fn, _fc in task.files_written.items():
-        _fp = task.project_path / _fn
+        _fp = _contained_path(task.project_path, _fn)
+        if _fp is None:
+            problems.append(f"Proje dışı yol: {_fn}")
+            continue
         _fp.parent.mkdir(parents=True, exist_ok=True)
         _fp.write_text(_fc, encoding="utf-8")
     for _ef in task.expected_files:
@@ -394,8 +397,26 @@ def _validate_file(filename: str, content: str, language: str = "python") -> tup
     return True, "OK"
 
 
-def _run_file(path: Path, timeout: int = _RUN_TIMEOUT) -> str:
-    """Dosyayı çalıştır ve çıktıyı döndür (stdin=DEVNULL güvenli)."""
+def _contained_path(root: Path, name: str) -> Path | None:
+    """LLM'den gelen dosya adini proje kokune bagla. Mutlak yol, '../' veya
+    koke disari isaret eden bir symlink proje disina cikiyorsa None doner.
+    Onay "bu projeye kod yaz" icindir, $HOME'un herhangi bir yerine yazmak
+    ya da oradaki bir dosyayi calistirmak icin degil."""
+    if not name or "\x00" in name:
+        return None
+    root = root.resolve()
+    candidate = (root / name).resolve()
+    if candidate == root or not candidate.is_relative_to(root):
+        return None
+    return candidate
+
+
+def _run_file(path: Path, *, root: Path, timeout: int = _RUN_TIMEOUT) -> str:
+    """Dosyayı çalıştır ve çıktıyı döndür (stdin=DEVNULL güvenli).
+    Sadece `root` (proje dizini) icindeki dosyalar calistirilir."""
+    path = path.resolve()
+    if _contained_path(root, str(path)) != path:
+        return f"[BLOCKED] Proje dizini dışında dosya çalıştırılamaz: {path}"
     interpreters = {
         ".py":  [sys.executable],
         ".js":  ["node"],
@@ -882,7 +903,15 @@ class AgenticCoder:
                     steps.append(step)
                     continue
 
-                fpath = task.project_path / filename
+                fpath = _contained_path(task.project_path, filename)
+                if fpath is None:
+                    task.errors.append(f"Iteration {i+1}: {filename}: proje dizini dışı")
+                    last_error = (f"PATH_REJECTED ({filename}): dosya adi proje dizini "
+                                  "icinde GORELI bir yol olmali (mutlak yol ve '..' yasak).")
+                    step.detail = f"REDDEDİLDİ: proje dışı yol {filename}"
+                    step.success = False
+                    steps.append(step)
+                    continue
                 fpath.parent.mkdir(parents=True, exist_ok=True)
                 fpath.write_text(content, encoding="utf-8")
                 # Stuck detection: same content repeatedly
@@ -933,12 +962,17 @@ class AgenticCoder:
             elif action == "run":
                 cmd_target = args.get("command", "") or args.get("filename", "")
                 if cmd_target:
-                    fpath = task.project_path / cmd_target.split()[-1]
-                    if fpath.exists():
+                    fpath = _contained_path(task.project_path, cmd_target.split()[-1])
+                    if fpath is None:
+                        last_error = f"PATH_REJECTED ({cmd_target}): sadece proje icindeki dosyalar calistirilabilir."
+                        step.detail = f"REDDEDİLDİ: proje dışı yol {cmd_target}"
+                        step.success = False
+                        steps.append(step)
+                    elif fpath.exists():
                         _fsz = fpath.stat().st_size
                         if _fsz < 200:
                             last_error = f"KUCUK DOSYA: {fpath.name} sadece {_fsz} bytes. Daha fazla kod yaz — fonksiyonlar, class, mantik ekle!"
-                        last_run_output = await asyncio.to_thread(_run_file, fpath)
+                        last_run_output = await asyncio.to_thread(_run_file, fpath, root=task.project_path)
                         last_error = ""
                         step.detail = last_run_output[:200]
                         step.success = "[SUCCESS]" in last_run_output
@@ -956,8 +990,9 @@ class AgenticCoder:
             # ── ACTION: inspect ────────────────────────────────
             elif action == "inspect":
                 target = args.get("filename", "")
-                fpath = task.project_path / target
-                if fpath.exists():
+                # Okunan icerik LLM'e (bulut) gider: proje disi okuma = veri sizintisi.
+                fpath = _contained_path(task.project_path, target)
+                if fpath is not None and fpath.is_file():
                     content = fpath.read_text(encoding="utf-8")
                     last_run_output = f"FILE: {target}\n{content[:_MAX_OUTPUT_CHARS]}"
                     step.detail = f"👁️ {target} okundu"
