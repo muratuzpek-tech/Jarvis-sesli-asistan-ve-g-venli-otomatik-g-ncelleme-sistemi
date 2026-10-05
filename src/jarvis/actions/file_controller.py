@@ -129,7 +129,11 @@ def _is_safe_path(target: Path) -> bool:
 def _write_roots() -> list[Path]:
     roots = [_get_desktop(), _get_documents(), _get_downloads(),
              _get_pictures(), _get_music(), _get_videos(),
-             Path.home() / "jarvis_programs"]
+             Path.home() / "jarvis_programs",
+             # Yerellestirilmis sistemlerde gercek Masaustu ör. ~/Masaüstü'dür
+             # (varsayilan hedef odur); kullanicinin dosyalari bulunan
+             # ~/Desktop da yazilabilir kalir.
+             Path.home() / "Desktop"]
     return [r.resolve() for r in roots]
 
 
@@ -174,11 +178,79 @@ def _open_for_write(target: Path, append: bool = False, exclusive: bool = False)
     return os.fdopen(fd, "a" if append else "w", encoding="utf-8")
 
 
+# --- Linux: XDG kullanici klasorleri ---------------------------------------
+#
+# GERCEK SORUN: XDG_*_DIR ORTAM DEGISKENLERI neredeyse hic ayarli degildir;
+# gercek konumlar ~/.config/user-dirs.dirs dosyasindadir. Turkce bir sistemde
+# Masaustu ~/Masaüstü, Belgeler ~/Belgeler'dir. Bu dosya okunmadiginda Jarvis
+# ~/Desktop gibi kullanicinin gormedigi klasorleri kullaniyor, yazma politikasi
+# da gercek klasorleri reddediyordu.
+#
+# GUVENLIK: Bu klasorler yazma politikasinin kokleridir. Ev dizininin
+# kendisini, bir atasini (ör. "/") ya da gizli bir yolu gosteren girdi ev
+# dizini kokunu veya ~/.config'i yazilabilir yapardi - yok sayilir.
+
+def _user_dirs_file() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    return (Path(base) if base else Path.home() / ".config") / "user-dirs.dirs"
+
+
+def _read_user_dirs() -> dict[str, Path]:
+    """user-dirs.dirs'i ayristirir: XDG_DOCUMENTS_DIR="$HOME/Belgeler"."""
+    try:
+        text = _user_dirs_file().read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    home = str(Path.home())
+    result: dict[str, Path] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip().strip('"')
+        for prefix in ("${HOME}", "$HOME"):
+            if value.startswith(prefix):
+                value = home + value[len(prefix):]
+                break
+        if value.startswith("/"):
+            result[key.strip()] = Path(value)
+    return result
+
+
+def _valid_user_dir(path: Path) -> bool:
+    try:
+        if not path.is_dir():
+            return False
+        resolved = path.resolve()
+        home = Path.home().resolve()
+    except OSError:
+        return False
+    if resolved == home or home.is_relative_to(resolved):
+        return False
+    if resolved.is_relative_to(home):
+        rel = resolved.relative_to(home)
+        if any(part.startswith(".") for part in rel.parts):
+            return False
+    return True
+
+
+def _xdg_user_dir(key: str) -> "Path | None":
+    """Once ortam degiskeni, sonra user-dirs.dirs; gecersizse None."""
+    env = os.environ.get(key, "").strip()
+    if env and _valid_user_dir(Path(env)):
+        return Path(env)
+    candidate = _read_user_dirs().get(key)
+    if candidate is not None and _valid_user_dir(candidate):
+        return candidate
+    return None
+
+
 def _get_desktop() -> Path:
     if _OS == "Linux":
-        xdg = os.environ.get("XDG_DESKTOP_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
+        xdg = _xdg_user_dir("XDG_DESKTOP_DIR")
+        if xdg:
+            return xdg
     kf = _known_folder_path("desktop")
     if kf:
         return kf
@@ -186,9 +258,9 @@ def _get_desktop() -> Path:
 
 def _get_downloads() -> Path:
     if _OS == "Linux":
-        xdg = os.environ.get("XDG_DOWNLOAD_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
+        xdg = _xdg_user_dir("XDG_DOWNLOAD_DIR")
+        if xdg:
+            return xdg
     kf = _known_folder_path("downloads")
     if kf:
         return kf
@@ -196,9 +268,9 @@ def _get_downloads() -> Path:
 
 def _get_documents() -> Path:
     if _OS == "Linux":
-        xdg = os.environ.get("XDG_DOCUMENTS_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
+        xdg = _xdg_user_dir("XDG_DOCUMENTS_DIR")
+        if xdg:
+            return xdg
     kf = _known_folder_path("documents")
     if kf:
         return kf
@@ -206,9 +278,9 @@ def _get_documents() -> Path:
 
 def _get_pictures() -> Path:
     if _OS == "Linux":
-        xdg = os.environ.get("XDG_PICTURES_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
+        xdg = _xdg_user_dir("XDG_PICTURES_DIR")
+        if xdg:
+            return xdg
     kf = _known_folder_path("pictures")
     if kf:
         return kf
@@ -216,9 +288,9 @@ def _get_pictures() -> Path:
 
 def _get_music() -> Path:
     if _OS == "Linux":
-        xdg = os.environ.get("XDG_MUSIC_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
+        xdg = _xdg_user_dir("XDG_MUSIC_DIR")
+        if xdg:
+            return xdg
     kf = _known_folder_path("music")
     if kf:
         return kf
@@ -226,9 +298,9 @@ def _get_music() -> Path:
 
 def _get_videos() -> Path:
     if _OS == "Linux":
-        xdg = os.environ.get("XDG_VIDEOS_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
+        xdg = _xdg_user_dir("XDG_VIDEOS_DIR")
+        if xdg:
+            return xdg
     kf = _known_folder_path("videos")
     if kf:
         return kf

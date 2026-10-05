@@ -16,6 +16,7 @@ from jarvis.actions.code_helper import (
     UnsafeWriteTarget,
     resolve_write_target,
 )
+from jarvis.actions.file_controller import _get_documents
 
 HOME = Path.home()
 
@@ -51,7 +52,7 @@ def test_hidden_rejection_message_is_actionable():
     [
         HOME / "Desktop" / "script.py",
         HOME / "jarvis_programs" / "proje" / "main.py",
-        HOME / "notlar.py",
+        _get_documents() / "notlar.py",   # gercek Belgeler (ör. ~/Belgeler)
     ],
 )
 def test_normal_targets_still_allowed(hedef):
@@ -73,5 +74,13 @@ def test_default_target_when_no_path_given():
 
 @pytest.mark.parametrize("hedef", ["/etc/cron.d/x", "/tmp/disarisi.py"])
 def test_outside_home_still_rejected(hedef):
+    with pytest.raises(UnsafeWriteTarget):
+        resolve_write_target(hedef, "python")
+
+
+# Yazma politikasi file_controller ile birlesti: ev dizini kokune ve izinli
+# klasorler disindaki alt klasorlere yazilmaz.
+@pytest.mark.parametrize("hedef", [HOME / "notlar.py", HOME / "projem" / "main.py"])
+def test_home_outside_allowed_folders_rejected(hedef):
     with pytest.raises(UnsafeWriteTarget):
         resolve_write_target(hedef, "python")

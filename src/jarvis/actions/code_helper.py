@@ -15,7 +15,6 @@ def get_base_dir():
 
 BASE_DIR           = get_base_dir()
 API_CONFIG_PATH    = BASE_DIR / "config" / "api_keys.json"
-DESKTOP            = Path.home() / "Desktop"
 MAX_BUILD_ATTEMPTS = 3
 GEMINI_MODEL       = "gemini-flash-latest"
 
@@ -157,99 +156,90 @@ def _resolve_save_path(output_path: str, language: str) -> Path:
         "bash": ".sh", "shell": ".sh", "powershell": ".ps1",
         "sql": ".sql", "json": ".json", "rust": ".rs", "go": ".go",
     }
+    # Gercek Masaustu (Linux'ta user-dirs.dirs, ör. ~/Masaüstü; Windows'ta
+    # OneDrive yonlendirmesi dahil) - yazma politikasinin kabul ettigi klasor.
+    from jarvis.actions.file_controller import _get_desktop
+    desktop = _get_desktop()
     if output_path:
         p = Path(output_path)
-        return p if p.is_absolute() else DESKTOP / p
+        return p if p.is_absolute() else desktop / p
     ext = ext_map.get((language or "python").lower(), ".py")
-    return DESKTOP / f"jarvis_code{ext}"
+    return desktop / f"jarvis_code{ext}"
 
 
 # --- Yazma hedefi guvenlik politikasi -------------------------------------
 #
-# GERCEK RISK (denetim bulgusu F-01): _resolve_save_path() mutlak bir
-# output_path'i (ör. "/etc/cron.d/x", "C:\\Program Files\\...") OLDUGU GIBI
-# donduruyordu - hicbir izin kokune bagli degildi. code_helper "guvenilir ic
-# bilesen" sayilmisti ama yol/model ciktisi aslinda kullanici/model girdisi.
-# Asagidaki tek politika noktasi, file_controller._is_safe_path ile AYNI
-# kurali (kullanici ev dizini disina cikma yasagi, sembolik link ile disari
-# tasma REDDEDILIR) kod yazma yollarina da uygular.
-def _is_within_home(path: Path) -> bool:
-    try:
-        resolved = path.resolve()
-        home = Path.home().resolve()
-        return resolved == home or resolved.is_relative_to(home)
-    except Exception:
-        return False
-
-
-# Ev dizini icinde olmak YETMIYOR: ~/.bashrc, ~/.profile, ~/.ssh/authorized_keys
-# ve ~/.claude/settings.json de ev dizinindedir, ama bunlara yazmak kalici kod
-# calistirma demektir (.bashrc her kabuk acilisinda calisir). output_path model
-# ciktisidir ve model web icerigi de okuyor (web_search, github_arama), yani yol
-# dolayli olarak disaridan etkilenebilir. Gizli yollar kod yazma hedefi olamaz;
-# kullanici gercekten bir nokta dosyasi duzenlemek isterse file_controller veya
-# dogrudan editor var.
-def _is_hidden_target(path: Path) -> bool:
-    try:
-        resolved = path.resolve()
-        home = Path.home().resolve()
-        rel = Path(".") if resolved == home else resolved.relative_to(home)
-    except Exception:
-        return True      # cozulemeyen yol: kapali tarafta hata ver
-    return any(part.startswith(".") and part not in (".", "..") for part in rel.parts)
-
-
+# GERCEK RISK (denetim bulgusu F-01 + guvenlik denetimi): _resolve_save_path()
+# mutlak bir output_path'i OLDUGU GIBI donduruyordu; edit/optimize'in mevcut
+# dosya dali (file_path) ise HICBIR kontrol yapmadan ~/.bashrc,
+# ~/.ssh/authorized_keys veya ~/.config/autostart/ dosyalarini okuyup uzerine
+# yazabiliyordu. Yol model ciktisidir ve model web icerigi de okuyor.
+# Asagidaki TEK politika noktasi yeni dosya ve mevcut dosya dallarinin ikisine
+# de file_controller ile AYNI kurali uygular: yalnizca kullanici icerik
+# klasorleri (Masaustu, Belgeler, Indirilenler, Resimler, Muzik, Videolar,
+# jarvis_programs), gizli (nokta ile baslayan) bilesen yok, son bilesen
+# sembolik link degil.
 class UnsafeWriteTarget(Exception):
-    """resolve_write_target() hedefin kullanici ev dizini disinda oldugunu
-    tespit ettiginde firlatilir - diske HICBIR yazma yapilmadan."""
+    """Hedef yazma politikasinin disinda - diske HICBIR yazma yapilmadan
+    firlatilir."""
+
+
+def check_write_target(target: Path) -> Path:
+    """TUM kod yazma hedeflerinin GECTIGI tek politika noktasi."""
+    from jarvis.actions.file_controller import _is_safe_write_file
+    if not _is_safe_write_file(Path(target)):
+        raise UnsafeWriteTarget(
+            f"Güvenlik: '{target}' kod yazma hedefi olamaz. Yalnızca Masaüstü, "
+            f"Belgeler, İndirilenler, Resimler, Müzik, Videolar, ~/Desktop veya "
+            f"jarvis_programs içine; gizli (nokta ile başlayan) dosya/klasör ve "
+            f"sembolik link olmadan yazılabilir."
+        )
+    return Path(target)
 
 
 def resolve_write_target(output_path: str, language: str) -> Path:
-    """TUM kod-yazma yollarinin (write/optimize'in yeni-dosya dali) GECTIGI
-    TEK politika noktasi. Hedef kullanici ev dizini disindaysa YAZMADAN
-    ONCE reddeder."""
-    target = _resolve_save_path(output_path, language)
-    if not _is_within_home(target):
-        raise UnsafeWriteTarget(
-            f"Güvenlik: '{target}' kullanıcı ana dizini dışında olduğu için "
-            f"buraya yazma reddedildi. Lütfen Masaüstü, Belgeler veya proje "
-            f"klasörünüz gibi ana dizin içinde bir konum belirtin."
-        )
-    if _is_hidden_target(target):
-        raise UnsafeWriteTarget(
-            f"Güvenlik: '{target}' gizli bir yol (nokta ile başlayan dosya ya da "
-            f"klasör). Kabuk ve uygulama ayar dosyaları kod yazma hedefi olamaz. "
-            f"Masaüstü, Belgeler veya normal bir proje klasörü belirtin."
-        )
-    return target
+    """Yeni dosya dali (write/optimize): hedefi cozer ve politikadan gecirir."""
+    return check_write_target(_resolve_save_path(output_path, language))
 
 
 # Var olan bir dosyanin UZERINE YAZILMASI (edit/optimize), acik kullanici
-# onayi olmadan otomatik yapilmaz (F-01: "code_helper ... mevcut dosyaları
-# değiştirebiliyor"). Iki adimli onay, file_controller.move_file ile AYNI
-# desendedir: ilk cagri hicbir dosyaya dokunmaz, onaylanmis icerigi saklayip
-# kisa omurlu bir kod doner; gercek yazma SADECE dogru kodla olur.
+# onayi olmadan yapilmaz. Ilk cagri hicbir dosyaya dokunmaz: uretilen icerigi
+# saklayip onizleme ve kisa omurlu bir kod doner. Bu kod MODELE GOSTERILMEZ;
+# main.py onu saklar ve yalnizca gercek kullanici onayindan sonra
+# (_consume_dangerous_confirmation) geri iletir. Onaylanan cagri kodu yeniden
+# URETMEZ - kullanicinin gordugu onizleme oldugu gibi kaydedilir.
 _pending_code_edits: dict[str, tuple[Path, str]] = {}
 
 
-def _confirm_and_save(path: Path, content: str, confirm_code: str = "") -> str:
+def _confirm_and_save(path: Path, content: str) -> str:
+    try:
+        check_write_target(path)
+    except UnsafeWriteTarget as e:
+        return str(e)
     if not path.exists():
         # Yeni dosya - uzerine yazilacak mevcut icerik yok, dogrudan kaydet.
         return _save_file(path, content)
-    if not confirm_code:
-        code = secrets.token_hex(3)
-        _pending_code_edits[code] = (path, content)
-        return (
-            f"ONAY GEREKLİ (henüz kaydedilmedi): '{path}' zaten var, üzerine "
-            f"yazılacak. Kullanıcı SESLİ/YAZILI olarak açıkça onaylarsa, aynı "
-            f"eylemi confirm_code='{code}' parametresiyle TEKRAR çağırın. "
-            f"Kullanıcı onaylamadan bu kodu kendi kendine kullanma.\n\n"
-            f"Önizleme:\n{_preview(content)}"
-        )
+    code = secrets.token_hex(3)
+    _pending_code_edits[code] = (path, content)
+    return (
+        f"ONAY GEREKLİ (henüz kaydedilmedi): '{path}' zaten var, üzerine "
+        f"yazılacak. Kullanıcı SESLİ/YAZILI olarak açıkça onaylarsa, aynı "
+        f"eylemi confirm_code='{code}' parametresiyle TEKRAR çağırın. "
+        f"Kullanıcı onaylamadan bu kodu kendi kendine kullanma.\n\n"
+        f"Önizleme:\n{_preview(content)}"
+    )
+
+
+def _apply_confirmed_edit(path: Path, confirm_code: str) -> str:
+    """Onaylanmis, onizlenmis icerigi kaydeder (yeniden uretmez)."""
     pending = _pending_code_edits.pop(confirm_code, None)
-    if pending is None or pending[0] != path or pending[1] != content:
+    if pending is None or pending[0] != path:
         return "Onay kodu geçersiz veya süresi dolmuş. Önce confirm_code vermeden çağırıp yeni önizleme/kod alın."
-    return _save_file(path, content)
+    try:
+        check_write_target(path)
+    except UnsafeWriteTarget as e:
+        return str(e)
+    return _save_file(path, pending[1])
 
 
 _RETRYABLE_WINERRORS = (32, 33)  # ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
@@ -610,6 +600,15 @@ def _edit_action(file_path, instruction, player, confirm_code: str = "") -> str:
     if not instruction:
         return "Please describe what change to make, sir."
 
+    # Politika kontrolu OKUMADAN once: hassas bir dosyanin icerigi Gemini'ye
+    # de gonderilmemeli.
+    try:
+        target = check_write_target(Path(file_path))
+    except UnsafeWriteTarget as e:
+        return str(e)
+    if confirm_code:
+        return _apply_confirmed_edit(target, confirm_code)
+
     content, err = _read_file(file_path)
     if err:
         return err
@@ -639,7 +638,9 @@ Updated code:"""
     # DUZELTME (denetim bulgusu F-01): mevcut bir dosyanin uzerine yazmak
     # ACIK kullanici onayi gerektirir - _confirm_and_save ilk cagrida hicbir
     # seye dokunmaz, sadece onizleme + onay kodu doner.
-    status = _confirm_and_save(Path(file_path), edited, confirm_code)
+    status = _confirm_and_save(target, edited)
+    if status.startswith(("ONAY GEREKL", "Güvenlik")):
+        return status
     print(f"[Code] ✅ Edited: {file_path}")
     return f"File edited. {status}\n\nPreview:\n{_preview(edited)}"
 
@@ -685,6 +686,14 @@ def _run_action(file_path, args, timeout, player) -> str:
 
 def _optimize_action(file_path, code, language, output_path, player, confirm_code: str = "") -> str:
 
+    if file_path:
+        try:
+            check_write_target(Path(file_path))
+        except UnsafeWriteTarget as e:
+            return str(e)
+        if confirm_code:
+            return _apply_confirmed_edit(Path(file_path), confirm_code)
+
     if file_path and not code:
         code, err = _read_file(file_path)
         if err:
@@ -719,11 +728,13 @@ Optimized code:"""
         return f"Could not optimize code: {e}"
 
     # Kaydet. Mevcut bir dosyanin (file_path) uzerine yazmak ACIK kullanici
-    # onayi gerektirir (F-01); yeni bir dosya (output_path) ev dizini disina
-    # cikamaz (resolve_write_target).
+    # onayi gerektirir; iki dal da ayni yazma politikasindan gecer
+    # (check_write_target / resolve_write_target).
     if file_path:
         save_path = Path(file_path)
-        status = _confirm_and_save(save_path, optimized, confirm_code)
+        status = _confirm_and_save(save_path, optimized)
+        if status.startswith(("ONAY GEREKL", "Güvenlik")):
+            return status
     else:
         try:
             save_path = resolve_write_target(output_path, lang)

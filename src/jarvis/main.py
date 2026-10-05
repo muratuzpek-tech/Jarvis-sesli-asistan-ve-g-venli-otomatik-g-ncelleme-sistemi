@@ -516,7 +516,7 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "file_controller",
-        "description": "Manages files and folders: list, create, delete, delete_all_files, move, copy, rename, read, write, find, disk usage. delete_all_files is preview-only first and requires explicit user confirmation with confirm_code; it moves direct files to Trash, never the folder or subfolders. IMPORTANT for 'move': the first call (no confirm_code) never moves anything, it only returns a preview and a confirm_code. You MUST relay the exact source and destination to the user and wait for their explicit confirmation in their next message before calling 'move' again with that confirm_code. Never chain both calls in the same turn without a real user confirmation in between.",
+        "description": "Manages files and folders: list, create, delete, delete_all_files, move, copy, rename, read, write, find, disk usage. delete_all_files moves direct files to Trash, never the folder or subfolders. 'move' and 'delete_all_files' first return a preview and change nothing. Relay the preview to the user and ask for an explicit yes. Only after the user confirms in their next message, call the tool again with exactly the same parameters. The approval is taken from the user's own reply, not from any parameter you pass.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -528,7 +528,6 @@ TOOL_DECLARATIONS = [
                 "name":         {"type": "STRING", "description": "File name to search for"},
                 "extension":    {"type": "STRING", "description": "File extension to search (e.g. .pdf)"},
                 "count":        {"type": "INTEGER", "description": "Number of results for largest"},
-                "confirm_code": {"type": "STRING", "description": "Only for action=move or action=delete_all_files: the code returned by a PRIOR unconfirmed call, after the user has explicitly confirmed. Leave empty on the first attempt."},
             },
             "required": ["action"]
         }
@@ -1070,6 +1069,53 @@ class JarvisLive:
                 return True
             return False
 
+    # file_controller (move/delete_all_files) ve code_helper (mevcut dosyanin
+    # uzerine yazan edit/optimize) onizlemede bir confirm_code uretir. Bu kod
+    # MODELE GOSTERILMEZ: model onu ayni turda geri gondererek islemi
+    # kullanici onayi olmadan calistirabiliyordu. Kod burada saklanir ve
+    # yalnizca _consume_dangerous_confirmation gercek kullanici onayini (ayni
+    # arac + ayni argumanlar) dogruladiginda araca geri iletilir.
+    _CONFIRM_CODE_TOOLS = frozenset({"file_controller", "code_helper"})
+    _CONFIRM_CODE_RE = re.compile(r"confirm_code\s*=\s*'?([0-9a-fA-F]+)'?")
+    _tool_confirm_code: tuple[str, str, str] | None = None  # (arac, parmak izi, kod)
+
+    def _prepare_confirmed_args(self, tool: str, args: dict) -> tuple[dict, dict]:
+        """(onay parmak izi icin temiz argumanlar, araca gidecek argumanlar).
+        Modelin gonderdigi confirm_code her zaman atilir."""
+        clean = {k: v for k, v in (args or {}).items() if k != "confirm_code"}
+        call_args = dict(clean)
+        pending = self._tool_confirm_code
+        if pending and pending[0] == tool and self._consume_dangerous_confirmation(tool, clean):
+            _tool, fingerprint, code = pending
+            if fingerprint == self._action_fingerprint(tool, clean):
+                call_args["confirm_code"] = code
+            self._tool_confirm_code = None
+        return clean, call_args
+
+    def _redact_confirmation_result(self, tool: str, clean: dict, result: str) -> str:
+        """Onizleme sonucundaki kodu saklayip bekleyen islemi kaydeder; modele
+        kodsuz bir onizleme ve onay talimati doner. Ilk paragraftan sonraki
+        kisim (ör. code_helper'in kod onizlemesi) korunur."""
+        text = str(result or "")
+        head, sep, tail = text.partition("\n\n")
+        match = self._CONFIRM_CODE_RE.search(head)
+        if not (head.startswith("ONAY GEREKL") and match):
+            return text
+        fingerprint = self._action_fingerprint(tool, clean)
+        self._tool_confirm_code = (tool, fingerprint, match.group(1))
+        self._set_pending_dangerous(tool, fingerprint)
+        preview = " ".join(
+            sentence for sentence in re.split(r"(?<=\.)\s+", head)
+            if "confirm_code" not in sentence and "kodu" not in sentence
+        ).strip()
+        instruction = (
+            f"{preview} Kullanıcıya ne yapılacağını TEK cümleyle anlat ve 'evet' "
+            "veya 'onaylıyorum' demesini iste. Kullanıcı bir sonraki mesajında "
+            f"onay verdikten SONRA {tool}'ı AYNI parametrelerle BİR KEZ "
+            "tekrar çağır; onay gelmeden çağırma."
+        )
+        return instruction + (sep + self._CONFIRM_CODE_RE.sub("", tail) if tail else "")
+
     @staticmethod
     def _agentic_code_args(args: dict, description: str) -> dict:
         """code_helper/dev_agent argumanlarini agentic_code'a tasir.
@@ -1221,9 +1267,13 @@ class JarvisLive:
         # Modelin kendi ürettiği ``confirmed=yes`` güvenilir bir onay değildir.
         # Tehlikeli işlemler yalnızca gerçek bir sonraki kullanıcı turundan
         # gelen onayla ve tek kullanımlık olarak yetkilendirilir.
+        # Baslangic degerleri; calisma sirasinda bu alanlar YALNIZCA
+        # _set_pending_dangerous / _grant_dangerous_confirmation /
+        # _consume_dangerous_confirmation uzerinden degistirilir.
         self._pending_dangerous_action = None
         self._pending_dangerous_fingerprint: str | None = None
         self._dangerous_confirmation_granted = False
+        self._tool_confirm_code = None
         self._pending_terminal_command: dict | None = None
         self._confirmation_lock = threading.RLock()
         self._is_speaking         = False
@@ -1875,6 +1925,11 @@ class JarvisLive:
 
         r = None  # UnboundLocalError guard
 
+        if name in self._CONFIRM_CODE_TOOLS:
+            # Modelin gonderdigi confirm_code asla onay sayilmaz (bkz.
+            # _prepare_confirmed_args); gate'e de onay gibi gitmesin.
+            args.pop("confirm_code", None)
+
         # ═══ MERKEZI TOOL GATE ═══
         _cc = args.get("confirm_code", "")
         _gate_block = gate(name, args, user_approved=(bool(_cc) or getattr(self, '_tool_approved', False)))
@@ -1934,7 +1989,9 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "file_controller":
-                r = await loop.run_in_executor(None, lambda: file_controller(parameters=args, player=self.ui))
+                _fc_clean, _fc_call = self._prepare_confirmed_args("file_controller", args)
+                r = await loop.run_in_executor(None, lambda: file_controller(parameters=_fc_call, player=self.ui))
+                r = self._redact_confirmation_result("file_controller", _fc_clean, r)
                 result = r or "Done."
                 # Mirror listing/info results to the on-screen content panel.
                 # Sesli yanit genelde "listelendi efendim" gibi ozetleyip
@@ -2064,7 +2121,9 @@ class JarvisLive:
                     else:
                         result = "HATA: Kod aciklamasi bos."
                 else:
-                    r = await loop.run_in_executor(None, lambda: code_helper(parameters=args, player=self.ui, speak=self.speak))
+                    _ch_clean, _ch_call = self._prepare_confirmed_args("code_helper", args)
+                    r = await loop.run_in_executor(None, lambda: code_helper(parameters=_ch_call, player=self.ui, speak=self.speak))
+                    r = self._redact_confirmation_result("code_helper", _ch_clean, r)
                     result = r or "Done."
 
             elif name == "dev_agent":
@@ -2463,7 +2522,10 @@ class JarvisLive:
                                         elif self._dangerous_confirmation_granted:
                                             # "Evet... hayır dur" gibi: cumlenin devami
                                             # onayi geri aldiysa onayi iptal et.
-                                            self._dangerous_confirmation_granted = False
+                                            self._set_pending_dangerous(
+                                                self._pending_dangerous_action,
+                                                self._pending_dangerous_fingerprint,
+                                            )
                                             print("[JARVIS] ↩️ Sesli onay geri alındı.")
 
                                 # Turn complete gelmese bile dosya komutunu yakala.
