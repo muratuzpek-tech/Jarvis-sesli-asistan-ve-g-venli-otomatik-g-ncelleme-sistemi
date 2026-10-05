@@ -114,6 +114,66 @@ def _is_safe_path(target: Path) -> bool:
     except Exception:
         return False
 
+# --- Yazma/silme/tasima politikasi -----------------------------------------
+#
+# GERCEK RISK (guvenlik denetimi): _SAFE_ROOTS ev dizininin TAMAMI ve
+# file_controller'in mutasyon islemleri iki adimli onaydan gecmiyor. LLM'in
+# sectigi bir write/create_file/copy/rename/extract boylece ~/.bashrc,
+# ~/.ssh/authorized_keys veya ~/.config/autostart/ hedefleyebiliyordu (her
+# kabuk/oturum acilisinda kod calistirma, SSH erisimi). Okuma icin ev dizini
+# korunur; DEGISTIREN her islem yalnizca kullanici icerik klasorlerinde ve
+# gizli (nokta ile baslayan) yol bileseni olmadan yapilabilir. Allowlist,
+# Windows'taki Startup klasoru gibi nokta icermeyen hassas yerleri de disarida
+# birakir.
+
+def _write_roots() -> list[Path]:
+    roots = [_get_desktop(), _get_documents(), _get_downloads(),
+             _get_pictures(), _get_music(), _get_videos(),
+             Path.home() / "jarvis_programs"]
+    return [r.resolve() for r in roots]
+
+
+def _is_safe_write_path(target: Path) -> bool:
+    """target'in gosterdigi GIRDI (son bilesen takip edilmeden) bir yazma
+    kokunde mi ve kokten sonra gizli bilesen icermiyor mu? Ust klasorler
+    resolve() ile cozulur, boylece izinli klasordeki bir symlink klasor
+    uzerinden ~/.config'e kacilamaz."""
+    try:
+        if target.name in ("", "..", "."):
+            return False
+        entry = target.parent.resolve() / target.name
+        for root in _write_roots():
+            try:
+                rel = entry.relative_to(root)
+            except ValueError:
+                continue
+            return not any(part.startswith(".") for part in rel.parts)
+        return False
+    except Exception:
+        return False
+
+
+def _is_safe_write_file(target: Path) -> bool:
+    """Icerik yazilacak dosya: politika + son bilesen symlink OLMAMALI
+    (open() symlink'i takip edip izinli klasor disina yazardi)."""
+    return _is_safe_write_path(target) and not target.is_symlink()
+
+
+def _open_for_write(target: Path, append: bool = False, exclusive: bool = False):
+    """Son bileseni symlink ise reddeden open(). Kontrol ile yazma arasinda
+    hedef symlink'e cevrilse bile POSIX'te O_NOFOLLOW yazmayi engeller;
+    Windows'ta bu sabit yok, orada _is_safe_write_file kontrolune dayanilir."""
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    if exclusive:
+        flags |= os.O_EXCL
+    elif append:
+        flags |= os.O_APPEND
+    else:
+        flags |= os.O_TRUNC
+    fd = os.open(target, flags, 0o644)
+    return os.fdopen(fd, "a" if append else "w", encoding="utf-8")
+
+
 def _get_desktop() -> Path:
     if _OS == "Linux":
         xdg = os.environ.get("XDG_DESKTOP_DIR", "")
@@ -383,7 +443,12 @@ def _with_lock_retry_move_or_copy(fn, dst: Path, target: "Path | None" = None,
     """move/copy icin: her denemeden once, ONCEKI denemeden kalmis olabilecek
     KISMI hedef dosyayi temizler (F-03 denetim bulgusu: 'taşıma/kopyalama
     için yarım işlem kontrolü'). Boylece kullanici hicbir zaman 'var ama
-    bozuk/yarim' bir dosyayla bas basa kalmaz."""
+    bozuk/yarim' bir dosyayla bas basa kalmaz.
+
+    Yalnizca BU cagrinin olusturdugu hedef silinir: dst onceden varsa
+    (ör. bir klasoru var olan bir dosyanin uzerine kopyalama denemesi
+    FileExistsError verir) o dosya kalici olarak SILINMEZ."""
+    existed_before = dst.exists() or dst.is_symlink()
     last_exc: BaseException | None = None
     for attempt in range(attempts):
         try:
@@ -391,7 +456,7 @@ def _with_lock_retry_move_or_copy(fn, dst: Path, target: "Path | None" = None,
         except OSError as exc:
             last_exc = exc
             try:
-                if dst.exists() and dst.is_file():
+                if not existed_before and dst.is_file() and not dst.is_symlink():
                     dst.unlink()
             except Exception:
                 pass
@@ -544,12 +609,16 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
             return "Could not create file: dosya adı belirtilmedi (isim boş olduğu için işlem güvenlik amacıyla durduruldu, hedef klasörün kendisine dokunulmadı)."
         base   = _resolve_path(path)
         target = base / name
-        if not _is_safe_path(target):
+        if not _is_safe_write_file(target):
             return f"Access denied: {target}"
+        if target.exists() or target.is_symlink():
+            return (f"Could not create file: '{target.name}' zaten var; "
+                    f"içeriğini değiştirmek için 'write' kullanın.")
 
         def _do_write():
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            with _open_for_write(target, exclusive=True) as f:
+                f.write(content)
 
         _with_lock_retry(_do_write, target)
         # DUZELTME (kullanici onayli analiz raporu, 2026-09-15): write_text()
@@ -581,7 +650,7 @@ def create_folder(path: str, name: str = "") -> str:
             return "Could not create folder: klasör adı belirtilmedi (isim boş olduğu için işlem güvenlik amacıyla durduruldu, mevcut klasöre dokunulmadı)."
         base   = _resolve_path(path)
         target = base / name
-        if not _is_safe_path(target):
+        if not _is_safe_write_path(target):
             return f"Access denied: {target}"
 
         _with_lock_retry(lambda: target.mkdir(parents=True, exist_ok=True), target)
@@ -605,7 +674,7 @@ def delete_file(path: str, name: str = "") -> str:
                 return ambiguous
         else:
             target = base
-        if not _is_safe_path(target):
+        if not _is_safe_write_path(target):
             return f"Access denied: {target}"
         if not target.exists():
             return f"Not found: {target.name}"
@@ -636,7 +705,7 @@ def delete_all_files(path: str = "downloads", confirm_code: str = "") -> str:
     """
     try:
         base = _resolve_path(path)
-        if not _is_safe_path(base):
+        if not _is_safe_write_path(base):
             return f"Access denied: {base}"
         if not base.is_dir():
             return f"Not a directory: {base}"
@@ -686,13 +755,17 @@ def move_file(path: str, name: str = "", destination: str = "", confirm_code: st
             return f"Source not found: {src.name}"
         if dst is None:
             return "No destination specified."
-        if not _is_safe_path(src):
+        if not _is_safe_write_path(src):
             return f"Access denied (source): {src}"
         if not _is_safe_path(dst):
             return f"Access denied (destination): {dst}"
 
         if dst.is_dir():
             dst = dst / src.name
+        if not _is_safe_write_path(dst):
+            return f"Access denied (destination): {dst}"
+        if dst.exists() or dst.is_symlink():
+            return f"Could not move: hedefte '{dst.name}' zaten var, üzerine yazılmadı."
 
         if not confirm_code:
             code = secrets.token_hex(2)
@@ -744,6 +817,10 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
 
         if dst.is_dir():
             dst = dst / src.name
+        if not _is_safe_write_path(dst):
+            return f"Access denied (destination): {dst}"
+        if dst.exists() or dst.is_symlink():
+            return f"Could not copy: hedefte '{dst.name}' zaten var, üzerine yazılmadı."
 
         def _do_copy():
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -765,15 +842,21 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
     try:
         base     = _resolve_path(path)
         target   = (base / name) if name else base
-        if not _is_safe_path(target):
+        if not _is_safe_write_path(target):
             return f"Access denied: {target}"
         if not target.exists():
             return f"Not found: {target.name}"
         if not new_name:
             return "No new name provided."
+        # new_name LLM ciktisi: '../.config/autostart/x' veya mutlak bir yol
+        # dosyayi baska bir klasore (ev dizini disina bile) tasiyordu.
+        if Path(new_name).name != new_name or new_name in (".", ".."):
+            return "Could not rename: yeni ad yalnızca bir dosya adı olmalı (klasör/yol içeremez)."
 
         new_path = target.parent / new_name
-        if new_path.exists():
+        if not _is_safe_write_path(new_path):
+            return f"Access denied: {new_path}"
+        if new_path.exists() or new_path.is_symlink():
             return f"A file named '{new_name}' already exists here."
 
         _with_lock_retry(lambda: target.rename(new_path), target)
@@ -843,13 +926,12 @@ def write_file(path: str, name: str = "", content: str = "",
             return "Could not write file: dosya adı belirtilmedi (isim boş olduğu için işlem güvenlik amacıyla durduruldu, hedef klasörün kendisine yazılmadı)."
         base   = _resolve_path(path)
         target = base / name
-        if not _is_safe_path(target):
+        if not _is_safe_write_file(target):
             return f"Access denied: {target}"
 
         def _do_write():
             target.parent.mkdir(parents=True, exist_ok=True)
-            mode = "a" if append else "w"
-            with open(target, mode, encoding="utf-8") as f:
+            with _open_for_write(target, append=bool(append)) as f:
                 f.write(content)
 
         _with_lock_retry(_do_write, target)
@@ -883,7 +965,7 @@ def find_replace_in_file(path: str, name: str = "", old_text: str = "", new_text
             return "Could not edit file: değiştirilecek metin (old_text) boş olamaz."
         base = _resolve_path(path)
         target = base / name
-        if not _is_safe_path(target):
+        if not _is_safe_write_file(target):
             return f"Access denied: {target}"
         if not target.is_file():
             return f"File not found: {target.name}"
@@ -895,7 +977,7 @@ def find_replace_in_file(path: str, name: str = "", old_text: str = "", new_text
         updated = original.replace(old_text, new_text)
 
         def _do_write():
-            with open(target, "w", encoding="utf-8") as f:
+            with _open_for_write(target) as f:
                 f.write(updated)
 
         _with_lock_retry(_do_write, target)
@@ -1158,7 +1240,7 @@ def extract_archive(path: str, name: str = "", destination: str = "") -> str:
     # alt klasore acilir - ne cikarildigi/nereye cikarildigi hep belli olur,
     # rastgele bir yere dagilmaz.
     dest = _resolve_path(destination) if destination else (src.parent / src.stem)
-    if not _is_safe_path(dest):
+    if not _is_safe_write_path(dest):
         return f"Access denied (destination): {dest}"
 
     try:
@@ -1182,6 +1264,9 @@ def extract_archive(path: str, name: str = "", destination: str = "") -> str:
                             f"açma iptal edildi (archive-bomb koruması).")
                 if _zip_member_is_symlink(member):
                     return f"Güvensiz zip içeriği tespit edildi (symlink üye), açma iptal edildi: {member.filename}"
+                if any(part.startswith(".") for part in Path(member.filename).parts):
+                    return (f"Access denied: zip gizli bir yol içeriyor ({member.filename}), "
+                            f"açma iptal edildi.")
 
             try:
                 probe = dest
@@ -1210,15 +1295,25 @@ def extract_archive(path: str, name: str = "", destination: str = "") -> str:
                         return f"Güvensiz zip içeriği tespit edildi (zip-slip), açma iptal edildi: {member.filename}"
                 zf.extractall(staging_path)
 
-                moved = 0
+                # Hicbir sey tasinmadan ONCE her hedefi dogrula: politika disina
+                # cikan (ör. hedefteki bir symlink klasor uzerinden) ya da var
+                # olan bir dosyanin uzerine yazacak uye varsa cikarma tamamen
+                # iptal edilir - var olan dosyalar asla silinmez.
+                plan: list[tuple[Path, Path]] = []
                 for item in staging_path.rglob("*"):
                     if item.is_dir():
                         continue
-                    rel = item.relative_to(staging_path)
-                    target_item = dest / rel
-                    target_item.parent.mkdir(parents=True, exist_ok=True)
+                    target_item = dest / item.relative_to(staging_path)
+                    if not _is_safe_write_file(target_item):
+                        return f"Access denied: {target_item}"
                     if target_item.exists():
-                        target_item.unlink()
+                        return (f"Açma iptal edildi: '{target_item}' zaten var, "
+                                f"üzerine yazılmadı. Boş bir hedef klasör seçin.")
+                    plan.append((item, target_item))
+
+                moved = 0
+                for item, target_item in plan:
+                    target_item.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(item), str(target_item))
                     moved += 1
 
