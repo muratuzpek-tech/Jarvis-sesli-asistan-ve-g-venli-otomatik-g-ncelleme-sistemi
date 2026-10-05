@@ -29,7 +29,6 @@ if _platform.system() == "Windows":
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
-from .tool_gate import audit_entry
 from .security_gate import fingerprint as _gate_fingerprint
 from . import security_gate as _gate
 import json
@@ -1310,10 +1309,11 @@ class JarvisLive:
         return out
 
     async def _execute_registry_tool(self, tool_name: str, args: dict) -> str:
-        """Jarvis 2.0 registry aracini ortak onay akisiyla calistirir.
-        CONFIRMATION_REQUIRED donerse islem bekleyen olarak isaretlenir;
-        model ayni araci ancak kullanici gercekten onayladiktan sonra
-        tekrar cagirdiginda calisir."""
+        """Jarvis 2.0 registry aracini (E2) tek guvenlik kapisindan gecirerek
+        calistirir: kayitsiz arac DENY, DANGEROUS/DESTRUCTIVE icin kullanicinin
+        gercek turundan gelen arguman-bagli, 60 sn, tek kullanimlik onay.
+        Modelin confirm_code'u araca gitmez; yurutulen ve engellenen her cagri
+        denetim kaydina yazilir."""
         # Ayni arac zaten arka planda calisiyorsa ikinci kopyayi BASLATMA.
         # Canli testte model "saat kac?" sorusuna cevap yerine agentic_code'u
         # tekrar cagirdi; onay verilince 3 kodlama paralel calisti (GPU %98,
@@ -1328,8 +1328,26 @@ class JarvisLive:
                     "[ARKA_PLAN_SONUC] ile gelecek."
                 )
 
+        # ═══ TEK GUVENLIK KAPISI (E2) ═══
+        _decision = _gate.authorize(tool_name, args, _gate.Source.MODEL_LIVE)
+        _store = _gate.PendingSlotAdapter(self)
+        if _decision.verdict is _gate.Verdict.DENY:
+            _gate.audit(_decision, _decision.model_message, executed=False)
+            return _decision.model_message
+        _grant = _store.take_grant(_decision)
+        if _decision.verdict is _gate.Verdict.NEEDS_APPROVAL and _grant is None:
+            _store.request(_decision.call)
+            _gate.audit(_decision, _decision.model_message, executed=False)
+            return (
+                f"{_decision.model_message} Bu yanıt bir sistem hatası değildir, "
+                "'sistemsel sorun' deme."
+            )
+        args = _gate.prepare(_decision, _grant)
+
         ctx = _Jarvis2ToolContext(ui=self.ui, session=self.session)
-        ctx.dangerous_confirmed = self._consume_dangerous_confirmation(tool_name, args)
+        # registry'nin kendi seviye kontrolu (tools/security) savunma derinligi
+        # olarak kalir; onay YALNIZCA kapinin verdigi Grant'tan gelir.
+        ctx.dangerous_confirmed = _grant is not None
         try:
             if tool_name in self._BACKGROUND_REGISTRY_TOOLS:
                 # Uzun suren arac: _receive_audio bu await'te beklerse Gemini'nin
@@ -1353,6 +1371,7 @@ class JarvisLive:
                     )
                     print(f"[JARVIS] ⏳ {tool_name} arka plana alındı (konuşma devam ediyor)")
                     self.ui.write_log(f"SYS: {tool_name} arka planda başladı.")
+                    _gate.audit(_decision, "ARKA_PLANDA_BASLADI", executed=True, grant=_grant)
                     return (
                         f"ARKA_PLANDA_BASLADI: '{tool_name}' görevi arka planda çalışıyor "
                         "(birkaç dakika sürebilir). Kullanıcıya bunu TEK cümleyle söyle; "
@@ -1364,12 +1383,14 @@ class JarvisLive:
                 result = await _jarvis2_registry.execute(tool_name, args, ctx=ctx)
         except Exception as err:
             print(f"[JARVIS 2.0] ❌ Registry error: {tool_name}: {err}")
+            _gate.audit(_decision, f"HATA: {type(err).__name__}", executed=True, grant=_grant)
             return f"Tool error ({tool_name}): {type(err).__name__}: {str(err)[:120]}"
+        _gate.audit(_decision, result, executed=True, grant=_grant)
         if isinstance(result, str) and result.startswith("CONFIRMATION_REQUIRED:"):
             # Bekleyen islem CAGRILAN aractir; sonuc metnindeki ad degil.
             # Normal bir aracin ciktisi (dis veri) "CONFIRMATION_REQUIRED:
             # agentic_code:..." ile baslayip baska bir araci onaya acamaz.
-            self._set_pending_dangerous(tool_name, self._action_fingerprint(tool_name, args))
+            _store.request(_decision.call)
             return (
                 f"{result} Kullanıcıya ne yapılacağını TEK cümleyle anlat ve "
                 "'evet' veya 'onaylıyorum' demesini iste. Kullanıcı onay verdikten "
@@ -1514,6 +1535,11 @@ class JarvisLive:
         self._on_text_command(text)
 
     def _on_text_command(self, text: str):
+        # Kullanicinin cevabi, cevap verdigi AN bekleyen istege aittir. Bu tur
+        # islenirken baska bir thread'den (model, arka plan) yeni bir istek
+        # beklemeye alinirsa "evet" ona TASINMAZ - o istek ayrica sorulur.
+        with self._confirmation_lock:
+            seen_pending = (self._pending_dangerous_action, self._pending_dangerous_fingerprint)
         # Bekleyen Brain Team onayina verilen cevap Gemini oturumu olmasa da
         # islenir (gorev orkestratorde bekliyor, Live baglantisi gerekmez).
         if self._handle_brain_team_reply(text):
@@ -1527,7 +1553,10 @@ class JarvisLive:
         is_confirmation = self._is_confirmation(text)
         pending_terminal = None
         with self._confirmation_lock:
-            if self._pending_dangerous_action is not None:
+            current = (self._pending_dangerous_action, self._pending_dangerous_fingerprint)
+            if current[0] is not None and current != seen_pending:
+                pass   # tur sirasinda yeni istek geldi: bu cevap ona ait degil
+            elif self._pending_dangerous_action is not None:
                 if is_confirmation:
                     self._grant_dangerous_confirmation()
                 else:
@@ -2120,13 +2149,13 @@ class JarvisLive:
         _decision = _gate.authorize(name, args, _gate.Source.MODEL_LIVE)
         _store = _gate.PendingSlotAdapter(self)
         if _decision.verdict is _gate.Verdict.DENY:
-            audit_entry(name, args, _decision.model_message, approved=False)
+            _gate.audit(_decision, _decision.model_message, executed=False)
             return types.FunctionResponse(id=fc.id, name=name,
                                           response={"result": _decision.model_message})
         _grant = _store.take_grant(_decision)
         if _decision.verdict is _gate.Verdict.NEEDS_APPROVAL and _grant is None:
             _store.request(_decision.call)
-            audit_entry(name, args, _decision.model_message, approved=False)
+            _gate.audit(_decision, _decision.model_message, executed=False)
             return types.FunctionResponse(id=fc.id, name=name,
                                           response={"result": _decision.model_message})
         args = _gate.prepare(_decision, _grant)
@@ -2156,6 +2185,7 @@ class JarvisLive:
             if key and value:
                 update_memory({category: {key: {"value": value}}})
                 print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
+            _gate.audit(_decision, "ok", executed=True, grant=_grant)
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -2438,6 +2468,7 @@ class JarvisLive:
 
         # Onizleme kodu (varsa) saklanir; modele kodsuz metin gider.
         result = _gate.finish(_decision, result, _store)
+        _gate.audit(_decision, result, executed=True, grant=_grant)
 
         if not self.ui.muted:
             self.ui.set_state("LISTENING")

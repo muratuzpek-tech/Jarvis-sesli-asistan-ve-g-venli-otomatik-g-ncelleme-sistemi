@@ -1,9 +1,11 @@
 """security_gate.py — tek güvenlik kapısı (docs/GUVENLIK_KAPISI_PLAN.md).
 
 ADIM 0 + ADIM 1 (2026-10-05): veri tipleri, onay deposu, araç tanımları.
-ADIM 2 (ilk yarı): authorize()/execute(). Şimdilik YALNIZCA sesli Gemini araç
-yolu (main.JarvisLive._execute_tool, Source.MODEL_LIVE) kapıdan geçer;
-registry/ReAct, agent_loop, Brain Team ve yönlendiriciler henüz geçmez.
+ADIM 2: authorize()/execute(). Sesli Gemini araç yolu (E1,
+main.JarvisLive._execute_tool), registry yolu (E2, _execute_registry_tool) ve
+ReAct iç döngüsü (E3, tools/agent/react_runtime) kapıdan geçer; agent_loop,
+Brain Team ve yönlendiriciler henüz geçmez. Yürütülen (ALLOW ya da onaylı) ve
+engellenen her çağrı audit()'e yazılır.
 
 İçerik:
 
@@ -99,6 +101,7 @@ class ResolvedCall:
     targets: tuple[str, ...]
     effect: Effect
     fingerprint: str
+    source: "Source | None" = None
 
     @classmethod
     def for_pending(cls, action: str, args: dict) -> "ResolvedCall":
@@ -543,11 +546,28 @@ def missing_specs(reachable: dict[str, set[Source]] | None = None) -> dict[str, 
     return {name: srcs for name, srcs in reachable.items() if not _known(name)}
 
 
+def _registry_entry(name: str):
+    """tools/ registry kaydı (çalışma anında kaydedilenler dahil) ya da None."""
+    try:
+        from tools.registry import registry
+    except Exception:
+        return None
+    return registry.get(name)
+
+
+# tools/security.SecurityLevel (READ_ONLY=0, NORMAL=1, DANGEROUS=2,
+# DESTRUCTIVE=3) -> etki. Kaydın kendi seviye beyanı spec'in kaynağıdır
+# (plan §4.3: "registry kaydı spec üretir").
+_REGISTRY_LEVEL_EFFECT = {0: Effect.READ, 1: Effect.MUTATE, 2: Effect.EXECUTE, 3: Effect.EXECUTE}
+
+
 def _make_spec(name: str, sources) -> ToolSpec | None:
     if name in EFFECTS:
         effect, effect_of = EFFECTS[name]
     elif name.startswith(DISCOVERED_PREFIX):
         effect, effect_of = Effect.EXECUTE, None
+    elif (entry := _registry_entry(name)) is not None:
+        effect, effect_of = _REGISTRY_LEVEL_EFFECT.get(int(entry.security), Effect.SYSTEM), None
     else:
         return None
     return ToolSpec(name=name, effect=effect, sources=frozenset(sources), effect_of=effect_of)
@@ -606,7 +626,7 @@ def resolve(tool: str, args: Mapping | None, source: Source) -> ResolvedCall:
         action = normalize_action(action)
     return ResolvedCall(tool=tool, action=str(action) if action not in (None, "") else None,
                         params=params, targets=_targets(tool, params), effect=effect,
-                        fingerprint=fingerprint(tool, params))
+                        fingerprint=fingerprint(tool, params), source=source)
 
 
 # ── Karar: authorize ──────────────────────────────────────────────────────
@@ -674,6 +694,18 @@ def _approval_texts(call: ResolvedCall) -> tuple[str, str]:
     return model_message, user_prompt
 
 
+def _registry_policy(tool: str) -> tuple[str, str] | None:
+    """Registry aracının onay politikası kaydın kendi seviye beyanından:
+    READ_ONLY/NORMAL onaysız (bugünkü davranış), DANGEROUS/DESTRUCTIVE onay."""
+    entry = _registry_entry(tool)
+    if entry is None:
+        return None
+    level = int(entry.security)
+    if level <= 1:
+        return ALLOW, f"registry seviyesi {entry.security.name}: onaysız"
+    return APPROVE, f"registry seviyesi {entry.security.name}: kullanıcı onayı"
+
+
 def authorize(tool: str, args: Mapping | None, source: Source) -> Decision:
     """Tek karar noktası. Kayıtsız araç DENY; okuma dışı varsayılan
     NEEDS_APPROVAL; modele giden hiçbir metinde onay kodu yoktur."""
@@ -681,9 +713,13 @@ def authorize(tool: str, args: Mapping | None, source: Source) -> Decision:
     if spec_for(tool) is None:
         return Decision(Verdict.DENY, call, "kayıtsız araç",
                         f"BLOCKED: '{tool}' kayıtlı bir araç değil; çağrılmadı.")
+    registry_policy = (_registry_policy(tool)
+                       if source in (Source.MODEL_LIVE, Source.REACT) else None)
     if source is Source.MODEL_LIVE and tool in _LIVE_POLICY:
         policy_fn, reason = _LIVE_POLICY[tool]
         policy = policy_fn(call.params)
+    elif registry_policy is not None:
+        policy, reason = registry_policy
     else:
         policy = ALLOW if call.effect is Effect.READ else APPROVE
         reason = "okuma" if policy == ALLOW else "okuma dışı etki: onay gerekir"
@@ -763,6 +799,23 @@ def finish(decision: Decision, result: Any, store: ApprovalStore | None) -> Any:
         )
         return instruction + (sep + _CONFIRM_CODE_RE.sub("", tail) if tail else "")
     return result
+
+
+def audit(decision: Decision, result: Any, *, executed: bool,
+          grant: Grant | None = None) -> None:
+    """Kapı kararını denetim kaydına yazar: engellenen/onay bekleyen
+    (executed=False) VE yürütülen (ALLOW ya da onaylı, executed=True) her
+    çağrı. Şimdilik tool_gate.audit_entry (~/.jarvis/audit.log); tek dosyada
+    birleştirme plan Adım 3."""
+    from jarvis.tool_gate import audit_entry
+    call = decision.call
+    source = call.source.value if call is not None and call.source else "?"
+    how = ("onaylı" if grant is not None else "allow") if executed else decision.verdict.value
+    try:
+        audit_entry(call.tool if call else "?", dict(call.params) if call else {},
+                    f"[{source}:{how}] {str(result)[:180]}", approved=executed)
+    except Exception:
+        pass   # denetim kaydı yazılamazsa araç akışı bozulmaz
 
 
 def execute(decision: Decision, grant: Grant | None,

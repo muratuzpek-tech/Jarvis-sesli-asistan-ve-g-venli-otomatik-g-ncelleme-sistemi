@@ -290,9 +290,11 @@ def test_readonly_tools_of_agent_loop_are_read_or_documented():
         assert spec.effect is sg.Effect.READ or name in sg.KNOWN_UNGATED_NON_READ, name
 
 
-# ── Kapiyi yalnizca sesli arac yolu (main.py, Adim 2) kullaniyor ──
+# ── Kapiyi yalnizca kapidan gecirilmis yollar kullaniyor (Adim 2) ──
+# E1/E2: main.py; E3: tools/agent/react_runtime.py. Yeni bir kullanici
+# eklenirse bu liste bilincli olarak guncellenmeli.
 
-def test_only_the_live_tool_path_imports_the_gate():
+def test_only_the_gated_paths_import_the_gate():
     import ast
     root = Path(__file__).resolve().parents[1]
     users = []
@@ -312,4 +314,4 @@ def test_only_the_live_tool_path_imports_the_gate():
             if any(m.split(".")[-1] == "security_gate" for m in mods):
                 users.append(str(path.relative_to(root)))
                 break
-    assert users == ["src/jarvis/main.py"], users
+    assert sorted(users) == ["src/jarvis/main.py", "tools/agent/react_runtime.py"], users

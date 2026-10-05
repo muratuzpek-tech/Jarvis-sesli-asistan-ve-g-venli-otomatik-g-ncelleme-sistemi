@@ -35,7 +35,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from collections.abc import Callable
 
 from tools.registry import registry, ToolContext
@@ -291,7 +291,7 @@ class ReactAgent:
             })
 
             try:
-                obs = await registry.execute(tool_name, step.args, ctx=self._ctx)
+                obs = await self._gated_execute(tool_name, step.args)
                 step.observation = obs[:500]
             except asyncio.CancelledError:
                 raise
@@ -316,6 +316,29 @@ class ReactAgent:
         summary = result.summary()
         self._ui_log(summary[:800])
         return summary
+
+    async def _gated_execute(self, tool_name: str, args: dict) -> str:
+        """İç LLM'in seçtiği aracı tek güvenlik kapısından geçirir (E3).
+
+        ReAct iç turunda gerçek bir kullanıcı turu olamaz: onay gerektiren bir
+        araç burada ÇALIŞMAZ (gözlem olarak kodsuz onay metni döner) ve dış
+        çağrının onayı iç çağrılara MİRAS KALMAZ - eskiden
+        ctx.dangerous_confirmed aynen geçiyordu ve DESTRUCTIVE bir araç iç
+        döngüde onaysız çalışabiliyordu. Kayıtsız araç reddedilir; modelin
+        confirm_code'u araca gitmez. Her karar denetim kaydına yazılır."""
+        from jarvis import security_gate as gate
+        decision = gate.authorize(tool_name, args, gate.Source.REACT)
+        if decision.verdict is not gate.Verdict.ALLOW:
+            gate.audit(decision, decision.model_message, executed=False)
+            if decision.verdict is gate.Verdict.DENY:
+                return decision.model_message
+            return (f"{decision.model_message} (ReAct iç turunda kullanıcı onayı "
+                    f"alınamaz; araç ÇALIŞTIRILMADI. finish_task ile kullanıcıya bildir.)")
+        params = gate.prepare(decision, None)
+        inner_ctx = replace(self._ctx, dangerous_confirmed=False)
+        obs = await registry.execute(tool_name, params, ctx=inner_ctx)
+        gate.audit(decision, obs, executed=True)
+        return obs
 
     def _ui_log(self, msg: str) -> None:
         logger.info(f"[ReAct] {msg}")
