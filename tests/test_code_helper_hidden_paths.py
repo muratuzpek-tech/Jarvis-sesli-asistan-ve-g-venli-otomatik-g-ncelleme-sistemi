@@ -18,7 +18,11 @@ from jarvis.actions.code_helper import (
 )
 from jarvis.actions.file_controller import _get_documents
 
-HOME = Path.home()
+
+# Yollar TEST ANINDA hesaplanir: tests/conftest.py her teste kendi gecici ev
+# dizinini verir; import anindaki Path.home() ile calisma anindaki farkli olur.
+def _home(*parts) -> Path:
+    return Path.home().joinpath(*parts)
 
 
 # ── Gizli hedefler reddedilmeli ───────────────────────────────────────
@@ -26,22 +30,22 @@ HOME = Path.home()
 @pytest.mark.parametrize(
     "hedef",
     [
-        HOME / ".bashrc",
-        HOME / ".profile",
-        HOME / ".ssh" / "authorized_keys",
-        HOME / ".claude" / "settings.json",
-        HOME / ".config" / "autostart" / "x.desktop",
-        HOME / "projem" / ".git" / "hooks" / "pre-commit",
+        (".bashrc",),
+        (".profile",),
+        (".ssh", "authorized_keys"),
+        (".claude", "settings.json"),
+        (".config", "autostart", "x.desktop"),
+        ("projem", ".git", "hooks", "pre-commit"),
     ],
 )
 def test_hidden_targets_rejected(hedef):
     with pytest.raises(UnsafeWriteTarget):
-        resolve_write_target(str(hedef), "python")
+        resolve_write_target(str(_home(*hedef)), "python")
 
 
 def test_hidden_rejection_message_is_actionable():
     with pytest.raises(UnsafeWriteTarget) as exc:
-        resolve_write_target(str(HOME / ".bashrc"), "python")
+        resolve_write_target(str(_home(".bashrc")), "python")
     assert "gizli" in str(exc.value).lower()
 
 
@@ -50,13 +54,15 @@ def test_hidden_rejection_message_is_actionable():
 @pytest.mark.parametrize(
     "hedef",
     [
-        HOME / "Desktop" / "script.py",
-        HOME / "jarvis_programs" / "proje" / "main.py",
-        _get_documents() / "notlar.py",   # gercek Belgeler (ör. ~/Belgeler)
+        lambda: _home("Desktop", "script.py"),
+        lambda: _home("jarvis_programs", "proje", "main.py"),
+        lambda: _get_documents() / "notlar.py",   # gercek Belgeler (ör. ~/Belgeler)
     ],
+    ids=["desktop", "jarvis_programs", "documents"],
 )
 def test_normal_targets_still_allowed(hedef):
-    assert resolve_write_target(str(hedef), "python") == hedef
+    target = hedef()
+    assert resolve_write_target(str(target), "python") == target
 
 
 def test_relative_name_goes_to_desktop():
@@ -80,7 +86,7 @@ def test_outside_home_still_rejected(hedef):
 
 # Yazma politikasi file_controller ile birlesti: ev dizini kokune ve izinli
 # klasorler disindaki alt klasorlere yazilmaz.
-@pytest.mark.parametrize("hedef", [HOME / "notlar.py", HOME / "projem" / "main.py"])
+@pytest.mark.parametrize("hedef", [("notlar.py",), ("projem", "main.py")])
 def test_home_outside_allowed_folders_rejected(hedef):
     with pytest.raises(UnsafeWriteTarget):
-        resolve_write_target(hedef, "python")
+        resolve_write_target(_home(*hedef), "python")
