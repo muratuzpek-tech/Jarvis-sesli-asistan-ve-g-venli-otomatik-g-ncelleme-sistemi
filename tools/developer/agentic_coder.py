@@ -259,6 +259,30 @@ def _validate_code(code: str, language: str = "python") -> tuple[bool, str]:
     return True, "OK"
 
 
+_CODE_SUFFIXES = {".py", ".js", ".ts", ".go", ".rb", ".php", ".sh", ".java", ".rs", ".c", ".cpp"}
+
+
+def _validate_file(filename: str, content: str, language: str = "python") -> tuple[bool, str]:
+    """Dosya turune gore dogrulama.
+
+    .py      → yasakli kaliplar + ast.parse
+    diger kod → sadece yasakli kaliplar (pass/TODO/... stub yasagi)
+    .json    → json.loads
+    metin (.md, .txt, .toml, .yml, .html, .css ...) → kontrol yok
+    """
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".py":
+        return _validate_code(content, "python")
+    if suffix in _CODE_SUFFIXES:
+        return _validate_code(content, suffix.lstrip("."))
+    if suffix == ".json":
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as e:
+            return False, f"JSON_ERROR: line {e.lineno}: {e.msg}"
+    return True, "OK"
+
+
 def _run_file(path: Path, timeout: int = _RUN_TIMEOUT) -> str:
     """Dosyayı çalıştır ve çıktıyı döndür (stdin=DEVNULL güvenli)."""
     interpreters = {
@@ -635,12 +659,16 @@ class AgenticCoder:
             _all_clean = _all_required.issubset(set(task.files_written.keys()))
             if _all_clean:
                 for _fn, _fc in task.files_written.items():
+                    # Sadece .py derlenir; README.md'yi derlemek SMART EXIT'i
+                    # hic tetiklenmez yapiyordu (25 iterasyonun hepsi harcaniyordu).
+                    if not _fn.endswith(".py"):
+                        continue
                     try:
                         compile(_fc, _fn, "exec")
                     except SyntaxError:
                         _all_clean = False
                         break
-            if _all_clean and task.iterations >= 3:
+            if _all_clean and task.iterations >= 2:
                 task.final_response = f"Tum dosyalar yazildi ve temiz: {sorted(task.files_written.keys())}"
                 steps.append(CodingStep(step_num=i+1, thought="auto-accept: all files valid", action="accept", detail="SMART_EXIT", success=True))
                 break
@@ -685,17 +713,23 @@ class AgenticCoder:
                     task.same_file_writes = 0
                 task.last_written_file = filename
 
-                if not content or len(content.strip()) < 200:
-                    step.detail = f"COK KISA kod ({len(content)} char) — en az 200 gerekli, REDDEDILDI"
+                # __init__.py gibi paket isaretleyicileri bos/kisa olabilir;
+                # 200 karakter kurali onlari sonsuza kadar reddediyordu.
+                _min_len = 0 if Path(filename).name == "__init__.py" else 200
+                if (not content and _min_len) or len(content.strip()) < _min_len:
+                    step.detail = f"COK KISA ({filename}, {len(content)} char) — en az {_min_len} gerekli, REDDEDILDI"
                     step.success = False
                     steps.append(step)
-                    last_error = f"CONTENT_TOO_SHORT: {len(content)} char kod yazdin. En az 200 karakter dolu, calisan kod yaz."
+                    last_error = f"CONTENT_TOO_SHORT ({filename}): {len(content)} char yazdin. En az {_min_len} karakter dolu icerik yaz."
                     continue
 
-                valid, val_msg = _validate_code(content, task.language)
+                # Dogrulama dosya TURUNE gore: eskiden README.md dahil her
+                # dosya Python olarak derleniyordu -> Markdown hep SYNTAX_ERROR
+                # aliyor, model hatayi calc.py'de sanip donguye giriyordu.
+                valid, val_msg = _validate_file(filename, content, task.language)
                 if not valid:
-                    task.errors.append(f"Iteration {i+1}: {val_msg}")
-                    last_error = f"VALIDATION: {val_msg}"
+                    task.errors.append(f"Iteration {i+1}: {filename}: {val_msg}")
+                    last_error = f"VALIDATION ({filename}): {val_msg}"
                     step.detail = f"REDDEDİLDİ: {val_msg}"
                     step.success = False
                     steps.append(step)
@@ -717,6 +751,13 @@ class AgenticCoder:
                 else:
                     task.stuck_count = 0
                 task.last_content_hash = _ch
+
+                # Dosya basariyla yazildi: ona ait eski hata mesajini temizle.
+                # Eskiden "VALIDATION (README.md)" gibi bir mesaj dosya duzgun
+                # yazildiktan sonra da kaliyor, model her turda ayni dosyayi
+                # yeniden "duzeltiyordu". ZORLA ROTATE talimati korunur.
+                if last_error and not last_error.startswith("ZORLA ROTATE"):
+                    last_error = ""
 
                 # ── RUFF ön-düzeltme (LLM'siz, kotasız) ──
                 # Basit hatalari (kullanilmayan import, bicim) ruff duzeltir;
