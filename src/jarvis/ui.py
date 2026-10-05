@@ -1458,6 +1458,37 @@ class VoiceHudWidget(QWidget):
             p.drawLine(QPointF(x, mid - amp), QPointF(x, mid + amp))
 
 
+class _CommandWorker:
+    """Kullanici komutlarini TEK bir arka plan thread'inde, geldikleri sirayla
+    isler. Eskiden her komut icin ayri bir thread aciliyordu; hizli arka
+    arkaya gelen iki komut (ör. bir istek ve hemen ardindan "evet")
+    main.py'deki onay durumunu ayni anda isleyebiliyordu. GUI thread'i
+    bloklanmaz; bir komutun hatasi sonrakileri durdurmaz."""
+
+    def __init__(self, name: str = "ui-command"):
+        import queue
+        self._queue: "queue.Queue[tuple]" = queue.Queue()
+        self._thread = threading.Thread(target=self._run, daemon=True, name=name)
+        self._thread.start()
+
+    def submit(self, fn, *args) -> None:
+        self._queue.put((fn, args))
+
+    def stop(self) -> None:
+        self._queue.put(None)
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            fn, args = item
+            try:
+                fn(*args)
+            except Exception as exc:
+                print(f"[UI] Komut işlenemedi: {type(exc).__name__}: {exc}")
+
+
 class MainWindow(QMainWindow):
     _log_sig     = pyqtSignal(str)
     _state_sig   = pyqtSignal(str)
@@ -1486,6 +1517,7 @@ class MainWindow(QMainWindow):
         )
 
         self.on_text_command   = None
+        self._commands         = _CommandWorker()
         self.on_remote_clicked = None   # callable: () -> (url, key) | None
         self.on_interrupt      = None   # callable: () -> None — stop JARVIS mid-speech
         self._muted            = False
@@ -1788,6 +1820,7 @@ class MainWindow(QMainWindow):
     def _read_task_files(self) -> list[dict]:
         by_id: dict[str, dict] = {}
         anonymous: list[dict] = []
+        had_error = False
         for path in (memory_dir() / "agent_tasks.json", tasks_dir() / "brain_tasks.json"):
             try:
                 data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
@@ -1806,10 +1839,14 @@ class MainWindow(QMainWindow):
                 # Do not emit this every 1.5 s: a transient half-written JSON
                 # file would otherwise flood the activity feed and make the
                 # UI look as if old events were replaying.
+                had_error = True
                 if not getattr(self, "_task_read_error", False):
                     self._task_read_error = True
                     self._log_sig.emit(f"SYS: Görev kaydı okunamadı: {exc}")
-        self._task_read_error = False
+        # Yalnizca TUM dosyalar okunabildiginde sifirla; aksi halde bayrak her
+        # cagrida temizlenip ayni hata her 1.5 sn'de tekrar loglaniyordu.
+        if not had_error:
+            self._task_read_error = False
         tasks = list(by_id.values()) + anonymous
         return sorted(
             tasks,
@@ -2795,7 +2832,7 @@ class MainWindow(QMainWindow):
                 f"Briefly tell the user you can see the file '{p.name}' "
                 f"({size}) has been uploaded and ask what they'd like to do with it."
             )
-            threading.Thread(target=self.on_text_command, args=(msg,), daemon=True).start()
+            self._commands.submit(self.on_text_command, msg)
 
     def notify_phone_connected(self) -> None:
         if self._remote_overlay and self._remote_overlay.isVisible():
@@ -2870,7 +2907,7 @@ class MainWindow(QMainWindow):
         self._input.clear()
         self._log_sig.emit(f"You: {txt}")
         if self.on_text_command:
-            threading.Thread(target=self.on_text_command, args=(txt,), daemon=True).start()
+            self._commands.submit(self.on_text_command, txt)
 
     def _apply_state(self, state: str):
         state = str(state or "ERROR").upper(); self.hud.state = state; self.hud.speaking = state == "SPEAKING"
@@ -2987,6 +3024,7 @@ class MainWindow(QMainWindow):
         if self._remote_overlay: self._remote_overlay._do_close()
         if self._cam_thread and self._cam_thread.is_alive():
             self._cam_thread.join(timeout=0.5)
+        self._commands.stop()
         global _metrics
         if _metrics is not None: _metrics.stop()
         super().closeEvent(event)

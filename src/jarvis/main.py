@@ -971,6 +971,11 @@ class JarvisLive:
     _dangerous_confirmation_granted = False
     _dangerous_confirmation_at = 0.0
     _pending_terminal_command = None
+    # Onay durumu iki thread'den degistiriliyor: arayuz komut thread'i
+    # (_on_text_command) ve asyncio thread'i (_execute_tool, sesli onay).
+    # Kontrol-ve-degistir adimlari bu kilit altinda yapilmazsa kullanicinin X
+    # icin verdigi "evet", tam o anda beklemeye alinan Y'yi onaylayabiliyordu.
+    _confirmation_lock = threading.RLock()
 
     # Kullanicinin acik onay ifadeleri (noktalama temizlenmis, kucuk harf).
     _CONFIRMATION_WORDS = frozenset({
@@ -1017,8 +1022,26 @@ class JarvisLive:
         return compact in {w.replace(" ", "") for w in cls._CONFIRMATION_WORDS}
 
     def _grant_dangerous_confirmation(self) -> None:
-        self._dangerous_confirmation_granted = True
-        self._dangerous_confirmation_at = time.monotonic()
+        with self._confirmation_lock:
+            if self._pending_dangerous_action is None:
+                return
+            self._dangerous_confirmation_granted = True
+            self._dangerous_confirmation_at = time.monotonic()
+
+    def _confirmation_granted_for(self, action: str) -> bool:
+        """Bekleyen islem action ise ve kullanici onay verdiyse True."""
+        with self._confirmation_lock:
+            return (
+                self._dangerous_confirmation_granted
+                and self._pending_dangerous_action == action
+            )
+
+    def _set_pending_dangerous(self, action: str | None, fingerprint: str | None = None) -> None:
+        """Bekleyen islemi degistirir; verilmis bir onay YENI isleme tasinmaz."""
+        with self._confirmation_lock:
+            self._pending_dangerous_action = action
+            self._pending_dangerous_fingerprint = fingerprint
+            self._dangerous_confirmation_granted = False
 
     @staticmethod
     def _action_fingerprint(action: str, args: dict) -> str:
@@ -1034,18 +1057,18 @@ class JarvisLive:
         """Bekleyen islem ayni arac + ayni argumanlar ise ve gercek kullanici
         onayi son _CONFIRMATION_TTL_S saniye icinde verildiyse True doner ve
         onayi tuketir (tek kullanimlik)."""
-        fresh = (time.monotonic() - self._dangerous_confirmation_at) <= self._CONFIRMATION_TTL_S
-        if (
-            self._dangerous_confirmation_granted
-            and self._pending_dangerous_action == action
-            and self._pending_dangerous_fingerprint == self._action_fingerprint(action, args)
-            and fresh
-        ):
-            self._pending_dangerous_action = None
-            self._pending_dangerous_fingerprint = None
-            self._dangerous_confirmation_granted = False
-            return True
-        return False
+        fingerprint = self._action_fingerprint(action, args)
+        with self._confirmation_lock:
+            fresh = (time.monotonic() - self._dangerous_confirmation_at) <= self._CONFIRMATION_TTL_S
+            if (
+                self._dangerous_confirmation_granted
+                and self._pending_dangerous_action == action
+                and self._pending_dangerous_fingerprint == fingerprint
+                and fresh
+            ):
+                self._set_pending_dangerous(None)
+                return True
+            return False
 
     @staticmethod
     def _agentic_code_args(args: dict, description: str) -> dict:
@@ -1129,9 +1152,7 @@ class JarvisLive:
             # Bekleyen islem CAGRILAN aractir; sonuc metnindeki ad degil.
             # Normal bir aracin ciktisi (dis veri) "CONFIRMATION_REQUIRED:
             # agentic_code:..." ile baslayip baska bir araci onaya acamaz.
-            self._pending_dangerous_action = tool_name
-            self._pending_dangerous_fingerprint = self._action_fingerprint(tool_name, args)
-            self._dangerous_confirmation_granted = False
+            self._set_pending_dangerous(tool_name, self._action_fingerprint(tool_name, args))
             return (
                 f"{result} Kullanıcıya ne yapılacağını TEK cümleyle anlat ve "
                 "'evet' veya 'onaylıyorum' demesini iste. Kullanıcı onay verdikten "
@@ -1204,6 +1225,7 @@ class JarvisLive:
         self._pending_dangerous_fingerprint: str | None = None
         self._dangerous_confirmation_granted = False
         self._pending_terminal_command: dict | None = None
+        self._confirmation_lock = threading.RLock()
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
@@ -1274,29 +1296,30 @@ class JarvisLive:
         # Tehlikeli işlem onayı yalnızca kullanıcının açıkça söylediği bir
         # sonraki turdan gelebilir; modelin tool-call argümanı onay sayılmaz.
         is_confirmation = self._is_confirmation(text)
-        if self._pending_dangerous_action is not None:
-            if is_confirmation:
-                self._grant_dangerous_confirmation()
-            else:
-                # İlgisiz yeni bir tur, eski onayı ileride yanlışlıkla
-                # kullanılabilir bırakmamalıdır.
-                self._pending_dangerous_action = None
-                self._dangerous_confirmation_granted = False
-        if self._pending_terminal_command is not None:
-            if is_confirmation:
-                pending_terminal = dict(self._pending_terminal_command)
+        pending_terminal = None
+        with self._confirmation_lock:
+            if self._pending_dangerous_action is not None:
+                if is_confirmation:
+                    self._grant_dangerous_confirmation()
+                else:
+                    # İlgisiz yeni bir tur, eski onayı ileride yanlışlıkla
+                    # kullanılabilir bırakmamalıdır.
+                    self._set_pending_dangerous(None)
+            if self._pending_terminal_command is not None:
+                if is_confirmation:
+                    pending_terminal = dict(self._pending_terminal_command)
                 self._pending_terminal_command = None
-                terminal_result = terminal_tool(
-                    pending_terminal,
-                    application_user_confirmation=True,
-                )
-                self.ui.write_log(f"[TERMINAL_APPROVED] {terminal_result}")
-                self.speak(
-                    f"[TERMINAL_SONUC] Onaylanan komutun sonucu: {terminal_result}. "
-                    "Sonucu kullanıcıya kısa ve doğal Türkçe ile özetle."
-                )
-                return
-            self._pending_terminal_command = None
+        if pending_terminal is not None:
+            terminal_result = terminal_tool(
+                pending_terminal,
+                application_user_confirmation=True,
+            )
+            self.ui.write_log(f"[TERMINAL_APPROVED] {terminal_result}")
+            self.speak(
+                f"[TERMINAL_SONUC] Onaylanan komutun sonucu: {terminal_result}. "
+                "Sonucu kullanıcıya kısa ve doğal Türkçe ile özetle."
+            )
+            return
         try:
             log_turn("user", text)
         except Exception as e:
@@ -1442,7 +1465,8 @@ class JarvisLive:
                 )
                 code = code_line.split(":", 1)[1].strip() if ":" in code_line else ""
                 if code:
-                    self._pending_terminal_command = {**terminal_params, "confirm_code": code}
+                    with self._confirmation_lock:
+                        self._pending_terminal_command = {**terminal_params, "confirm_code": code}
             self.ui.write_log(f"[TERMINAL_ROUTER] {terminal_result}")
             self.speak(
                 f"[TERMINAL_SONUC] {terminal_result}. "
@@ -2007,8 +2031,7 @@ class JarvisLive:
                         _computer_action = "restart"
                 if (
                     _computer_action in {"restart", "shutdown", "lock_screen"}
-                    and self._dangerous_confirmation_granted
-                    and self._pending_dangerous_action == _computer_action
+                    and self._confirmation_granted_for(_computer_action)
                 ):
                     _computer_args["_user_confirmation_granted"] = True
                 r = await loop.run_in_executor(
@@ -2017,10 +2040,9 @@ class JarvisLive:
                 )
                 if _computer_action in {"restart", "shutdown", "lock_screen"}:
                     if str(r).startswith("CONFIRMATION_REQUIRED:"):
-                        self._pending_dangerous_action = _computer_action
+                        self._set_pending_dangerous(_computer_action)
                     else:
-                        self._pending_dangerous_action = None
-                    self._dangerous_confirmation_granted = False
+                        self._set_pending_dangerous(None)
                 result = r or "Done."
 
             elif name == "terminal":
@@ -2110,19 +2132,18 @@ class JarvisLive:
                 _game_shutdown_requested = str(_game_args.get("shutdown_when_done", "false")).lower() == "true"
                 if _game_shutdown_requested:
                     _game_action = "game_shutdown"
-                    if not (
-                        self._dangerous_confirmation_granted
-                        and self._pending_dangerous_action == _game_action
-                    ):
-                        self._pending_dangerous_action = _game_action
-                        self._dangerous_confirmation_granted = False
+                    with self._confirmation_lock:
+                        _game_confirmed = self._confirmation_granted_for(_game_action)
+                        if _game_confirmed:
+                            self._set_pending_dangerous(None)  # tek kullanimlik
+                        else:
+                            self._set_pending_dangerous(_game_action)
+                    if not _game_confirmed:
                         result = "CONFIRMATION_REQUIRED:game_shutdown: İndirme tamamlanınca bilgisayar kapatılacak. Açıkça onaylıyor musunuz?"
                         r = None
                     else:
                         _game_args["_user_confirmation_granted"] = True
                         r = await loop.run_in_executor(None, lambda: game_updater(parameters=_game_args, player=self.ui, speak=self.speak))
-                        self._pending_dangerous_action = None
-                        self._dangerous_confirmation_granted = False
                         result = r or "Done."
                 else:
                     r = await loop.run_in_executor(None, lambda: game_updater(parameters=_game_args, player=self.ui, speak=self.speak))
@@ -2142,12 +2163,11 @@ class JarvisLive:
                 result = str(r)
 
             elif name == "shutdown_jarvis":
-                if not (
-                    self._dangerous_confirmation_granted
-                    and self._pending_dangerous_action == "shutdown_jarvis"
-                ):
-                    self._pending_dangerous_action = "shutdown_jarvis"
-                    self._dangerous_confirmation_granted = False
+                with self._confirmation_lock:
+                    _shutdown_confirmed = self._confirmation_granted_for("shutdown_jarvis")
+                    if not _shutdown_confirmed:
+                        self._set_pending_dangerous("shutdown_jarvis")
+                if not _shutdown_confirmed:
                     result = "CONFIRMATION_REQUIRED:shutdown_jarvis: JARVIS kapatılacak. Açıkça onaylıyor musunuz?"
                 else:
                     self.ui.write_log("SYS: Shutdown requested.")
@@ -2432,17 +2452,19 @@ class JarvisLive:
                                 # bekleyen islemi hic yetkilendirmiyordu. Bu
                                 # metin modelin degil kullanicinin gercek
                                 # konusmasinin transkripsiyonu.
-                                if self._pending_dangerous_action is not None:
-                                    _spoken = " ".join(in_buf)
-                                    if self._is_confirmation(_spoken):
-                                        if not self._dangerous_confirmation_granted:
-                                            print(f"[JARVIS] ✅ Sesli onay alındı: {self._pending_dangerous_action}")
-                                        self._grant_dangerous_confirmation()
-                                    elif self._dangerous_confirmation_granted:
-                                        # "Evet... hayır dur" gibi: cumlenin devami
-                                        # onayi geri aldiysa onayi iptal et.
-                                        self._dangerous_confirmation_granted = False
-                                        print("[JARVIS] ↩️ Sesli onay geri alındı.")
+                                _spoken = " ".join(in_buf)
+                                _spoken_ok = self._is_confirmation(_spoken)
+                                with self._confirmation_lock:
+                                    if self._pending_dangerous_action is not None:
+                                        if _spoken_ok:
+                                            if not self._dangerous_confirmation_granted:
+                                                print(f"[JARVIS] ✅ Sesli onay alındı: {self._pending_dangerous_action}")
+                                            self._grant_dangerous_confirmation()
+                                        elif self._dangerous_confirmation_granted:
+                                            # "Evet... hayır dur" gibi: cumlenin devami
+                                            # onayi geri aldiysa onayi iptal et.
+                                            self._dangerous_confirmation_granted = False
+                                            print("[JARVIS] ↩️ Sesli onay geri alındı.")
 
                                 # Turn complete gelmese bile dosya komutunu yakala.
 
