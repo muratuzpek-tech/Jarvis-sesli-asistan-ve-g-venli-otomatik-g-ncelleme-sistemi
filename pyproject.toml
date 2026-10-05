@@ -40,6 +40,10 @@ dependencies = [
     "python-multipart>=0.0.9",
     "qrcode[pil]>=7.4",
     "jc>=1.25",
+    # agentic_coder: LLM'in yazdigi .py dosyalarini LLM'siz/kotasiz on-duzeltme
+    # (ruff check --fix + format) ve kesik/bozuk LLM JSON ciktisini onarma.
+    "ruff>=0.6",
+    "json-repair>=0.30",
     "PyQt6>=6.6",
     "comtypes>=1.2; sys_platform == 'win32'",
     "pycaw>=20240210; sys_platform == 'win32'",

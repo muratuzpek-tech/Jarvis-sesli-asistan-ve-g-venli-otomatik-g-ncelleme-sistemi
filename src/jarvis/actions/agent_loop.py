@@ -178,7 +178,18 @@ def _decide_next_step(task: dict) -> dict:
         source="agent_loop",
     )
     text = _strip_fences(raw_text.strip())
-    step = json.loads(text)
+    try:
+        step = json.loads(text)
+    except json.JSONDecodeError as decode_err:
+        # Ollama/Gemini bazen kesik veya hafif bozuk JSON donuyor; eskiden
+        # bu planlama denemesini dogrudan basarisiz sayiyordu.
+        try:
+            from json_repair import repair_json
+        except ImportError:
+            raise decode_err from None
+        step = repair_json(text, return_objects=True)
+        if not isinstance(step, dict) or not step:
+            raise ValueError("Model çıktısı JSON'a onarılamadı.") from decode_err
     if not isinstance(step, dict):
         raise ValueError("Model bir JSON nesnesi döndürmedi.")
     return step
@@ -586,12 +597,32 @@ def _tick() -> None:
         # A task becomes running while its planner/tool step is in flight.
         # Selecting only pending tasks left every such task permanently stuck.
         active = [t for t in tasks if t.get("status") in ("pending", "running")]
-        if active:
-            active.sort(key=lambda item: str(item.get("created_at", "")))
-            _process_task(active[0], tasks)
-            _save_tasks(tasks)
-        elif discovery_changed:
-            _save_tasks(tasks)
+        if not active:
+            if discovery_changed:
+                _save_tasks(tasks)
+            return
+        active.sort(key=lambda item: str(item.get("created_at", "")))
+        current = active[0]
+        current["status"] = "running"
+        current["updated_at"] = datetime.now().isoformat()
+        _save_tasks(tasks)
+
+    # LLM cagrisi (retry beklemeleri + Ollama yedegi dakikalar surebilir)
+    # KILIT DISINDA yapilir. Eskiden kilit bu sure boyunca tutuluyordu;
+    # o sirada add_task/approve/cancel cagiran thread (Qt arayuzu ya da
+    # canli ses oturumunun event loop'u) dakikalarca donuyordu.
+    _process_task(current, [])
+
+    with _tasks_lock:
+        latest = _load_tasks()
+        for idx, task in enumerate(latest):
+            if task.get("id") != current.get("id"):
+                continue
+            # Islem surerken kullanici gorevi iptal ettiyse onu ezme.
+            if task.get("status") != "cancelled":
+                latest[idx] = current
+            break
+        _save_tasks(latest)
 
 
 def _worker_loop(interval_seconds: float) -> None:

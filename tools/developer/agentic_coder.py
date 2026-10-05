@@ -28,6 +28,7 @@ AKIŞ:
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import logging
 import os
@@ -320,7 +321,79 @@ def _parse_model_response(raw: str) -> dict:
         except json.JSONDecodeError:
             pass
 
+    # 4. json_repair: kesik (num_predict sinirinda bitmis), tirnak/virgul
+    # hatali LLM ciktisini onar. Eskiden burada {} donup dongu tamamen
+    # bitiyordu. Onarilan "content" kesik olabilir; o durumda _validate_code
+    # SYNTAX_ERROR ile reddeder ve model bir sonraki turda tekrar yazar.
+    repaired = repair_llm_json(raw)
+    if repaired:
+        return repaired
+
     return {}
+
+
+def repair_llm_json(raw: str) -> dict:
+    """json_repair kuruluysa bozuk JSON'u dict'e onarir; degilse {}."""
+    try:
+        from json_repair import repair_json
+    except ImportError:
+        return {}
+    text = raw
+    fence = re.search(r"```(?:json)?\s*\n(.*)", raw, re.DOTALL)
+    if fence:
+        text = fence.group(1).rsplit("```", 1)[0]
+    start = text.find("{")
+    if start == -1:
+        return {}
+    try:
+        obj = repair_json(text[start:], return_objects=True)
+    except Exception:
+        return {}
+    return obj if isinstance(obj, dict) and obj else {}
+
+
+def _ruff_cmd() -> list[str] | None:
+    exe = _sh_mod.which("ruff")
+    if exe:
+        return [exe]
+    try:
+        import ruff  # noqa: F401  (pip paketi `python -m ruff` saglar)
+    except ImportError:
+        return None
+    return [sys.executable, "-m", "ruff"]
+
+
+def _ruff_autofix(path: Path) -> tuple[str | None, str]:
+    """Yazilan .py dosyasina LLM'siz on-duzeltme uygular.
+
+    1) `ruff check --fix` (sadece guvenli duzeltmeler: kullanilmayan import vb.)
+    2) `ruff format`
+    3) Kalan GERCEK hatalari (sozdizimi, tanimsiz isim) dondurur ki bir
+       sonraki LLM turu sadece onlara odaklansin.
+
+    --isolated: kullanici/proje ayarlari hesaba katilmaz, sonuc tekrarlanabilir.
+    Donus: (duzeltilmis_icerik veya None, kalan_hatalar_metni)
+    """
+    cmd = _ruff_cmd()
+    if cmd is None or path.suffix != ".py":
+        return None, ""
+    common = ["--isolated", "--quiet", "--no-cache"]
+    try:
+        subprocess.run([*cmd, "check", *common, "--fix", "--exit-zero", str(path)],
+                       capture_output=True, text=True, timeout=20)
+        subprocess.run([*cmd, "format", *common, str(path)],
+                       capture_output=True, text=True, timeout=20)
+        remaining = subprocess.run(
+            [*cmd, "check", *common, "--output-format", "concise",
+             "--select", "E9,F63,F7,F82", str(path)],
+            capture_output=True, text=True, timeout=20,
+        )
+        fixed = path.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.debug(f"[Coder] ruff atlandı: {type(e).__name__}")
+        return None, ""
+    problems = (remaining.stdout or "").strip().replace(str(path.parent) + "/", "")
+    return fixed, problems[:1500]
 
 
 # ── Agentic Coding Engine ─────────────────────────────────────
@@ -492,12 +565,18 @@ class AgenticCoder:
 
         # ═══ AGENTGREP SCAN: projedeki mevcut dosyaları tara ═══
         try:
-            _scan_result = _scan_project(description, task.project_path)
+            _scan_result = await asyncio.to_thread(_scan_project, description, task.project_path)
             if _scan_result:
                 self._ui_progress(f"  [SCAN] agentgrep: {_scan_result[:100]}")
         except Exception:
             pass
 
+        llm_error: str | None = None
+
+        # NOT: Bu coroutine Jarvis'in canli ses oturumuyla AYNI event loop'ta
+        # calisiyor. LLM, dosya calistirma ve pytest gibi bloklayan isler
+        # asyncio.to_thread ile ayri thread'e aliniyor; aksi halde kodlama
+        # boyunca mikrofon/hoparlor/websocket tamamen donuyordu.
         for i in range(self._max):
             task.iterations = i + 1
             self._ui_progress(f"  ⚙️ Iterasyon {task.iterations}/{self._max}")
@@ -513,7 +592,7 @@ class AgenticCoder:
                 _wl = list(task.files_written.keys())
                 prompt += f"\n═══ YAZILAN: {_wl} ═══\n"
                 prompt += f"═══ FARKLI BİR DOSYA YAZ! {_wl[-1]} TEKRAR YAZMA! ═══\n"
-            raw = self._model_fn(prompt)
+            raw = await asyncio.to_thread(self._model_fn, prompt)
             self._ui_progress(f"    🔍 RAW[:200]: {repr(raw[:200])}")
             decision = _parse_model_response(raw)
 
@@ -524,10 +603,20 @@ class AgenticCoder:
 
             thought = decision.get("thought", "")
             action = decision.get("action", "unknown").lower()
-            if action not in ("write", "fix", "accept", "run", "inspect"):
+            if action not in ("write", "fix", "accept", "run", "inspect", "error"):
                 self._ui_progress(f"    ⚠️ Bilinmeyen action: {action} → atlanıyor")
             args = decision.get("args", {})
             response = decision.get("response", "")
+
+            # ── ACTION: error (Gemini ve Ollama ikisi de yok) ──────
+            # Kalan iterasyonlarda ayni basarisiz LLM cagrisini tekrarlamak
+            # yerine hemen dur; asil sebep son mesajda kaybolmasin.
+            if action == "error":
+                llm_error = response or "HATA: Kullanılabilir LLM yok (Gemini/Ollama)"
+                steps.append(CodingStep(step_num=i + 1, thought=thought, action="error",
+                                        detail=llm_error, success=False))
+                self._ui_progress(f"    ❌ {llm_error}")
+                break
 
             self._ui_progress(f"    🎯 action={action} file={args.get('filename','?')} thought={thought[:60]}")
             step = CodingStep(step_num=i + 1, thought=thought, action=action)
@@ -629,6 +718,23 @@ class AgenticCoder:
                     task.stuck_count = 0
                 task.last_content_hash = _ch
 
+                # ── RUFF ön-düzeltme (LLM'siz, kotasız) ──
+                # Basit hatalari (kullanilmayan import, bicim) ruff duzeltir;
+                # LLM'e sadece ruff'in duzeltemedigi gercek hatalar gider.
+                _fixed, _ruff_left = await asyncio.to_thread(_ruff_autofix, fpath)
+                if _fixed is not None:
+                    if _fixed != content:
+                        self._ui_progress(f"    🧹 ruff: {filename} otomatik düzeltildi")
+                    content = _fixed
+                if _ruff_left:
+                    last_error = (
+                        f"RUFF ({filename}) kalan hatalar — SADECE bunlari duzelt, "
+                        f"dosyanin TAM halini yaz:\n{_ruff_left}"
+                    )
+                    self._ui_progress(f"    ⚠️ ruff: {filename} içinde {len(_ruff_left.splitlines())} hata kaldı")
+                elif last_error.startswith(f"RUFF ({filename})"):
+                    last_error = ""
+
                 task.files_written[filename] = content
                 step.detail = f"📝 {filename} ({len(content)} chars)"
                 step.success = True
@@ -644,7 +750,7 @@ class AgenticCoder:
                         _fsz = fpath.stat().st_size
                         if _fsz < 200:
                             last_error = f"KUCUK DOSYA: {fpath.name} sadece {_fsz} bytes. Daha fazla kod yaz — fonksiyonlar, class, mantik ekle!"
-                        last_run_output = _run_file(fpath)
+                        last_run_output = await asyncio.to_thread(_run_file, fpath)
                         last_error = ""
                         step.detail = last_run_output[:200]
                         step.success = "[SUCCESS]" in last_run_output
@@ -676,7 +782,7 @@ class AgenticCoder:
 
             # ── ACTION: accept ─────────────────────────────────
             elif action == "accept":
-                _ok, _vp = _verify_project(task, run_pytest=False)
+                _ok, _vp = await asyncio.to_thread(_verify_project, task, run_pytest=False)
                 if not _ok:
                     last_error = "ACCEPT_REDDEDILDI: " + "; ".join(_vp[:4])
                     step.detail = f"❌ ACCEPT REJECTED ({len(_vp)} sorun)"
@@ -698,8 +804,11 @@ class AgenticCoder:
                 step.success = False
                 steps.append(step)
 
+        if llm_error and not task.files_written:
+            return f"❌ {llm_error} — {task.iterations}. iterasyonda durduruldu, hiçbir dosya yazılmadı."
+
         # FINAL QUALITY GATE — accepted HERE only
-        _ok, _vp = _verify_project(task, run_pytest=True)
+        _ok, _vp = await asyncio.to_thread(_verify_project, task, run_pytest=True)
         task.accepted = _ok
         if not task.accepted:
             task.errors.extend(_vp[:5])
