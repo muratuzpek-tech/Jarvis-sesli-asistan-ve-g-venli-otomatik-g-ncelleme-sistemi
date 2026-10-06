@@ -12,8 +12,10 @@ uzerinden gecer.
 * E3: ReAct ic dongusu dis cagrinin onayini MIRAS ALAMAZ (eskiden
   ctx.dangerous_confirmed ic cagrilara aynen geciyordu); onay gerektiren ic
   cagri calismaz, kayitsiz arac reddedilir.
-* ALLOW ve onayli her yurutme de audit'e yazilir (tool_gate.audit_entry,
-  ~/.jarvis/audit.log - conftest HOME'u tmp'ye yonlendirir). E1 dahil.
+* ALLOW ve onayli her yurutme de audit'e yazilir (tek denetim kaydi,
+  JARVIS_HOME/memory/audit.log - conftest JARVIS_HOME'u tmp'ye yonlendirir).
+  E1 dahil. "executed" yurutmeyi, "approved" yalnizca gercek kullanici
+  onayini gosterir.
 
 Karar kodu stub'lanmaz. Araclar registry'ye kaydedilen, cagri kaydeden test
 araclaridir. ReAct'in LLM'i sabit JSON donen bir model_fn'dir; memory.recall
@@ -82,7 +84,8 @@ def jl():
 
 
 def _audit() -> list[dict]:
-    p = Path.home() / ".jarvis" / "audit.log"
+    from jarvis.paths import memory_dir
+    p = memory_dir() / "audit.log"
     if not p.is_file():
         return []
     return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -153,11 +156,11 @@ def test_e2_allowed_and_approved_runs_are_audited(jl):
     run_e2(jl, "_gate_destructive", {"path": "p"})
     jl._grant_dangerous_confirmation()
     run_e2(jl, "_gate_destructive", {"path": "p"})
-    rows = [r for r in _audit() if r["tool"].startswith("_gate_")]
-    executed = [(r["tool"], r["approved"]) for r in rows if r["approved"]]
-    assert ("_gate_normal", True) in executed
-    assert ("_gate_destructive", True) in executed
-    assert any(r["tool"] == "_gate_destructive" and not r["approved"] for r in rows)   # bekleyen istek
+    rows = [r for r in _audit() if r.get("tool", "").startswith("_gate_")]
+    executed = [(r["tool"], r["approved"]) for r in rows if r["executed"]]
+    assert ("_gate_normal", False) in executed            # ALLOW: onaysiz yurutuldu
+    assert ("_gate_destructive", True) in executed        # kullanici onayiyla
+    assert any(r["tool"] == "_gate_destructive" and not r["executed"] for r in rows)   # bekleyen istek
 
 
 def test_e1_allowed_runs_are_audited_too(jl, monkeypatch):
@@ -165,7 +168,8 @@ def test_e1_allowed_runs_are_audited_too(jl, monkeypatch):
     monkeypatch.setattr(main_mod, "weather_action", lambda **k: rec.append(k) or "güneşli")
     asyncio.run(jl._execute_tool(SimpleNamespace(name="weather_report", args={"city": "Ankara"}, id="1")))
     assert rec
-    assert any(r["tool"] == "weather_report" and r["approved"] for r in _audit())
+    assert any(r.get("tool") == "weather_report" and r["executed"] and not r["approved"]
+               for r in _audit())
 
 
 # ── E3: ReAct ──
@@ -210,7 +214,7 @@ def test_e3_allowed_tool_runs_without_model_code_and_is_audited(no_memory):
     _react(no_memory, ToolContext(),
            {"thought": "t", "tool": "_gate_normal", "args": {"q": "b", "confirm_code": "X"}})
     assert _calls["normal"] == [{"q": "b"}]
-    assert any(r["tool"] == "_gate_normal" and r["approved"] for r in _audit())
+    assert any(r.get("tool") == "_gate_normal" and r["executed"] for r in _audit())
 
 
 def test_e3_approval_needed_tool_does_not_run_and_shows_no_code(no_memory):

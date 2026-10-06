@@ -48,7 +48,7 @@ from jarvis.actions.tools_kopru import (
     call_tool, is_destructive,
 )
 from jarvis.paths import memory_dir
-from jarvis.core.audit_log import log_action
+from jarvis.core.audit_log import log_action, log_tool_event
 
 
 TASKS_PATH      = memory_dir() / "agent_tasks.json"
@@ -101,6 +101,20 @@ def _log_event(event: dict) -> None:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"[AgentLoop] ⚠️ agent_loop_log.jsonl yazılamadı: {e}")
+
+
+def _audit(event: str, task: dict, tool, parameters, *, result="", approved=False,
+           executed=False, verdict=None) -> None:
+    """Onay istegi, onay, ret ve yurutme olaylari TEK denetim kaydina
+    (JARVIS_HOME/memory/audit.log). Kayit hatasi gorev akisini bozmaz."""
+    try:
+        log_tool_event(source="agent_loop", event=event, tool=str(tool or "?"),
+                       params=parameters if isinstance(parameters, dict) else {},
+                       result=str(result)[:500], approved=approved, executed=executed,
+                       verdict=verdict, task_id=str(task.get("id", "")),
+                       risk="low" if verdict == "allow" else "high")
+    except Exception as e:
+        print(f"[AgentLoop] ⚠️ audit yazılamadı: {e}")
 
 
 # --- Gemini planlama katmani -------------------------------------------------
@@ -252,6 +266,8 @@ def approve_task(task_id: str, *, expected_action: dict) -> str:
         pending = task["pending_action"]
         if pending != expected_action:
             _log_event({"event": "approval_mismatch", "task_id": task_id})
+            _audit("approval_mismatch", task, pending.get("tool"), pending.get("parameters"),
+                   result="bekleyen adım onaylanan adımla aynı değil; çalıştırılmadı")
             return (f"'{task_id}' için bekleyen adım, onaylanan adımla aynı değil; "
                     "hiçbir şey çalıştırılmadı.")
         try:
@@ -265,12 +281,16 @@ def approve_task(task_id: str, *, expected_action: dict) -> str:
             _save_tasks(tasks)
             _log_event({"event": "approved_and_executed", "task_id": task_id,
                         "tool": pending["tool"], "result": result})
+            _audit("approved_executed", task, pending["tool"], pending["parameters"],
+                   result=result, approved=True, executed=True, verdict="needs_approval")
             return f"Onaylandı ve gerçekleştirildi: {result}"
         except Exception as e:
             task["status"] = "failed"
             task["pending_action"] = None
             _save_tasks(tasks)
             _log_event({"event": "approved_but_failed", "task_id": task_id, "error": str(e)})
+            _audit("approved_failed", task, pending.get("tool"), pending.get("parameters"),
+                   result=f"HATA: {e}", approved=True, executed=True, verdict="needs_approval")
             return f"Onaylandı ama çalıştırılırken hata oluştu: {e}"
 
 
@@ -280,11 +300,14 @@ def deny_task(task_id: str) -> str:
         task = _find_task(tasks, task_id)
         if task is None:
             return f"'{task_id}' id'li görev bulunamadı."
+        pending = task.get("pending_action") or {}
         task["status"] = "failed"
         task["pending_action"] = None
         task["history"].append({"note": "Kullanıcı reddetti.", "result": "denied"})
         _save_tasks(tasks)
     _log_event({"event": "denied", "task_id": task_id})
+    _audit("denied", task, pending.get("tool"), pending.get("parameters"),
+           result="kullanıcı reddetti", verdict="needs_approval")
     return f"'{task_id}' görevi iptal edildi."
 
 
@@ -310,11 +333,14 @@ def cancel_task(task_id: str) -> str:
             return f"'{task_id}' id'li görev bulunamadı."
         if task["status"] == "cancelled":
             return f"'{task_id}' görevi zaten iptal edilmişti."
+        pending = task.get("pending_action") or {}
         task["status"] = "cancelled"
         task["pending_action"] = None
         task["history"].append({"note": "Kullanıcı hedefi tamamen iptal etti.", "result": "cancelled"})
         _save_tasks(tasks)
     _log_event({"event": "cancelled", "task_id": task_id})
+    _audit("cancelled", task, pending.get("tool") or "agent_loop", pending.get("parameters"),
+           result="görev iptal edildi")
     return f"'{task_id}' görevi tamamen iptal edildi, bir daha işlenmeyecek."
 
 
@@ -462,6 +488,8 @@ def _run_readonly_github_research(task: dict) -> bool:
                                  "note": "Salt-okunur; indirme/kurulum/çalıştırma yok.", "result": result})
         task["result"] = result
         _log_event({"event": "readonly_github_done", "task_id": task["id"], "query": query})
+        _audit("executed", task, "github_arama", {"query": query}, result=result,
+               executed=True, verdict="allow")
     except Exception as e:
         task["status"] = "failed"
         task["error"] = f"Salt-okunur GitHub araştırması başarısız: {e}"
@@ -590,6 +618,7 @@ def _process_task(task: dict, tasks: list[dict]) -> None:
         task["status"] = "awaiting_approval"
         task["pending_action"] = {"tool": tool, "parameters": parameters, "note": note}
         _log_event({"event": "awaiting_approval", "task_id": task["id"], "tool": tool, "note": note})
+        _audit("approval_requested", task, tool, parameters, result=note, verdict="needs_approval")
         _notify_pending_approval(task, tool, parameters, note)
         return
 
@@ -598,6 +627,7 @@ def _process_task(task: dict, tasks: list[dict]) -> None:
         task["planning_retries"] = 0
         task["history"].append({"tool": tool, "parameters": parameters, "note": note, "result": result})
         _log_event({"event": "step_ok", "task_id": task["id"], "tool": tool, "result": str(result)[:200]})
+        _audit("executed", task, tool, parameters, result=result, executed=True, verdict="allow")
     except NotAllowedTool as e:
         task["status"] = "failed"
         task["history"].append({"note": str(e), "result": "not_allowed"})
@@ -605,6 +635,8 @@ def _process_task(task: dict, tasks: list[dict]) -> None:
     except Exception as e:
         task["history"].append({"tool": tool, "parameters": parameters, "note": note, "result": f"HATA: {e}"})
         _log_event({"event": "step_failed", "task_id": task["id"], "tool": tool, "error": str(e)})
+        _audit("execution_failed", task, tool, parameters, result=f"HATA: {e}",
+               executed=True, verdict="allow")
         # Tek bir adim hatasi gorevi hemen dusurmez - bir sonraki tick'te
         # model hatayi gorup farkli bir yaklasim deneyebilir. MAX_STEPS_PER_TASK
         # sonsuz donguye karsi ust siniri saglar.
@@ -674,6 +706,8 @@ def _run_discovery_scan(tasks: list[dict]) -> bool:
             "task_id": task["id"],
             "source_name": source_name,
         })
+        _audit("approval_requested", task, "discovery_register", parameters,
+               result="keşif kaydı onay bekliyor", verdict="needs_approval")
         _notify_pending_approval(
             task, "discovery_register", parameters, task["pending_action"]["note"]
         )

@@ -3,13 +3,17 @@
 Sadece yeni regression testlerini çalıştır (test_registry, test_security, ...)
 Eski test_brain_*.py dosyaları JarvisLive mock gerektirir → ayrı koleksiyon.
 
-GERÇEK DENETİM KAYITLARI KORUMASI: test paketi kullanıcının gerçek
-~/.jarvis/audit.log ve ~/.local/share/MuratJARVIS/memory/audit.log
-dosyalarını DEĞİŞTİREMEZ. Her testten önce/sonra iki dosyanın sha256'sı
-karşılaştırılır (değiştiren test hata alır); oturum sonunda da, test dışı
-(ör. toplama sırasındaki) yazmalara karşı, bir kez daha karşılaştırılır.
-Gerçek ev dizini ortam değişkeninden değil kullanıcı veritabanından
-alınır - testler HOME'u değiştirse bile korunan dosyalar gerçek olanlardır.
+GERÇEK DENETİM KAYITLARI KORUMASI: test paketi kullanıcının gerçek denetim
+kaydını DEĞİŞTİREMEZ. Kanonik kayıt (plan Adım 3.1) gerçek
+JARVIS_HOME/memory/audit.log'dur; JARVIS_HOME tanımlı değilse
+~/.local/share/MuratJARVIS/memory/audit.log (ya da $XDG_DATA_HOME). Eski
+~/.jarvis/audit.log'a artık yazılmaz; yine de korunur (değişirse hata).
+Her testten önce/sonra dosyaların sha256'sı karşılaştırılır (değiştiren test
+hata alır); oturum sonunda da, test dışı (ör. toplama sırasındaki)
+yazmalara karşı, bir kez daha karşılaştırılır. Gerçek ev dizini ortam
+değişkeninden değil kullanıcı veritabanından alınır; gerçek JARVIS_HOME /
+XDG_DATA_HOME, izolasyon ortamı değiştirmeden ÖNCE (conftest import anında)
+okunur.
 """
 import hashlib
 import os
@@ -37,10 +41,23 @@ def _real_home() -> Path:
         return Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
 
 
-REAL_AUDIT_LOGS = (
-    _real_home() / ".jarvis" / "audit.log",
-    _real_home() / ".local" / "share" / "MuratJARVIS" / "memory" / "audit.log",
-)
+def real_audit_logs() -> tuple[Path, ...]:
+    """Kullanıcının GERÇEK denetim kayıtları: kanonik JARVIS_HOME/memory/
+    audit.log (jarvis.paths.data_dir ile aynı öncelik) + eski konumlar."""
+    home = _real_home()
+    out = [home / ".jarvis" / "audit.log",
+           home / ".local" / "share" / "MuratJARVIS" / "memory" / "audit.log"]
+    env_home = os.environ.get("JARVIS_HOME", "").strip()
+    if env_home:
+        out.append(Path(env_home).expanduser() / "memory" / "audit.log")
+    xdg = os.environ.get("XDG_DATA_HOME", "").strip()
+    if xdg:
+        out.append(Path(xdg) / "MuratJARVIS" / "memory" / "audit.log")
+    return tuple(dict.fromkeys(out))
+
+
+# conftest import anında = izolasyon (pytest_configure) ortamı değiştirmeden önce.
+REAL_AUDIT_LOGS = real_audit_logs()
 
 
 def _audit_hashes() -> dict[str, str | None]:

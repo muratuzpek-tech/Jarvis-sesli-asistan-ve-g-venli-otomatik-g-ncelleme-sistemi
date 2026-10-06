@@ -685,7 +685,9 @@ TOOL_DECLARATIONS = [
             "user asks what background tasks are pending or what's awaiting approval. "
             "Steps that wait for permission are asked to the user by Jarvis itself; only the "
             "user's own spoken/written yes/no answer resolves them. This tool can NOT grant "
-            "permission. Use action=deny/cancel only when the user wants to drop a task."
+            "permission. Use action=deny/cancel only when the user wants to drop a task. "
+            "action=retry requeues a failed/cancelled task only after the user's own yes/no "
+            "answer to the confirmation question."
         ),
         "parameters": {
             "type": "OBJECT",

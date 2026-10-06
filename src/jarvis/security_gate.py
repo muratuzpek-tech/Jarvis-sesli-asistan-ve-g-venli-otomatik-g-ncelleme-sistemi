@@ -6,6 +6,9 @@ main.JarvisLive._execute_tool), registry yolu (E2, _execute_registry_tool) ve
 ReAct iç döngüsü (E3, tools/agent/react_runtime) kapıdan geçer; agent_loop,
 Brain Team ve yönlendiriciler henüz geçmez. Yürütülen (ALLOW ya da onaylı) ve
 engellenen her çağrı audit()'e yazılır.
+ADIM 3.0: MODEL_LIVE kaynağından yalnızca modelin gerçekten erişebildiği
+araçlar kabul edilir (iç araçlar DENY, onay yuvasına dokunmaz).
+ADIM 3.1: tek denetim kaydı JARVIS_HOME/memory/audit.log (core/audit_log).
 
 İçerik:
 
@@ -32,7 +35,7 @@ from __future__ import annotations
 import abc
 import ast
 import enum
-import json
+import functools
 import os
 import re
 import shlex
@@ -82,13 +85,10 @@ class Verdict(enum.Enum):
     DENY = "deny"
 
 
-def fingerprint(action: str, args: Any) -> str:
-    """Onaylanan işlemin kimliği: araç adı + argümanlar. Sayılar
-    registry.execute'taki gibi str'ye çevrilir (3 ve "3" aynı işlemdir).
-    main.JarvisLive._action_fingerprint bunu kullanır - TEK kaynak."""
-    if isinstance(args, dict):
-        args = {k: str(v) if isinstance(v, (int, float)) else v for k, v in args.items()}
-    return action + ":" + json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+# Onaylanan işlemin kimliği: araç adı + argümanlar. main.JarvisLive.
+# _action_fingerprint ve denetim kaydı bunu kullanır - TEK uygulama
+# jarvis.core.call_fingerprint'te (audit_log kapıyı import etmesin diye).
+from jarvis.core.call_fingerprint import fingerprint  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -674,7 +674,10 @@ _LIVE_POLICY: dict[str, tuple[Callable[[Mapping], str], str]] = {
     # Bugün onaysız; plan Adım 7'de gözden geçirilecek:
     "close_camera": (lambda p: ALLOW, "kamerayı kapatır; geri alınabilir"),
     "task_manager": (lambda p: ALLOW, "ertelenmiş istem kaydı (bulgu E, Adım 7)"),
-    "agent_loop": (lambda p: ALLOW, "görev ekler; adımlar agent_loop'ta onaylanır"),
+    # retry: kullanicinin iptal ettigi/basarisiz gorevi yeniden kuyruga alir -
+    # model bunu kendi basina yapamaz, ayni task_id icin kullanici onayi gerekir.
+    "agent_loop": (lambda p: APPROVE if str(p.get("action", "")).lower().strip() == "retry" else ALLOW,
+                   "görev ekler/listeler/iptal eder; retry kullanıcı onayı ister"),
     "flight_finder": (lambda p: ALLOW, "arama; save bugünkü gibi serbest"),
 }
 
@@ -706,6 +709,22 @@ def _registry_policy(tool: str) -> tuple[str, str] | None:
     return APPROVE, f"registry seviyesi {entry.security.name}: kullanıcı onayı"
 
 
+@functools.lru_cache(maxsize=1)
+def _model_live_names() -> frozenset[str]:
+    """Modelin sesli araç yolundan (E1/E2) GERÇEKTEN erişebildiği adlar:
+    TOOL_DECLARATIONS, _execute_tool dalları ve tools/ registry kayıtları.
+    Kaynak dosyalar süreç başına bir kez okunur."""
+    return frozenset(name for name, srcs in collect_reachable_tools().items()
+                     if Source.MODEL_LIVE in srcs)
+
+
+def _model_reachable(tool: str) -> bool:
+    # Çalışma anında registry'ye eklenenler de modelin araç listesine girer.
+    # discovered_* her zaman fail-closed onay ister (EXECUTE).
+    return (tool in _model_live_names() or tool.startswith(DISCOVERED_PREFIX)
+            or _registry_entry(tool) is not None)
+
+
 def authorize(tool: str, args: Mapping | None, source: Source) -> Decision:
     """Tek karar noktası. Kayıtsız araç DENY; okuma dışı varsayılan
     NEEDS_APPROVAL; modele giden hiçbir metinde onay kodu yoktur."""
@@ -713,6 +732,12 @@ def authorize(tool: str, args: Mapping | None, source: Source) -> Decision:
     if spec_for(tool) is None:
         return Decision(Verdict.DENY, call, "kayıtsız araç",
                         f"BLOCKED: '{tool}' kayıtlı bir araç değil; çağrılmadı.")
+    if source is Source.MODEL_LIVE and not _model_reachable(tool):
+        # Brain Team / agent_loop / CLI'nin iç araçları ve 'brain_team' sözde
+        # aracı modelden çağrılamaz. DENY onay yuvasına dokunmaz: model
+        # bekleyen bir onayı (ör. Brain adımı) kendi parmak iziyle ezemez.
+        return Decision(Verdict.DENY, call, "modelin araç listesinde değil",
+                        f"BLOCKED: '{tool}' bu yoldan çağrılabilen bir araç değil; çağrılmadı.")
     registry_policy = (_registry_policy(tool)
                        if source in (Source.MODEL_LIVE, Source.REACT) else None)
     if source is Source.MODEL_LIVE and tool in _LIVE_POLICY:
@@ -801,19 +826,39 @@ def finish(decision: Decision, result: Any, store: ApprovalStore | None) -> Any:
     return result
 
 
+# Etki -> denetim kaydindaki risk etiketi.
+_EFFECT_RISK = {Effect.READ: "low", Effect.MUTATE: "medium", Effect.EXTERNAL: "high",
+                Effect.EXECUTE: "high", Effect.SYSTEM: "high"}
+
+
 def audit(decision: Decision, result: Any, *, executed: bool,
           grant: Grant | None = None) -> None:
-    """Kapı kararını denetim kaydına yazar: engellenen/onay bekleyen
+    """Kapı kararını TEK denetim kaydına (JARVIS_HOME/memory/audit.log,
+    core/audit_log.log_action biçimi) yazar: engellenen/onay bekleyen
     (executed=False) VE yürütülen (ALLOW ya da onaylı, executed=True) her
-    çağrı. Şimdilik tool_gate.audit_entry (~/.jarvis/audit.log); tek dosyada
-    birleştirme plan Adım 3."""
-    from jarvis.tool_gate import audit_entry
+    çağrı. approved yalnızca gerçek kullanıcı onayı (Grant) ile yürütülen
+    çağrıda True'dur. params maskelenir, parmak izi yalnızca hash."""
+    from jarvis.core.audit_log import log_action
     call = decision.call
-    source = call.source.value if call is not None and call.source else "?"
-    how = ("onaylı" if grant is not None else "allow") if executed else decision.verdict.value
+    # Onay bekleyen / engellenen çağrıda modele giden metin argümanları açık
+    # yazar (ör. message_text); kayda yalnızca karar yazılır.
+    text = str(result) if executed else f"{decision.verdict.value}: {decision.reason}"
     try:
-        audit_entry(call.tool if call else "?", dict(call.params) if call else {},
-                    f"[{source}:{how}] {str(result)[:180]}", approved=executed)
+        log_action(
+            module="security_gate",
+            action=call.tool if call else "?",
+            detail=decision.reason,
+            risk=_EFFECT_RISK.get(call.effect, "high") if call else "high",
+            approval_required=decision.verdict is Verdict.NEEDS_APPROVAL,
+            result=text[:200],
+            source=call.source.value if call is not None and call.source else "?",
+            verdict=decision.verdict.value,
+            fingerprint=call.fingerprint if call else None,
+            tool=call.tool if call else "?",
+            params=dict(call.params) if call else {},
+            approved=bool(executed and grant is not None),
+            executed=bool(executed),
+        )
     except Exception:
         pass   # denetim kaydı yazılamazsa araç akışı bozulmaz
 

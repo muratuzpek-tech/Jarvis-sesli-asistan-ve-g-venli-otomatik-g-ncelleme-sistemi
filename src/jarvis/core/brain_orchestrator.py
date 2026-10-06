@@ -301,6 +301,39 @@ class BrainOrchestrator:
             target = ", ".join(f"{k}={str(v)[:60]}" for k, v in params.items() if k != "content")
         return {"tool": tool, "action": action, "target": target}
 
+    def _audit(self, event: str, task: dict | None, step: dict | None, *, result="",
+               approved: bool = False, executed: bool = False, verdict: str | None = None) -> None:
+        """Onay istegi, onay, ret ve yurutme olaylari TEK denetim kaydina
+        (JARVIS_HOME/memory/audit.log). Arac ve argumanlar yurutmeyle ayni
+        cozumlemeden (_resolve_step_call) gelir ve maskelenir; onay metni
+        (hedefte arguman degerleri olabilir) kayda yazilmaz. Kayit hatasi
+        gorev akisini bozmaz."""
+        task = task or {}
+        step = step or {}
+        try:
+            from jarvis.core.audit_log import log_tool_event
+            agent = step.get("agent")
+            if agent == "executor_ai":
+                try:
+                    tool, params = self._resolve_step_call(task, step)
+                except Exception as e:
+                    tool, params = "executor_ai", {"cozumleme_hatasi": type(e).__name__}
+            elif agent == "coder_ai":
+                tool, params = "coder_ai", {
+                    "operation": step.get("operation", "modify"),
+                    "file_path": step.get("file_path") or task.get("payload", {}).get("file_path", ""),
+                }
+            else:
+                tool, params = str(agent or "brain_team"), {}
+            log_tool_event(
+                source="brain_team", event=event, tool=str(tool), params=dict(params),
+                result=str(result)[:500], approved=approved, executed=executed,
+                verdict=verdict, task_id=str(task.get("id", "")),
+                risk=str(step.get("risk") or ("low" if verdict == "allow" else "high")),
+            )
+        except Exception as e:
+            print(f"[BrainTeam] ⚠️ audit yazılamadı: {e}")
+
     def _request_approval(self, task: dict) -> None:
         """HIGH riskli adim beklemeye alindiginda kullaniciya ONAY ISTEGI
         gonderir (sonuc ozeti degil). Canli oturum (JarvisLive) bunu
@@ -319,6 +352,8 @@ class BrainOrchestrator:
             self._results_logger.info(f"[{WAITING_APPROVAL.upper()}] (id={task['id']}) {message}")
         except Exception as e:
             print(f"[BrainTeam] ⚠️ Onay istegi loglanamadi: {e}")
+        self._audit("approval_requested", task, step, result="kullanıcı onayı bekleniyor",
+                    verdict="needs_approval")
 
         player = self._last_player
         if player is None:
@@ -387,11 +422,15 @@ class BrainOrchestrator:
         step = task["payload"]["pending_step"]
         try:
             result = self._execute_step(task, step)
+            self._audit("approved_executed", task, step, result=result, approved=True,
+                        executed=True, verdict="needs_approval")
             task["payload"]["pending_step"] = None
             self._finish_step(task, step, result)
             self.tasks.update(task_id, status="pending", payload=task["payload"])
             return f"Onaylandı ve gerçekleştirildi: {str(result)[:200]}"
         except Exception as e:
+            self._audit("approved_failed", task, step, result=f"HATA: {e}", approved=True,
+                        executed=True, verdict="needs_approval")
             task["payload"]["pending_step"] = None
             self.tasks.update(task_id, status="failed", error=str(e), payload=task["payload"])
             self._notify_result(self.tasks.get(task_id))
@@ -401,6 +440,8 @@ class BrainOrchestrator:
         task = self.tasks.get(task_id)
         if task is None:
             return f"'{task_id}' id'li AI takım görevi bulunamadı."
+        self._audit("denied", task, task["payload"].get("pending_step"),
+                    result="kullanıcı reddetti", verdict="needs_approval")
         task["payload"]["pending_step"] = None
         self.tasks.update(task_id, status="cancelled", payload=task["payload"])
         self._safe_memory_event("orchestrator", "task_denied", task["name"])
@@ -1321,11 +1362,15 @@ class BrainOrchestrator:
             self._request_approval(self.tasks.get(task["id"]))
             return
 
+        step_with_risk = {**step, "risk": risk}
         try:
             result = self._execute_step(task, step)
+            self._audit("executed", task, step_with_risk, result=result, executed=True, verdict="allow")
             self._finish_step(task, step, result)
             self.tasks.update(task["id"], payload=payload)
         except Exception as e:
+            self._audit("execution_failed", task, step_with_risk, result=f"HATA: {e}",
+                        executed=True, verdict="allow")
             payload.setdefault("failed_steps", []).append(step.get("description", ""))
             payload["step_index"] = idx + 1
             self.tasks.update(task["id"], payload=payload)
@@ -1452,8 +1497,8 @@ def brain_team_tool(parameters: dict = None, player=None) -> str:
         return orch.start_goal(params.get("goal", ""))
     if action == "status":
         return orch.list_status()
-    if action == "approve":
-        return orch.approve(params.get("task_id", ""))
+    # "approve" bilerek YOK: bekleyen adim yalnizca main.py'nin kullanici-turu
+    # onay yolundan (_handle_brain_team_reply -> orch.approve) calisir.
     if action == "deny":
         return orch.deny(params.get("task_id", ""))
     if action == "health":
@@ -1474,4 +1519,4 @@ def brain_team_tool(parameters: dict = None, player=None) -> str:
             caps = f" — capabilities: {', '.join(entry['capabilities'])}" if entry["capabilities"] else ""
             lines.append(f"{name}: {entry['module']}.{entry['class']} ({real}){caps}")
         return "\n".join(lines)
-    return f"Bilinmeyen action: '{action}'. start/status/approve/deny/health/agents kullanın."
+    return f"Bilinmeyen action: '{action}'. start/status/deny/health/agents kullanın."

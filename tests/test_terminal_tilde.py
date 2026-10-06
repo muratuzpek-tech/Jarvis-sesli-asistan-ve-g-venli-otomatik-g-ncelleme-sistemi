@@ -12,13 +12,15 @@ ONCE os.path.expanduser ile genisletilir; yol denetimleri genisletilmis yol
 uzerinden yapilir. Ayni kural security_gate'in terminal etki hesabinda da
 gecerlidir (kapi ile arac ayni komutu ayni sekilde siniflandirir).
 
-IZOLASYON: HOME ve JARVIS_HOME tmp_path; gercek ~/.jarvis/audit.log ve
-MuratJARVIS audit.log'un degismedigi kontrol edilir. Gercek bir `touch`
+IZOLASYON: HOME ve JARVIS_HOME tmp_path; gercek kanonik denetim kaydinin
+(JARVIS_HOME/memory/audit.log, conftest.REAL_AUDIT_LOGS) ve eski
+~/.jarvis/audit.log'un degismedigi kontrol edilir. Gercek bir `touch`
 yalnizca tmp ev dizininde calisir.
 """
 import hashlib
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -27,16 +29,19 @@ from jarvis.actions import terminal_tool as tt
 from jarvis.core.approval_service import approval_service
 
 
-def _real_home() -> Path:
-    try:
-        import pwd
-        return Path(pwd.getpwuid(os.getuid()).pw_dir)
-    except Exception:
-        return Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
+def _guarded() -> list[Path]:
+    # conftest, gercek yollari izolasyondan ONCE hesaplar (gercek JARVIS_HOME
+    # dahil); test modulu import edildiginde ortam zaten tmp'dir.
+    conftest = sys.modules.get("conftest") or sys.modules.get("tests.conftest")
+    if conftest is not None and hasattr(conftest, "REAL_AUDIT_LOGS"):
+        return list(conftest.REAL_AUDIT_LOGS)
+    import pwd
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    return [home / ".jarvis" / "audit.log",
+            home / ".local" / "share" / "MuratJARVIS" / "memory" / "audit.log"]
 
 
-_GUARDED = [_real_home() / ".jarvis" / "audit.log",
-            _real_home() / ".local" / "share" / "MuratJARVIS" / "memory" / "audit.log"]
+_GUARDED = _guarded()
 
 
 def _snapshot():
