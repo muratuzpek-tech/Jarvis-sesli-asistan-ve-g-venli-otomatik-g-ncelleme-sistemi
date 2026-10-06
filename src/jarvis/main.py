@@ -163,6 +163,41 @@ SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 2048 # AirPods Pro Koruma Ayari
 
+# ── Konusma tanima ayarlari (canli oturum, _build_config) ──────────────────
+# Canli sunucu bu alanlardan birini reddedip baglantiyi 1007 ile kapatabildigi
+# icin her biri AYRI bir ortam degiskeniyle acilir; hepsi varsayilan KAPALI:
+#   JARVIS_STT_LANG=1  -> input_audio_transcription.language_codes
+#   JARVIS_TTS_LANG=1  -> speech_config.language_code
+#   JARVIS_VAD=1       -> realtime_input_config (AutomaticActivityDetection)
+# Komut sozlugu sistem talimatindadir, baglantiyi etkilemez; hep acik.
+# Alan adlari kurulu google-genai'den: AudioTranscriptionConfig.language_codes
+# BCP-47 dil ipucu (bos ise otomatik algilama); SpeechConfig.language_code
+# ISO 639-1 ve SDK'ya gore sesli YANIT sentezinin dili (tanimayi etkilemez).
+TRANSCRIPTION_LANGUAGE_CODES = ["tr-TR"]
+SPEECH_LANGUAGE_CODE         = "tr"
+
+# Otomatik konusma algilama (AutomaticActivityDetection). Gemini Live
+# varsayilani END_SENSITIVITY_HIGH ("konusmayi daha sik bitirir") cumleyi
+# ortasinda kesiyordu ("Pro je nin"). Bitis LOW: duraklamada kesmez;
+# baslangic HIGH: kullanicinin sozunu kacirmaz. silence_duration_ms
+# buyudukce kesilme azalir ama yanit gecikir. JARVIS_VAD=1 iken ayarlanir:
+#   JARVIS_VAD_START_SENSITIVITY / JARVIS_VAD_END_SENSITIVITY = high | low
+#   JARVIS_VAD_PREFIX_PADDING_MS / JARVIS_VAD_SILENCE_MS      = milisaniye
+# Gecersiz ya da aralik disi deger varsayilana duser.
+VAD_DEFAULTS = {
+    "start_of_speech_sensitivity": "high",
+    "end_of_speech_sensitivity": "low",
+    "prefix_padding_ms": 300,
+    "silence_duration_ms": 800,
+}
+_VAD_ENV = {
+    "start_of_speech_sensitivity": "JARVIS_VAD_START_SENSITIVITY",
+    "end_of_speech_sensitivity": "JARVIS_VAD_END_SENSITIVITY",
+    "prefix_padding_ms": "JARVIS_VAD_PREFIX_PADDING_MS",
+    "silence_duration_ms": "JARVIS_VAD_SILENCE_MS",
+}
+_VAD_MS_RANGE = {"prefix_padding_ms": (0, 2000), "silence_duration_ms": (100, 5000)}
+
 
 def _pcm_rms_level(data: bytes, max_expected: float = 9000.0) -> float:
     """Normalize signed-int16 mono PCM for the Voice Assistant spectrum HUD."""
@@ -185,6 +220,49 @@ _speaker_breaker  = CircuitBreaker(name="hoparlör", failure_threshold=3, cooldo
 def _get_api_key() -> str:
     from jarvis.core.secure_config import get_gemini_api_key
     return get_gemini_api_key()
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on", "evet")
+
+
+def _vad_setting(name: str):
+    raw = os.environ.get(_VAD_ENV[name], "").strip().lower()
+    default = VAD_DEFAULTS[name]
+    if name in _VAD_MS_RANGE:
+        lo, hi = _VAD_MS_RANGE[name]
+        try:
+            value = int(raw)
+        except ValueError:
+            return default
+        return value if lo <= value <= hi else default
+    return raw if raw in ("high", "low") else default
+
+
+def _realtime_input_config() -> types.RealtimeInputConfig:
+    """Otomatik konusma algilama ayarlari (VAD_DEFAULTS + ortam degiskenleri)."""
+    start = _vad_setting("start_of_speech_sensitivity")
+    end = _vad_setting("end_of_speech_sensitivity")
+    return types.RealtimeInputConfig(
+        automatic_activity_detection=types.AutomaticActivityDetection(
+            disabled=False,
+            start_of_speech_sensitivity=(types.StartSensitivity.START_SENSITIVITY_HIGH
+                                         if start == "high" else types.StartSensitivity.START_SENSITIVITY_LOW),
+            end_of_speech_sensitivity=(types.EndSensitivity.END_SENSITIVITY_HIGH
+                                       if end == "high" else types.EndSensitivity.END_SENSITIVITY_LOW),
+            prefix_padding_ms=_vad_setting("prefix_padding_ms"),
+            silence_duration_ms=_vad_setting("silence_duration_ms"),
+        )
+    )
+
+
+# Konusma tanimanin sik bolerek ya da yanlis duydugu komut kelimeleri.
+_COMMAND_VOCABULARY = (
+    "KOMUT SÖZLÜĞÜ: Kullanıcı sık sık şu kelimeleri söyler: Jarvis, yedek, masaüstü, "
+    "terminal, dosya, notlar, onay, evet, hayır. Konuşma tanıma bunları hecelere "
+    "bölebilir ya da benzer bir kelime gibi yazabilir (ör. 'Pro je nin', 'ma saüs tü'); "
+    "en yakın komut kelimesi olarak anla."
+)
 
 
 def _load_system_prompt() -> str:
@@ -275,13 +353,60 @@ def _close_audio_stream(stream) -> None:
                 pass
 
 
+_AUTH_TEXT_MARKERS = (
+    "api key not valid", "api_key_invalid", "invalid api key",
+    "unauthenticated", "permission_denied", "permission denied",
+    "authentication",
+)
+# Sayilar kelime sinirli: "retry in 31007s" ya da "31007sn" auth hatasi degil.
+_AUTH_CODE_RE = re.compile(r"\b(?:401|403|1007)\b")
+# WebSocket 1007 (invalid frame payload / invalid argument) ve 1008 (policy
+# violation): sunucu bir canli oturum ayarini reddetti, anahtar degil.
+_CONFIG_REJECT_RE = re.compile(r"\b(?:1007|1008)\b|invalid[ _]argument")
+_KEY_LIKE_RE = re.compile(r"AIza[0-9A-Za-z_\-]{10,}|([?&]key=)[^&\s]+")
+
+
+def _has_auth_text(text: str) -> bool:
+    return any(marker in text for marker in _AUTH_TEXT_MARKERS)
+
+
+def _is_config_rejection(error_text: str) -> bool:
+    """1007/1008/invalid argument kapanisi, anahtar metni olmadan."""
+    text = (error_text or "").casefold()
+    return not _has_auth_text(text) and bool(_CONFIG_REJECT_RE.search(text))
+
+
 def _is_auth_error(error_text: str) -> bool:
     text = (error_text or "").casefold()
-    return any(marker in text for marker in (
-        "api key not valid", "api_key_invalid", "invalid api key",
-        "unauthenticated", "permission_denied", "permission denied",
-        "authentication", "401", "403", "1007",
-    ))
+    if _has_auth_text(text):
+        return True
+    if _is_config_rejection(text):
+        return False
+    return bool(_AUTH_CODE_RE.search(text))
+
+
+def _mask_key_like(text) -> str:
+    return _KEY_LIKE_RE.sub(lambda m: (m.group(1) or "") + "***", str(text or ""))
+
+
+def _config_rejection_message(error_text: str) -> str:
+    return f"canlı oturum ayarı reddedildi: {_mask_key_like(error_text)[:300]}"
+
+
+def _describe_live_error(exc: BaseException, depth: int = 0) -> list[str]:
+    """Yeniden baglanma dongusu icin: tur + maskelenmis mesaj (<=300) + son
+    traceback satirinin dosya:satir'i. Tam traceback ve yol yazilmaz.
+    ExceptionGroup'un alt istisnalari girintili olarak eklenir."""
+    line = f"{'  ' * depth}{type(exc).__name__}: {_mask_key_like(exc)[:300]}"
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+    if frames:
+        last = frames[-1]
+        line += f" @ {Path(last.filename).name}:{last.lineno} {type(exc).__name__}"
+    lines = [line]
+    if isinstance(exc, BaseExceptionGroup) and depth < 5:
+        for sub in exc.exceptions[:10]:
+            lines.extend(_describe_live_error(sub, depth + 1))
+    return lines
 
 TOOL_DECLARATIONS = [
     {
@@ -2348,6 +2473,8 @@ class JarvisLive:
             "NEVER emit system warnings with numbers that no tool produced."
         )
 
+        parts.append(_COMMAND_VOCABULARY)
+
         parts.append(
             "FINAL LANGUAGE RULE: Answer this user only in natural Turkish. Do not answer "
             "in Russian, Telugu, or any other language merely because speech recognition "
@@ -2357,7 +2484,10 @@ class JarvisLive:
         return types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             output_audio_transcription={},
-            input_audio_transcription={},
+            input_audio_transcription=(
+                types.AudioTranscriptionConfig(language_codes=list(TRANSCRIPTION_LANGUAGE_CODES))
+                if _env_flag("JARVIS_STT_LANG") else {}),
+            realtime_input_config=_realtime_input_config() if _env_flag("JARVIS_VAD") else None,
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": (
                 list(TOOL_DECLARATIONS)
@@ -2366,6 +2496,7 @@ class JarvisLive:
             max_output_tokens=16384,
             session_resumption=types.SessionResumptionConfig() if self._first_connect else None,
             speech_config=types.SpeechConfig(
+                language_code=SPEECH_LANGUAGE_CODE if _env_flag("JARVIS_TTS_LANG") else None,
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
                         voice_name="Charon"
@@ -3667,9 +3798,13 @@ class JarvisLive:
                 # start shutdown — resulting in "executor after shutdown" errors).
                 err_str = str(e)
                 auth_error = _is_auth_error(err_str)
-                # Do not echo exception text or traceback: SDK errors can carry
-                # request metadata. Authentication waits for user correction
-                # instead of retrying a known-invalid key.
+                # SDK errors can carry request metadata: never echo raw text or a
+                # full traceback. Print type + key-masked message (<=300) + the
+                # last frame's file:line, sub-exceptions of an ExceptionGroup too.
+                # Authentication waits for user correction instead of retrying
+                # a known-invalid key.
+                for detail in _describe_live_error(e):
+                    print(f"[JARVIS] {detail}")
                 if auth_error:
                     print("[JARVIS] Authentication requires user correction.")
                     self.ui.write_log("ERR: API key invalid — please re-enter your key.")
@@ -3681,14 +3816,24 @@ class JarvisLive:
                     self._conn_backoff = 3
                     continue
 
-                print(f"[JARVIS] Error ({type(e).__name__}); reconnect will be delayed.")
+                # 1007/1008 kapanisi anahtar degil ayar sorunu: anahtar penceresini
+                # acma, ayni ayarla hizla tekrar denememek icin yavas yeniden dene.
+                config_rejected = _is_config_rejection(err_str)
+                if config_rejected:
+                    msg = _config_rejection_message(err_str)
+                    print(f"[JARVIS] {msg}")
+                    self.ui.write_log(f"ERR: {msg}")
+                else:
+                    print(f"[JARVIS] Error ({type(e).__name__}); reconnect will be delayed.")
 
                 # Network / timeout errors — log clearly and back off
                 is_net_err = any(k in err_str for k in (
                     "TimeoutError", "timed out", "getaddrinfo", "CancelledError",
                     "ConnectionRefusedError", "OSError", "Cannot connect",
                 ))
-                if is_net_err:
+                if config_rejected:
+                    self._conn_backoff = 30
+                elif is_net_err:
                     _conn_backoff = min(getattr(self, "_conn_backoff", 3) * 2, 60)
                     self._conn_backoff = _conn_backoff
                     self.ui.write_log(
