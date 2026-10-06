@@ -208,6 +208,10 @@ class CodingTask:
     same_write_key: str = ""
     same_write_count: int = 0
     stop_reason: str = ""
+    # ruff'in duzeltemedigi GERCEK hatalar (dosya -> metin) ve ayni hata serisi.
+    ruff_problems: dict = field(default_factory=dict)
+    ruff_sig: frozenset = frozenset()
+    ruff_streak: int = 0
 
 
 @dataclass
@@ -528,6 +532,7 @@ def _import_problems(files: dict, root: Path, timeout: int = _IMPORT_CHECK_TIMEO
 
 
 _PYTEST_TIMEOUT = 60
+_RUFF_STREAK_LIMIT = 3
 _SAME_WRITE_LIMIT = 3
 
 
@@ -616,6 +621,9 @@ def _verify_project(task, run_pytest=True):
                 problems.append(f"pytest FAILED: {(_pt.stdout or '')[-200:]}")
         except Exception as _pe:
             problems.append(f"pytest hatasi: {_pe}")
+    _rl = _ruff_blocking([task.project_path / f for f in task.files_written if f.endswith(".py")],
+                         task.project_path)
+    problems.extend(f"RUFF {ln}" for ln in _rl.splitlines() if ln.strip())
     for _mf in _missing_local_modules(task.files_written, task.project_path):
         problems.append(f"Eksik modül dosyası: {_mf} (import ediliyor ama yazılmadı)")
     _imp_problems, _ = _import_problems(task.files_written, task.project_path)
@@ -689,6 +697,36 @@ HER FONKSİYON ÇALIŞIR KOD İÇERMELİ. `python3 dosya.py` ile HATASIZ çalı�
 
 # ── Yardımcı Fonksiyonlar ────────────────────────────────────
 
+_EVAL_EXEC = frozenset({"eval", "exec"})
+_EVAL_EXEC_MSG = "eval/exec kullanma; ast.literal_eval ya da kendi ayrıştırıcını yaz"
+
+
+def _is_builtins_ref(node: ast.AST) -> bool:
+    """builtins / __builtins__ / __import__('builtins') ifadesi mi."""
+    if isinstance(node, ast.Name):
+        return node.id in ("builtins", "__builtins__")
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "__import__")
+
+
+def _eval_exec_call(tree: ast.AST) -> ast.Call | None:
+    """eval()/exec() cagrisi: dogrudan, builtins.eval, __import__(...).exec
+    ya da getattr(builtins, 'eval'). Kendi nesnesinin .eval() metodu serbest."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if isinstance(f, ast.Name) and f.id in _EVAL_EXEC:
+            return node
+        if isinstance(f, ast.Attribute) and f.attr in _EVAL_EXEC and _is_builtins_ref(f.value):
+            return node
+        if (isinstance(f, ast.Name) and f.id == "getattr" and len(node.args) >= 2
+                and _is_builtins_ref(node.args[0])
+                and isinstance(node.args[1], ast.Constant) and node.args[1].value in _EVAL_EXEC):
+            return node
+    return None
+
+
 def _validate_code(code: str, language: str = "python") -> tuple[bool, str]:
     """Kodda yasaklı kalıp var mı kontrol et."""
     for pattern, label in _FORBIDDEN_PATTERNS:
@@ -698,9 +736,13 @@ def _validate_code(code: str, language: str = "python") -> tuple[bool, str]:
     # Python syntax kontrolü
     if language == "python":
         try:
-            ast.parse(code)
+            tree = ast.parse(code)
         except SyntaxError as e:
             return False, f"SYNTAX_ERROR: line {e.lineno}: {e.msg}"
+        # Canli hata: "=" tusu eval() ile yazilmisti (kod enjeksiyonu).
+        bad = _eval_exec_call(tree)
+        if bad is not None:
+            return False, f"YASAK (line {bad.lineno}): {_EVAL_EXEC_MSG}"
 
     return True, "OK"
 
@@ -867,6 +909,54 @@ def _ruff_cmd() -> list[str] | None:
     return [sys.executable, "-m", "ruff"]
 
 
+# Yalnizca GERCEK hatalar engeller: sozdizimi (E9), F63x/F7xx, tanimsiz ad
+# (F821/F822/F823) ve yeniden tanim (F811). F401/E501 gibi stil kurallari
+# engellemez. pytest fikstur kaliplari F811 urettigi icin test dosyalarinda F811 yok.
+_RUFF_BLOCKING = "E9,F63,F7,F82,F811"
+_RUFF_BLOCKING_TESTS = "E9,F63,F7,F82"
+_RUFF_LINE_RE = re.compile(r"^(?P<file>[^:]+):\d+:\d+: (?P<rest>.*)$")
+
+
+def _ruff_select(path: Path) -> str:
+    return _RUFF_BLOCKING_TESTS if _is_test_file(path.name) else _RUFF_BLOCKING
+
+
+def _ruff_blocking(paths: list[Path], root: Path) -> str:
+    """Verilen .py dosyalarindaki engelleyici ruff bulgulari (concise, goreli yol)."""
+    cmd = _ruff_cmd()
+    paths = [p for p in paths if p.suffix == ".py" and p.is_file()]
+    if cmd is None or not paths:
+        return ""
+    groups: dict[str, list[str]] = {}
+    for p in paths:
+        groups.setdefault(_ruff_select(p), []).append(str(p))
+    out: list[str] = []
+    for select, files in groups.items():
+        try:
+            r = subprocess.run(
+                [*cmd, "check", "--isolated", "--quiet", "--no-cache",
+                 "--output-format", "concise", "--select", select, *files],
+                capture_output=True, text=True, timeout=30)
+        except Exception as e:
+            logger.debug(f"[Coder] ruff atlandı: {type(e).__name__}")
+            continue
+        text = (r.stdout or "").strip()
+        if text:
+            out.append(text)
+    prefix = str(root.resolve()) + os.sep
+    return "\n".join(out).replace(prefix, "").replace(str(root) + os.sep, "")
+
+
+def _ruff_signature(problems: dict) -> frozenset:
+    """Satir/sutun numarasindan bagimsiz hata imzasi (ayni hata = ayni imza)."""
+    sig = set()
+    for text in problems.values():
+        for line in text.splitlines():
+            m = _RUFF_LINE_RE.match(line.strip())
+            sig.add((m.group("file"), m.group("rest")) if m else line.strip())
+    return frozenset(sig)
+
+
 def _ruff_autofix(path: Path) -> tuple[str | None, str]:
     """Yazilan .py dosyasina LLM'siz on-duzeltme uygular.
 
@@ -889,7 +979,7 @@ def _ruff_autofix(path: Path) -> tuple[str | None, str]:
                        capture_output=True, text=True, timeout=20)
         remaining = subprocess.run(
             [*cmd, "check", *common, "--output-format", "concise",
-             "--select", "E9,F63,F7,F82", str(path)],
+             "--select", _ruff_select(path), str(path)],
             capture_output=True, text=True, timeout=20,
         )
         fixed = path.read_text(encoding="utf-8")
@@ -1122,6 +1212,19 @@ class AgenticCoder:
                 self._ui_progress(f"  ❌ {task.final_response}")
                 break
 
+            # ── ruff gercek hatalari: ayni hata 3 tur duzelmezse dur ──
+            _sig = _ruff_signature(task.ruff_problems)
+            task.ruff_streak = (task.ruff_streak + 1 if _sig and _sig == task.ruff_sig
+                                else (1 if _sig else 0))
+            task.ruff_sig = _sig
+            if task.ruff_streak > _RUFF_STREAK_LIMIT:
+                _txt = "; ".join(t.splitlines()[0] for t in task.ruff_problems.values() if t)
+                task.stop_reason = task.final_response = (
+                    f"RUFF HATASI düzelmedi ({_RUFF_STREAK_LIMIT} tur üst üste): {_txt[:400]} — görev durduruldu."
+                )
+                self._ui_progress(f"  ❌ {task.final_response}")
+                break
+
             # ── pytest geri bildirimi: SMART EXIT adayi + test dosyasi varsa ──
             if self._smart_exit_candidate(task) and any(map(_is_test_file, task.files_written)):
                 await asyncio.to_thread(self._sync_pytest, task)
@@ -1140,6 +1243,10 @@ class AgenticCoder:
                 prompt += "\n\n═══ EKSİK MODÜL DOSYASI (import ediliyor ama YOK) ═══\n"
                 for _am in _auto_missing:
                     prompt += f"  → {_am} eksik, yaz! (import eden dosya bu modülü bekliyor)\n"
+            if task.ruff_problems:
+                prompt += ("\n═══ RUFF: GERÇEK HATALAR (tanımsız ad / sözdizimi) — DÜZELTMEDEN "
+                           "ACCEPT YOK; dosyanın TAM halini yaz ═══\n")
+                prompt += "\n".join(task.ruff_problems.values())[:1500] + "\n"
             if task.import_problems:
                 prompt += "\n═══ IMPORT DENEMESİ BAŞARISIZ (düzelt) ═══\n"
                 prompt += "\n".join(f"  {p}" for p in task.import_problems[:5]) + "\n"
@@ -1323,6 +1430,10 @@ class AgenticCoder:
                         self._ui_progress(f"    🧹 ruff: {filename} otomatik düzeltildi")
                     content = _fixed
                 if _ruff_left:
+                    task.ruff_problems[filename] = _ruff_left
+                else:
+                    task.ruff_problems.pop(filename, None)
+                if _ruff_left:
                     last_error = (
                         f"RUFF ({filename}) kalan hatalar — SADECE bunlari duzelt, "
                         f"dosyanin TAM halini yaz:\n{_ruff_left}"
@@ -1478,7 +1589,7 @@ class AgenticCoder:
             _enforce.add('tests/__init__.py')
         if not (set(task.expected_files) | _enforce).issubset(task.files_written):
             return False
-        if task.import_problems:
+        if task.import_problems or task.ruff_problems:
             return False
         for _fn, _fc in task.files_written.items():
             # Sadece .py derlenir; README.md'yi derlemek SMART EXIT'i
