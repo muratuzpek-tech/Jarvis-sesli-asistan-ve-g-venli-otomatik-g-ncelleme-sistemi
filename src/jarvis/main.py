@@ -694,8 +694,13 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "check_agent_board",
-        "description": "Shows the status of all background tasks started with start_parallel_task — which are pending, running, completed, or failed. Use when the user asks to check on background tasks, or see the 'board'/'pano'.",
-        "parameters": {"type": "OBJECT", "properties": {}}
+        "description": "Shows the status of background tasks started with start_parallel_task — pending, started/running, finished successfully, or failed — with start/finish time, the project folder path and any missing module. Pass job_id (the id start_parallel_task returned) for one task's full result. Use when the user asks to check on background tasks, or see the 'board'/'pano'.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "job_id": {"type": "STRING", "description": "Optional task id from start_parallel_task; empty lists the last 10 tasks."},
+            },
+        }
     },
     {
         "name": "desktop_control",

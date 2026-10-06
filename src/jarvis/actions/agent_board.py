@@ -28,6 +28,12 @@ _STATUS_ICONS = {
     "completed": "✅",
     "failed": "❌",
 }
+_STATUS_LABELS = {
+    "pending": "bekliyor",
+    "running": "başladı, çalışıyor",
+    "completed": "bitti — başarılı",
+    "failed": "bitti — başarısız",
+}
 
 
 def _get_base_dir() -> Path:
@@ -99,7 +105,7 @@ def _run_job_in_background(job_id: str, description: str, language: str, project
     calisma dongusunu bloklamadan yurutur."""
     _update_job(job_id, status="running")
     try:
-        from jarvis.actions.dev_agent import dev_agent
+        from jarvis.actions.dev_agent import _build_succeeded, dev_agent, split_result_summary
 
         result = dev_agent(parameters={
             "description": description,
@@ -111,11 +117,14 @@ def _run_job_in_background(job_id: str, description: str, language: str, project
         # DUZELTME (2026-09-28): eskiden onay kodu hic verilmedigi icin dev_agent
         # yalnizca "ONAY GEREKLİ" donuyor, proje HIC olusmuyor ama is yine de
         # "completed" gorunuyordu. Artik yalnizca gercek basari "completed".
-        succeeded = "is working" in res_str or "çalışıyor" in res_str
+        summary, body = split_result_summary(res_str)
+        succeeded = "Durum: BAŞARILI" in summary if summary else _build_succeeded(res_str)
+        # Sonuc blogu (durum, klasor, eksik modul) kesilmesin diye basta saklanir.
+        stored = f"{summary}\n\n{body[:500]}" if summary else res_str[:500]
         _update_job(
             job_id,
             status="completed" if succeeded else "failed",
-            result=res_str[:500],
+            result=stored,
             finished_at=datetime.now().isoformat(),
         )
     except Exception as e:
@@ -123,7 +132,7 @@ def _run_job_in_background(job_id: str, description: str, language: str, project
         _update_job(
             job_id,
             status="failed",
-            result=f"{type(e).__name__}: {e}",
+            result=f"Durum: BAŞARISIZ\nHata: {type(e).__name__}: {str(e)[:300]}",
             finished_at=datetime.now().isoformat(),
         )
 
@@ -181,33 +190,70 @@ def start_parallel_task(parameters: dict[str, Any] | None = None, player: Any = 
     thread.start()
 
     _log_player(player, f"[AgentBoard] Yeni görev başlatıldı: {job_id} — {description}")
-    return f"Görev arka planda başlatıldı (kimlik: {job_id}). Diğer işlerine devam edebilirsin, hazır olunca panoyu kontrol et."
+    return (f"Görev arka planda başlatıldı (kimlik: {job_id}). Diğer işlerine devam edebilirsin; "
+            f"durum, proje klasörü ve sonuç için check_agent_board(job_id='{job_id}') ile panoyu kontrol et.")
+
+
+def _clock(iso: str | None) -> str:
+    try:
+        return datetime.fromisoformat(iso).strftime("%H:%M:%S") if iso else ""
+    except ValueError:
+        return ""
+
+
+def _job_line(r: sqlite3.Row) -> str:
+    status = r["status"]
+    icon = _STATUS_ICONS.get(status, "•")
+    desc = (r["description"] or "")[:60]
+    times = f"başladı {_clock(r['started_at'])}"
+    if r["finished_at"]:
+        times += f", bitti {_clock(r['finished_at'])}"
+    return f"{icon} [{r['id']}] {desc} — {_STATUS_LABELS.get(status, status)} ({times})"
+
+
+def _summary_lines(result: str | None) -> list[str]:
+    """Saklanan sonuctan durum disindaki ozet satirlari (klasor, eksik modul, hata)."""
+    keep = ("Proje klasörü:", "Eksik modül:", "Hata:")
+    return [line for line in (result or "").splitlines() if line.startswith(keep)]
 
 
 def check_agent_board(parameters: dict[str, Any] | None = None, player: Any = None) -> str:
-    """Tum gorevlerin (calisan/tamamlanan/hatali) ozetini dondurur."""
+    """Tum gorevlerin (bekliyor/basladi/bitti/basarisiz) ozetini dondurur;
+    job_id verilirse o gorevin ayrintili sonucunu."""
+    job_id = str((parameters or {}).get("job_id", "") or "").strip()
+    columns = "id, description, status, result, started_at, finished_at"
     with _lock:
         try:
             conn = _connect()
             try:
                 conn.row_factory = sqlite3.Row
-                rows = conn.execute(
-                    "SELECT id, description, status, result FROM jobs ORDER BY started_at DESC LIMIT 10"
-                ).fetchall()
+                if job_id:
+                    rows = conn.execute(f"SELECT {columns} FROM jobs WHERE id = ?", (job_id,)).fetchall()  # nosec B608: sabit sutun listesi.
+                else:
+                    rows = conn.execute(
+                        f"SELECT {columns} FROM jobs ORDER BY started_at DESC LIMIT 10"  # nosec B608: sabit sutun listesi.
+                    ).fetchall()
             finally:
                 conn.close()
         except sqlite3.Error as e:
             logger.error("Failed to query agent board: %s", e)
             return f"Pano veritabanı okunamadı: {e}"
 
+    if job_id:
+        if not rows:
+            return f"Panoda '{job_id}' kimlikli görev bulunamadı."
+        r = rows[0]
+        detail = _job_line(r)
+        if r["result"]:
+            detail += "\n" + r["result"]
+        return detail
+
     if not rows:
         return "Panoda hiç görev yok."
 
     lines: list[str] = []
     for r in rows:
-        status = r["status"]
-        icon = _STATUS_ICONS.get(status, "•")
-        desc = (r["description"] or "")[:60]
-        lines.append(f"{icon} [{r['id']}] {desc} — {status}")
+        lines.append(_job_line(r))
+        lines.extend(f"    {line}" for line in _summary_lines(r["result"]))
 
     return "Ajan panosu:\n" + "\n".join(lines)

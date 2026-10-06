@@ -3150,6 +3150,39 @@ def _comprehensive_review(project_dir: Path, file_codes: dict, log=print):
     return issues
 
 
+RESULT_HEADER = "--- SONUÇ ---"
+_MISSING_MODULE_RE = re.compile(r"No module named ['\"]([A-Za-z0-9_\.]+)['\"]")
+
+
+def _build_succeeded(result: str) -> bool:
+    return "is working" in result or "çalışıyor" in result
+
+
+def _result_summary(result: str, project_dir: "Path | None") -> str:
+    """Kurulum sonucunun sonuna eklenen sabit blok: durum, proje klasoru,
+    varsa eksik moduller. Pano (agent_board) bu blogu ayri saklar."""
+    if project_dir is None:
+        found = re.search(re.escape(str(PROJECTS_DIR)) + r"[\\/][^\s'\"]+", result)
+        project_dir = Path(found.group(0).rstrip(".,;:—)")) if found else None
+    lines = [
+        RESULT_HEADER,
+        f"Durum: {'BAŞARILI' if _build_succeeded(result) else 'BAŞARISIZ'}",
+        f"Proje klasörü: {project_dir if project_dir is not None else 'oluşturulmadı'}",
+    ]
+    missing = list(dict.fromkeys(_MISSING_MODULE_RE.findall(result)))
+    if missing:
+        lines.append(f"Eksik modül: {', '.join(missing)}")
+    return "\n".join(lines)
+
+
+def split_result_summary(result: str) -> "tuple[str, str]":
+    """(sonuc blogu, govde). Blok yoksa ("", result)."""
+    body, sep, summary = (result or "").rpartition("\n\n" + RESULT_HEADER)
+    if not sep:
+        return "", result or ""
+    return RESULT_HEADER + summary, body
+
+
 def _build_project(
     description: str,
     language: str,
@@ -3157,6 +3190,7 @@ def _build_project(
     timeout: int,
     speak=None,
     player=None,
+    outcome: "dict | None" = None,
 ) -> str:
 
     def log(msg: str):
@@ -3212,6 +3246,8 @@ def _build_project(
         except OSError as exc:
             log(f"⚠️ Önceki proje arşivlenemedi ({exc}); dosyalar karışabilir.")
     project_dir.mkdir(parents=True, exist_ok=True)
+    if outcome is not None:
+        outcome["project_dir"] = project_dir
 
     files        = plan.get("files", [])
     entry_point  = plan.get("entry_point", "main.py")
@@ -3921,6 +3957,7 @@ def dev_agent(
         return problem
     pending = _pending_dev_agent[confirm_code]
 
+    outcome: dict = {}
     result = _build_project(
         description  = pending["description"],
         language     = pending["language"],
@@ -3928,7 +3965,9 @@ def dev_agent(
         timeout      = pending["timeout"],
         speak        = speak,
         player       = player,
+        outcome      = outcome,
     )
     if not result.startswith("Rate limit reached"):
         _pending_dev_agent.pop(confirm_code, None)
-    return result
+    # Sesli ozet (speak) degismez; yalnizca donen metne sabit sonuc blogu eklenir.
+    return f"{result}\n\n{_result_summary(result, outcome.get('project_dir'))}"
