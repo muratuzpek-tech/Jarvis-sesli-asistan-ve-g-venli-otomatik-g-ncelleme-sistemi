@@ -39,6 +39,7 @@ dependencies = [
     "cryptography>=42.0",
     "python-multipart>=0.0.9",
     "qrcode[pil]>=7.4",
+    "ollama>=0.4.7",
     "jc>=1.25",
     # agentic_coder: LLM'in yazdigi .py dosyalarini LLM'siz/kotasiz on-duzeltme
     # (ruff check --fix + format) ve kesik/bozuk LLM JSON ciktisini onarma.
