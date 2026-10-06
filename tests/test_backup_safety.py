@@ -26,6 +26,7 @@ Gercek proje klasorunun degismedigi oturum sonunda kontrol edilir.
 import ast
 import hashlib
 import os
+import sys
 import stat
 from pathlib import Path
 
@@ -89,6 +90,12 @@ def proj(tmp_path):
 
 # ── (1) atomik rollback ──
 
+_IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0   # Windows'ta geteuid yok
+_NO_POSIX_PERMS = sys.platform == "win32"
+_POSIX_PERMS_REASON = ("Windows'ta chmod yalnizca salt-okunur bayragini degistirir; "
+                       "klasor yazma/okuma izni kaldirilamadigi icin test ettigi hata olusturulamaz")
+
+
 def test_rollback_restores_backup_and_keeps_previous_state(proj):
     tool, p, backup = proj
     assert tool.rollback(backup) is True
@@ -98,7 +105,8 @@ def test_rollback_restores_backup_and_keeps_previous_state(proj):
     assert kept, "geri alma oncesi durum korunmadi"
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root izinleri yok sayar")
+@pytest.mark.skipif(_IS_ROOT, reason="root izinleri yok sayar")
+@pytest.mark.skipif(_NO_POSIX_PERMS, reason=_POSIX_PERMS_REASON)
 def test_failure_while_preparing_leaves_project_intact_and_returns_false(proj, capsys):
     tool, p, backup = proj
     secret = backup / "sub" / "b.txt"
@@ -110,7 +118,8 @@ def test_failure_while_preparing_leaves_project_intact_and_returns_false(proj, c
     assert not [d for d in tool.backups_root.iterdir() if d.name.startswith(".")], "gecici klasor kaldi"
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root izinleri yok sayar")
+@pytest.mark.skipif(_IS_ROOT, reason="root izinleri yok sayar")
+@pytest.mark.skipif(_NO_POSIX_PERMS, reason=_POSIX_PERMS_REASON)
 def test_failure_while_swapping_puts_old_project_back(proj, capsys):
     tool, p, backup = proj
     before = _tree_digest(p)
@@ -252,7 +261,8 @@ def test_modify_backs_up_target_and_auto_rollback_restores_only_it(brain):
     assert _tree_digest(fake_jarvis) == jarvis_before
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root izinleri yok sayar")
+@pytest.mark.skipif(_IS_ROOT, reason="root izinleri yok sayar")
+@pytest.mark.skipif(_NO_POSIX_PERMS, reason=_POSIX_PERMS_REASON)
 def test_modify_does_not_run_when_target_backup_fails(brain):
     orch, task, step, target, fake_jarvis, bo = brain
     fake_jarvis.parent.chmod(0o555)          # yedek klasoru olusturulamaz

@@ -35,8 +35,11 @@ def _guarded() -> list[Path]:
     conftest = sys.modules.get("conftest") or sys.modules.get("tests.conftest")
     if conftest is not None and hasattr(conftest, "REAL_AUDIT_LOGS"):
         return list(conftest.REAL_AUDIT_LOGS)
-    import pwd
-    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    try:
+        import pwd
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:  # Windows: pwd / os.getuid yok
+        home = Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
     return [home / ".jarvis" / "audit.log",
             home / ".local" / "share" / "MuratJARVIS" / "memory" / "audit.log"]
 
