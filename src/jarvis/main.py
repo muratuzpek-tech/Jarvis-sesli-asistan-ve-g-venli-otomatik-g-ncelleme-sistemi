@@ -966,16 +966,13 @@ class JarvisLive:
     # Güvenli varsayılan değerler — JarvisLive.__new__() ile oluşturulan
     # test nesneleri için. Gerçek __init__() bunları değiştirir.
     # GÜVENLİK DEĞİŞİKLİĞİ DEĞİL: Aynı değerler __init__'te zaten var.
-    _pending_dangerous_action = None
-    _pending_dangerous_fingerprint = None
-    _dangerous_confirmation_granted = False
-    _dangerous_confirmation_at = 0.0
     _pending_terminal_command = None
     # Onay durumu iki thread'den degistiriliyor: arayuz komut thread'i
     # (_on_text_command) ve asyncio thread'i (_execute_tool, sesli onay).
     # Kontrol-ve-degistir adimlari bu kilit altinda yapilmazsa kullanicinin X
     # icin verdigi "evet", tam o anda beklemeye alinan Y'yi onaylayabiliyordu.
     _confirmation_lock = threading.RLock()
+    _approvals_init_lock = threading.Lock()
 
     # Kullanicinin acik onay ifadeleri (noktalama temizlenmis, kucuk harf).
     _CONFIRMATION_WORDS = frozenset({
@@ -984,7 +981,7 @@ class JarvisLive:
         "tamam yap", "devam et", "approve", "approve it", "yes do it",
     })
     # Verilen onay bu kadar saniye gecerli; sonra yeniden sorulur.
-    _CONFIRMATION_TTL_S = 60.0
+    _CONFIRMATION_TTL_S = float(_gate.FOREGROUND_TTL_S)
 
     @staticmethod
     def _normalize_confirmation(text: str) -> str:
@@ -1021,27 +1018,120 @@ class JarvisLive:
         compact = norm.replace(" ", "")
         return compact in {w.replace(" ", "") for w in cls._CONFIRMATION_WORDS}
 
-    def _grant_dangerous_confirmation(self) -> None:
+    # ── Onay deposu (security_gate.MultiApprovalStore, plan Adim 3.3) ──
+    # Tek bekleyen-islem yuvasi yerine cok-istekli depo: her istek kendi
+    # parmak izi, request_id, turu (voice / agent_loop / brain_team) ve TTL'si
+    # ile tutulur; "evet" yalnizca EN SON duyurulan istegi onaylar. Asagidaki
+    # _pending_dangerous_* alanlari ve _set_pending_dangerous /
+    # _grant_dangerous_confirmation / _consume_dangerous_confirmation eski
+    # arayuzu koruyan ince bir uyumluluk katmanidir: "en son duyurulan" kaydi
+    # gosterir. Depo bu nesnenin _confirmation_lock'unu kullanir.
+
+    @property
+    def _approvals(self) -> "_gate.MultiApprovalStore":
+        store = self.__dict__.get("_approval_store")
+        if store is None:
+            with JarvisLive._approvals_init_lock:
+                store = self.__dict__.get("_approval_store")
+                if store is None:
+                    store = _gate.MultiApprovalStore(
+                        lock=self._confirmation_lock, on_drop=self._on_approval_dropped)
+                    self.__dict__["_approval_store"] = store
+        return store
+
+    @staticmethod
+    def _on_approval_dropped(rec) -> None:
+        """Onaylanmadan dusen terminal onizlemesinin approval_service kaydi
+        hemen iptal edilir (300 sn yasamasin)."""
+        if rec.code and rec.tool == "terminal":
+            approval_service.cancel(rec.code)
+
+    @property
+    def _pending_dangerous_action(self) -> str | None:
+        rec = self._approvals.latest_record()
+        return rec.tool if rec else None
+
+    @_pending_dangerous_action.setter
+    def _pending_dangerous_action(self, value) -> None:
+        if value is not None:
+            raise AttributeError("bekleyen istek _approvals.request ile eklenir")
+        self._approvals.cancel()
+
+    @property
+    def _pending_dangerous_fingerprint(self) -> str | None:
+        rec = self._approvals.latest_record()
+        return rec.fingerprint if rec else None
+
+    @_pending_dangerous_fingerprint.setter
+    def _pending_dangerous_fingerprint(self, value) -> None:
+        if value is not None:
+            raise AttributeError("bekleyen istek _approvals.request ile eklenir")
+        self._approvals.cancel()
+
+    @property
+    def _dangerous_confirmation_granted(self) -> bool:
+        rec = self._approvals.latest_record()
+        return bool(rec is not None and rec.granted_at is not None)
+
+    @_dangerous_confirmation_granted.setter
+    def _dangerous_confirmation_granted(self, value: bool) -> None:
+        """True: en son duyurulan istege kullanici onayi; False: onayi geri alir."""
         with self._confirmation_lock:
-            if self._pending_dangerous_action is None:
+            rid = self._approvals.latest()
+            if rid is None:
+                return
+            if value:
+                self._approvals.grant(rid)
+            else:
+                self._approvals.revoke(rid)
+
+    @property
+    def _dangerous_confirmation_at(self) -> float:
+        rec = self._approvals.latest_record()
+        return rec.granted_at if rec is not None and rec.granted_at is not None else 0.0
+
+    def _grant_dangerous_confirmation(self) -> None:
+        """Kullanicinin gercek turundaki "evet": yalnizca en son duyurulan istege."""
+        with self._confirmation_lock:
+            if self._approvals.latest() is None:
                 return
             self._dangerous_confirmation_granted = True
-            self._dangerous_confirmation_at = time.monotonic()
 
     def _confirmation_granted_for(self, action: str) -> bool:
-        """Bekleyen islem action ise ve kullanici onay verdiyse True."""
+        """En son duyurulan istek action ise ve kullanici onay verdiyse True."""
         with self._confirmation_lock:
-            return (
-                self._dangerous_confirmation_granted
-                and self._pending_dangerous_action == action
-            )
+            rec = self._approvals.latest_record()
+            return bool(rec is not None and rec.tool == action and rec.granted_at is not None)
+
+    @staticmethod
+    def _action_call(action: str, fingerprint: str | None = None) -> "_gate.ResolvedCall":
+        """Kendi onay akisi olan islemler (restart, game_shutdown, ...) ve
+        uyumluluk kayitlari icin argumansiz sozde cagri."""
+        call = _gate.ResolvedCall.for_pending(action, {})
+        if fingerprint and fingerprint != call.fingerprint:
+            call = _gate.ResolvedCall(tool=action, action=None, params={}, targets=(),
+                                      effect=_gate.Effect.EXECUTE, fingerprint=fingerprint)
+        return call
 
     def _set_pending_dangerous(self, action: str | None, fingerprint: str | None = None) -> None:
-        """Bekleyen islemi degistirir; verilmis bir onay YENI isleme tasinmaz."""
+        """Uyumluluk: action=None TUM bekleyen istekleri dusurur (sifirlama);
+        aksi halde action icin yeni bir istek EN SON duyurulan olur. Var olan
+        istekler ezilmez; verilmis bir onay yeni istege tasinmaz."""
         with self._confirmation_lock:
-            self._pending_dangerous_action = action
-            self._pending_dangerous_fingerprint = fingerprint
-            self._dangerous_confirmation_granted = False
+            if action is None:
+                self._approvals.cancel()
+                return
+            self._approvals.request(self._action_call(action, fingerprint))
+
+    def _queue_action_approval(self, action: str) -> str | None:
+        """Kendi onay akisi olan islem icin istek kuyruga girer. Kullanici bu
+        islemi az once reddettiyse istek eklenmez, modele ret metni doner."""
+        call = self._action_call(action)
+        with self._confirmation_lock:
+            if self._approvals.is_denied(call):
+                return _gate.rejected_message(call)
+            self._approvals.request(call)
+        return None
 
     @staticmethod
     def _action_fingerprint(action: str, args: dict) -> str:
@@ -1052,37 +1142,35 @@ class JarvisLive:
         return _gate_fingerprint(action, args)
 
     def _consume_dangerous_confirmation(self, action: str, args: dict) -> bool:
-        """Bekleyen islem ayni arac + ayni argumanlar ise ve gercek kullanici
-        onayi son _CONFIRMATION_TTL_S saniye icinde verildiyse True doner ve
-        onayi tuketir (tek kullanimlik)."""
-        fingerprint = self._action_fingerprint(action, args)
-        with self._confirmation_lock:
-            fresh = (time.monotonic() - self._dangerous_confirmation_at) <= self._CONFIRMATION_TTL_S
-            if (
-                self._dangerous_confirmation_granted
-                and self._pending_dangerous_action == action
-                and self._pending_dangerous_fingerprint == fingerprint
-                and fresh
-            ):
-                self._set_pending_dangerous(None)
-                return True
-            return False
+        """Ayni arac + ayni argumanlar icin gercek kullanici onayi son
+        _CONFIRMATION_TTL_S saniye icinde verildiyse True doner ve o istegi
+        tuketir (tek kullanimlik). Diger bekleyen istekler yerinde kalir."""
+        return self._approvals.consume(_gate.ResolvedCall.for_pending(action, args))
 
     # Arac onizleme kodlari (file_controller tasima/toplu silme, code_helper
     # uzerine yazma, self_improve, terminal) MODELE GOSTERILMEZ. Kodu ayiklama,
-    # saklama ve gercek kullanici onayindan sonra araca geri verme artik
-    # security_gate'te (finish / PendingSlotAdapter.take_grant/remember_code);
-    # burada yalnizca saklama yeri ve "hayir"da iptal kaldi.
-    _tool_confirm_code: tuple[str, str, str] | None = None  # (arac, parmak izi, kod)
+    # saklama ve gercek kullanici onayindan sonra araca geri verme
+    # security_gate'te (finish / MultiApprovalStore.take_grant/remember_code);
+    # kod ait oldugu onay isteginde saklanir.
+
+    @property
+    def _tool_confirm_code(self) -> tuple[str, str, str] | None:  # (arac, parmak izi, kod)
+        recs = [r for r in self._approvals.records() if r.code]
+        return (recs[-1].tool, recs[-1].fingerprint, recs[-1].code) if recs else None
+
+    @_tool_confirm_code.setter
+    def _tool_confirm_code(self, value) -> None:
+        if value is not None:
+            raise AttributeError("onizleme kodu _approvals.remember_code ile saklanir")
+        self._discard_tool_confirm_code()
 
     def _discard_tool_confirm_code(self) -> None:
-        """Saklanan onizleme kodunu birakir. terminal kodlari approval_service'te
-        300 sn yasar; kullanici reddettiginde ya da yeni bir onizleme geldiginde
-        kayit hemen iptal edilir."""
-        pending = self._tool_confirm_code
-        self._tool_confirm_code = None
-        if pending and pending[0] == "terminal":
-            approval_service.cancel(pending[2])
+        """Saklanan onizleme kodlarini (ve onlarin onay isteklerini) birakir;
+        terminal kaydi approval_service'te hemen iptal edilir."""
+        with self._confirmation_lock:
+            for rec in self._approvals.records():
+                if rec.code:
+                    self._approvals.cancel(rec.request_id)
 
     @staticmethod
     def _strip_terminal_code(text: str) -> tuple[str, str | None]:
@@ -1091,23 +1179,42 @@ class JarvisLive:
 
     # ── Brain Team onayi ────────────────────────────────────────────────
     # Orkestrator HIGH riskli bir adimi beklemeye aldiginda (arka plan
-    # thread'inden) request_brain_team_approval'i cagirir. Bekleyen adim
-    # ayni tek kullanimlik, 60 sn TTL'li, parmak izi bagli mekanizmaya
-    # kaydedilir; parmak izi task_id + adim icerigini kapsar. Onaylanacak
-    # gorevin kimligi MODELDEN DEGIL, orkestratorun duyurusundan gelir;
-    # Gemini'ye brain_team approve araci yoktur.
-    _brain_pending_task_id: str | None = None
+    # thread'inden) request_brain_team_approval'i cagirir. Bekleyen adim onay
+    # deposuna brain_team turunde (10 dk TTL, onay 60 sn, tek kullanim)
+    # kaydedilir; parmak izi task_id + adim icerigini kapsar. Duyuru baska bir
+    # istegi EZMEZ: yeni istek en son duyurulan olur, digerleri sirada bekler.
+    # Onaylanacak gorevin kimligi MODELDEN DEGIL, orkestratorun duyurusundan
+    # gelir; Gemini'ye brain_team approve araci yoktur.
+
+    def _latest_of_kind(self, kind: str):
+        """En son duyurulan istek bu turdense o kayit, degilse None."""
+        rec = self._approvals.latest_record()
+        return rec if rec is not None and rec.kind == kind else None
+
+    @property
+    def _brain_pending_task_id(self) -> str | None:
+        recs = self._approvals.records(_gate.KIND_BRAIN_TEAM)
+        return recs[-1].task_id if recs else None
+
+    @_brain_pending_task_id.setter
+    def _brain_pending_task_id(self, value) -> None:
+        if value is not None:
+            raise AttributeError("Brain istegi request_brain_team_approval ile eklenir")
+        self._approvals.drop_kind(_gate.KIND_BRAIN_TEAM)
 
     @staticmethod
     def _brain_team_fingerprint_args(task_id: str, step: dict | None) -> dict:
         return {"task_id": task_id, "step": step}
 
     def request_brain_team_approval(self, task_id: str, step: dict, message: str) -> None:
-        fingerprint = self._action_fingerprint(
+        call = _gate.ResolvedCall.for_pending(
             "brain_team", self._brain_team_fingerprint_args(task_id, step))
         with self._confirmation_lock:
-            self._set_pending_dangerous("brain_team", fingerprint)
-            self._brain_pending_task_id = task_id
+            # Ayni gorevin onceki adimi duser; baska istekler kuyrukta kalir.
+            for rec in self._approvals.records(_gate.KIND_BRAIN_TEAM):
+                if rec.task_id == task_id:
+                    self._approvals.cancel(rec.request_id)
+            self._approvals.request(call, task_id=task_id, message=message)
         try:
             self.ui.write_log(f"[BRAIN_TEAM_ONAY] {message}")
         except Exception:
@@ -1128,9 +1235,10 @@ class JarvisLive:
         bekleyen Brain Team onayina cevapsa uygular. "evet" -> approve,
         "hayir" -> deny. Islendiyse True."""
         with self._confirmation_lock:
-            if self._pending_dangerous_action != "brain_team" or not self._brain_pending_task_id:
+            rec = self._latest_of_kind(_gate.KIND_BRAIN_TEAM)
+            if rec is None or not rec.task_id:
                 return False
-            task_id = self._brain_pending_task_id
+            task_id, rid = rec.task_id, rec.request_id
         rejected = self._is_rejection(text)
         confirmed = not rejected and self._is_confirmation(text)
         if not (rejected or confirmed):
@@ -1140,27 +1248,27 @@ class JarvisLive:
         from jarvis.core.task_manager import WAITING_APPROVAL
         orch = get_orchestrator()
 
+        ok = False
         if rejected:
             with self._confirmation_lock:
-                if self._brain_pending_task_id != task_id:
+                if self._approvals.latest() != rid:
                     return True  # bu arada yeni bir istek duyuruldu; ona dokunma
-                self._set_pending_dangerous(None)
-                self._brain_pending_task_id = None
+                self._approvals.deny(rid)
             result = orch.deny(task_id)
         else:
             task = orch.tasks.get(task_id) or {}
             step = task.get("payload", {}).get("pending_step") if task.get("status") == WAITING_APPROVAL else None
-            args = self._brain_team_fingerprint_args(task_id, step)
+            call = _gate.ResolvedCall.for_pending(
+                "brain_team", self._brain_team_fingerprint_args(task_id, step))
             with self._confirmation_lock:
-                if not self._dangerous_confirmation_granted:
-                    self._grant_dangerous_confirmation()
-                ok = step is not None and self._consume_dangerous_confirmation("brain_team", args)
-                if ok:
-                    self._brain_pending_task_id = None
-                elif self._pending_dangerous_action == "brain_team":
+                rec = self._approvals.get(rid)
+                if rec is not None and rec.granted_at is None:
+                    self._approvals.grant(rid)
+                ok = step is not None and rec is not None and self._approvals.consume(call)
+                if not ok and rec is not None:
                     # Sure dolmus ya da adim degismis: verilen onayi dusur ki
                     # kullanici yeniden "evet" diyebilsin; gorev calismaz.
-                    self._set_pending_dangerous("brain_team", self._pending_dangerous_fingerprint)
+                    self._approvals.revoke(rid)
             if ok:
                 result = orch.approve(task_id)
             else:
@@ -1171,15 +1279,56 @@ class JarvisLive:
         except Exception:
             pass
         self.speak(f"[BRAIN_TEAM_ONAY_SONUC] {result}. Bunu kullanıcıya kısaca bildir.")
+        if ok or rejected:
+            self._reannounce_latest()   # sirada bekleyen istek yeniden sorulur
         return True
 
+    def _reannounce_latest(self) -> None:
+        """Cevaplanan istekten sonra sirada bekleyen en son istegi kullaniciya
+        yeniden sorar (metin onay metinleriyle ayni maskeli metindir; onay
+        kodu yoktur)."""
+        with self._confirmation_lock:
+            rec = self._approvals.reannounce()
+        if rec is None:
+            return
+        text = rec.message or f"'{rec.tool}' işlemi kullanıcı onayı bekliyor."
+        how = (" Kullanıcı onaylarsa aracı AYNI parametrelerle BİR KEZ tekrar çağır; "
+               "onay gelmeden çağırma." if rec.kind == _gate.KIND_VOICE else "")
+        try:
+            self.ui.write_log(f"[ONAY_SIRADA] {text}")
+        except Exception:
+            pass
+        self.speak(
+            f"[ONAY_SIRADA] Sırada bekleyen onay isteği: {text} Bunu kullanıcıya "
+            "tekrar sor ve 'evet' ya da 'hayır' demesini bekle. Onayı yalnızca "
+            f"kullanıcının kendi cevabı verir; sen hiçbir araçla onay verme.{how}"
+        )
+
+    def _note_user_turn(self, text: str) -> None:
+        """Kullanicinin yeni (ret olmayan) turu: "hayir" ile reddedilen
+        cagrilar yeniden istenebilir."""
+        if str(text or "").strip() and not self._is_rejection(text):
+            self._approvals.clear_denials()
+
     # ── Arka plan gorev dongusu (agent_loop) onayi ──────────────────────
-    # Brain Team ile ayni mekanizma: agent_loop onay bekleyen bir adimi
-    # set_approval_hook ile buraya bildirir; adim tek kullanimlik, 60 sn TTL'li
-    # yuvaya gorev kimligi + arac + argumanlardan olusan parmak iziyle
-    # kaydedilir. Gemini'nin agent_loop aracinda approve YOKTUR; onay yalnizca
+    # Brain Team ile ayni depo: agent_loop onay bekleyen bir adimi
+    # set_approval_hook ile buraya bildirir; adim agent_loop turunde (10 dk
+    # TTL, onay 60 sn, tek kullanim) gorev kimligi + arac + argumanlardan
+    # olusan parmak iziyle kaydedilir. Modelin agent_loop(retry) cagrisi ayri
+    # bir sesli istektir (ayri request_id); biri digerini ezmez ya da tuketmez.
+    # Gemini'nin agent_loop aracinda approve YOKTUR; onay yalnizca
     # kullanicinin gercek turundaki "evet" ile verilir.
-    _agent_pending_task_id: str | None = None
+
+    @property
+    def _agent_pending_task_id(self) -> str | None:
+        recs = self._approvals.records(_gate.KIND_AGENT_LOOP)
+        return recs[-1].task_id if recs else None
+
+    @_agent_pending_task_id.setter
+    def _agent_pending_task_id(self, value) -> None:
+        if value is not None:
+            raise AttributeError("agent_loop istegi request_agent_loop_approval ile eklenir")
+        self._approvals.drop_kind(_gate.KIND_AGENT_LOOP)
 
     @staticmethod
     def _agent_loop_fingerprint_args(task_id: str, pending: dict | None) -> dict:
@@ -1188,18 +1337,20 @@ class JarvisLive:
                 "parameters": pending.get("parameters")}
 
     def request_agent_loop_approval(self, task_id: str, pending: dict, message: str) -> bool:
-        """agent_loop'un onay kancasi. Baska bir onay beklerken onun yuvasini
-        EZMEZ (kullanicinin X icin diyecegi "evet" Y'yi onaylamasin); ayni
-        adim zaten soruluyorsa tekrar konusmaz. Soruldu/soruluyorsa True."""
-        fingerprint = self._action_fingerprint(
+        """agent_loop'un onay kancasi. Baska bir istek beklerken bu adim
+        duyurulmaz (o istegi ezmez, kullanicinin X icin diyecegi "evet" Y'yi
+        onaylamaz); agent_loop her tick'te yeniden dener, adim kendi sirasinda
+        sorulur. Ayni adim zaten soruluyorsa tekrar konusmaz.
+        Soruldu/soruluyorsa True."""
+        call = _gate.ResolvedCall.for_pending(
             "agent_loop", self._agent_loop_fingerprint_args(task_id, pending))
         with self._confirmation_lock:
-            if self._pending_dangerous_action == "agent_loop":
-                return self._pending_dangerous_fingerprint == fingerprint
-            if self._pending_dangerous_action is not None:
+            mine = self._approvals.records(_gate.KIND_AGENT_LOOP)
+            if mine:
+                return any(r.fingerprint == call.fingerprint for r in mine)
+            if self._approvals.latest() is not None:
                 return False
-            self._set_pending_dangerous("agent_loop", fingerprint)
-            self._agent_pending_task_id = task_id
+            self._approvals.request(call, task_id=task_id, message=message)
         try:
             self.ui.write_log(f"[AGENT_LOOP_ONAY] {message}")
         except Exception:
@@ -1220,34 +1371,68 @@ class JarvisLive:
         spoken_ok = self._is_confirmation(spoken)
         rejected = self._is_rejection(spoken)
         with self._confirmation_lock:
-            if self._pending_dangerous_action is not None:
+            # Kismi transkript ayni tur icinde tekrar tekrar gelir ("hayır",
+            # "hayır istemiyorum"). Turun cevabi YALNIZCA tur basinda en son
+            # duyurulan istege aittir; "hayir" onu bir kez iptal eder, siradaki
+            # istege gecmez. Tur sirasinda yeni istek gelirse ona uygulanmaz.
+            turn = self.__dict__.get("_voice_turn")
+            if turn is None:
+                turn = self.__dict__["_voice_turn"] = {
+                    "rid": self._approvals.latest(), "denied": False}
+            rec = self._approvals.get(turn["rid"])
+            if (rec is not None and not turn["denied"]
+                    and self._approvals.latest() == rec.request_id):
                 if spoken_ok:
-                    if not self._dangerous_confirmation_granted:
-                        print(f"[JARVIS] ✅ Sesli onay alındı: {self._pending_dangerous_action}")
-                    self._grant_dangerous_confirmation()
-                elif rejected and self._pending_dangerous_action not in ("brain_team", "agent_loop"):
-                    self._set_pending_dangerous(None)
-                    self._discard_tool_confirm_code()
+                    if rec.granted_at is None:
+                        print(f"[JARVIS] ✅ Sesli onay alındı: {rec.tool}")
+                    self._approvals.grant(rec.request_id)
+                elif rejected and rec.kind == _gate.KIND_VOICE:
+                    self._approvals.deny(rec.request_id)
+                    turn["denied"] = True
                     print("[JARVIS] ⛔ Sesli ret: bekleyen işlem iptal edildi.")
-                elif self._dangerous_confirmation_granted:
+                elif rec.granted_at is not None:
                     # "Evet... hayır dur" gibi: cumlenin devami
                     # onayi geri aldiysa onayi iptal et.
-                    self._set_pending_dangerous(
-                        self._pending_dangerous_action,
-                        self._pending_dangerous_fingerprint,
-                    )
+                    self._approvals.revoke(rec.request_id)
                     print("[JARVIS] ↩️ Sesli onay geri alındı.")
             if rejected and self._pending_terminal_command is not None:
                 approval_service.cancel(self._pending_terminal_command.get("confirm_code", ""))
                 self._pending_terminal_command = None
 
+    def _voice_turn_reply_handler(self, full_in: str):
+        """Tamamlanan sesli tur bekleyen Brain Team / agent_loop onayina
+        cevapsa isleyicisini doner (olay dongusu disinda calistirilir), degilse
+        None. Tur kismi transkriptte bir sesli istegi zaten reddettiyse ya da
+        tur sirasinda yeni bir istek duyurulduysa cevap siradaki istege
+        uygulanmaz."""
+        with self._confirmation_lock:
+            turn = self.__dict__.pop("_voice_turn", None)
+        text = str(full_in or "").strip()
+        if not text:
+            return None
+        self._note_user_turn(text)
+        if not (self._is_confirmation(text) or self._is_rejection(text)):
+            return None
+        with self._confirmation_lock:
+            if turn is not None and (turn["denied"] or turn["rid"] != self._approvals.latest()):
+                return None
+            rec = self._approvals.latest_record()
+        if rec is None:
+            return None
+        if rec.kind == _gate.KIND_BRAIN_TEAM:
+            return lambda: self._handle_brain_team_reply(text)
+        if rec.kind == _gate.KIND_AGENT_LOOP:
+            return lambda: self._handle_agent_loop_reply(text)
+        return None
+
     def _handle_agent_loop_reply(self, text: str) -> bool:
         """Kullanicinin GERCEK turu bekleyen agent_loop onayina cevapsa uygular:
         "evet" -> approve_task, "hayir" -> deny_task. Islendiyse True."""
         with self._confirmation_lock:
-            if self._pending_dangerous_action != "agent_loop" or not self._agent_pending_task_id:
+            rec = self._latest_of_kind(_gate.KIND_AGENT_LOOP)
+            if rec is None or not rec.task_id:
                 return False
-            task_id = self._agent_pending_task_id
+            task_id, rid = rec.task_id, rec.request_id
         rejected = self._is_rejection(text)
         confirmed = not rejected and self._is_confirmation(text)
         if not (rejected or confirmed):
@@ -1257,23 +1442,23 @@ class JarvisLive:
 
         if rejected:
             with self._confirmation_lock:
-                if self._agent_pending_task_id != task_id:
+                if self._approvals.latest() != rid:
                     return True  # bu arada yeni bir istek duyuruldu; ona dokunma
-                self._set_pending_dangerous(None)
-                self._agent_pending_task_id = None
+                self._approvals.deny(rid)
             result = _agent_loop.deny_task(task_id)
         else:
             pending = _agent_loop.get_pending_action(task_id)
-            args = self._agent_loop_fingerprint_args(task_id, pending)
+            call = _gate.ResolvedCall.for_pending(
+                "agent_loop", self._agent_loop_fingerprint_args(task_id, pending))
             with self._confirmation_lock:
-                if not self._dangerous_confirmation_granted:
-                    self._grant_dangerous_confirmation()
-                ok = pending is not None and self._consume_dangerous_confirmation("agent_loop", args)
-                if not ok and self._pending_dangerous_action == "agent_loop":
+                rec = self._approvals.get(rid)
+                if rec is not None and rec.granted_at is None:
+                    self._approvals.grant(rid)
+                ok = pending is not None and rec is not None and self._approvals.consume(call)
+                if not ok:
                     # Sure dolmus ya da adim degismis: hicbir sey calismaz,
                     # guncel adim asagida yeniden sorulur.
-                    self._set_pending_dangerous(None)
-                self._agent_pending_task_id = None
+                    self._approvals.cancel(rid)
             if ok:
                 result = _agent_loop.approve_task(task_id, expected_action=pending)
             else:
@@ -1284,7 +1469,9 @@ class JarvisLive:
         except Exception:
             pass
         self.speak(f"[AGENT_LOOP_ONAY_SONUC] {result}. Bunu kullanıcıya kısaca bildir.")
-        # Siradaki bekleyen adim (ya da degismis adimin guncel hali) sorulur.
+        # Sirada bekleyen istek (varsa) ya da siradaki agent_loop adimi (ya da
+        # degismis adimin guncel hali) sorulur.
+        self._reannounce_latest()
         _agent_loop.announce_next_pending()
         return True
 
@@ -1332,13 +1519,17 @@ class JarvisLive:
 
         # ═══ TEK GUVENLIK KAPISI (E2) ═══
         _decision = _gate.authorize(tool_name, args, _gate.Source.MODEL_LIVE)
-        _store = _gate.PendingSlotAdapter(self)
+        _store = self._approvals
         if _decision.verdict is _gate.Verdict.DENY:
             _gate.audit(_decision, _decision.model_message, executed=False)
             return _decision.model_message
         _grant = _store.take_grant(_decision)
+        _rejected = _gate.rejected_by_user(_decision, _grant, _store)
+        if _rejected:
+            _gate.audit(_decision, _rejected, executed=False)
+            return _rejected
         if _decision.verdict is _gate.Verdict.NEEDS_APPROVAL and _grant is None:
-            _store.request(_decision.call)
+            _store.request(_decision.call, message=_decision.user_prompt)
             _gate.audit(_decision, _decision.model_message, executed=False)
             return (
                 f"{_decision.model_message} Bu yanıt bir sistem hatası değildir, "
@@ -1392,6 +1583,8 @@ class JarvisLive:
             # Bekleyen islem CAGRILAN aractir; sonuc metnindeki ad degil.
             # Normal bir aracin ciktisi (dis veri) "CONFIRMATION_REQUIRED:
             # agentic_code:..." ile baslayip baska bir araci onaya acamaz.
+            if _store.is_denied(_decision.call):
+                return _gate.rejected_message(_decision.call)
             _store.request(_decision.call)
             return (
                 f"{result} Kullanıcıya ne yapılacağını TEK cümleyle anlat ve "
@@ -1461,9 +1654,12 @@ class JarvisLive:
         # Modelin kendi ürettiği ``confirmed=yes`` güvenilir bir onay değildir.
         # Tehlikeli işlemler yalnızca gerçek bir sonraki kullanıcı turundan
         # gelen onayla ve tek kullanımlık olarak yetkilendirilir.
-        # Baslangic degerleri; calisma sirasinda bu alanlar YALNIZCA
-        # _set_pending_dangerous / _grant_dangerous_confirmation /
-        # _consume_dangerous_confirmation uzerinden degistirilir.
+        # Baslangic degerleri: bu alanlar onay deposunun (_approvals,
+        # MultiApprovalStore) uyumluluk gorunumudur; asagidaki atamalar depoyu
+        # bos baslatir. Calisma sirasinda istekler yalnizca depo uzerinden
+        # eklenir/onaylanir/tuketilir.
+        # Kilit depodan ONCE kurulur: onay deposu (_approvals) bu kilidi kullanir.
+        self._confirmation_lock = threading.RLock()
         self._pending_dangerous_action = None
         self._pending_dangerous_fingerprint: str | None = None
         self._dangerous_confirmation_granted = False
@@ -1471,7 +1667,6 @@ class JarvisLive:
         self._brain_pending_task_id = None
         self._agent_pending_task_id = None
         self._pending_terminal_command: dict | None = None
-        self._confirmation_lock = threading.RLock()
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
@@ -1537,11 +1732,12 @@ class JarvisLive:
         self._on_text_command(text)
 
     def _on_text_command(self, text: str):
-        # Kullanicinin cevabi, cevap verdigi AN bekleyen istege aittir. Bu tur
-        # islenirken baska bir thread'den (model, arka plan) yeni bir istek
-        # beklemeye alinirsa "evet" ona TASINMAZ - o istek ayrica sorulur.
+        # Kullanicinin cevabi, cevap verdigi AN en son duyurulan istege aittir.
+        # Bu tur islenirken baska bir thread'den (model, arka plan) yeni bir
+        # istek duyurulursa "evet" ona TASINMAZ - o istek ayrica sorulur.
         with self._confirmation_lock:
-            seen_pending = (self._pending_dangerous_action, self._pending_dangerous_fingerprint)
+            seen_pending = (self._pending_dangerous_action, self._approvals.latest())
+        self._note_user_turn(text)
         # Bekleyen Brain Team onayina verilen cevap Gemini oturumu olmasa da
         # islenir (gorev orkestratorde bekliyor, Live baglantisi gerekmez).
         if self._handle_brain_team_reply(text):
@@ -1553,25 +1749,35 @@ class JarvisLive:
         # Gemini oturumu olmasa da işlenir: "hayır" bekleyen onayı her durumda
         # iptal etmeli.
         is_confirmation = self._is_confirmation(text)
+        rejected = not is_confirmation and self._is_rejection(text)
+        reannounce = False
         pending_terminal = None
         with self._confirmation_lock:
-            current = (self._pending_dangerous_action, self._pending_dangerous_fingerprint)
-            if current[0] is not None and current != seen_pending:
+            latest = self._approvals.latest_record()
+            current = (self._pending_dangerous_action, latest.request_id if latest else None)
+            if latest is not None and current != seen_pending:
                 pass   # tur sirasinda yeni istek geldi: bu cevap ona ait degil
-            elif self._pending_dangerous_action is not None:
+            elif latest is not None:
                 if is_confirmation:
-                    self._grant_dangerous_confirmation()
-                else:
-                    # İlgisiz yeni bir tur, eski onayı ileride yanlışlıkla
-                    # kullanılabilir bırakmamalıdır (terminal kaydı dahil).
-                    self._set_pending_dangerous(None)
-                    self._discard_tool_confirm_code()
+                    self._approvals.grant(latest.request_id)
+                elif rejected and latest.kind == _gate.KIND_VOICE:
+                    # "hayir" yalnizca en son duyurulan istegi iptal eder.
+                    self._approvals.deny(latest.request_id)
+                    reannounce = True
+                elif not rejected:
+                    # İlgisiz yeni bir tur, sesli araç yolunun bekleyen
+                    # isteklerini ileride yanlışlıkla kullanılabilir
+                    # bırakmamalıdır (terminal kaydı dahil). Brain Team ve
+                    # agent_loop onaylarına dokunulmaz.
+                    self._approvals.drop_kind(_gate.KIND_VOICE)
             if self._pending_terminal_command is not None:
                 if is_confirmation:
                     pending_terminal = dict(self._pending_terminal_command)
                 else:
                     approval_service.cancel(self._pending_terminal_command.get("confirm_code", ""))
                 self._pending_terminal_command = None
+        if reannounce:
+            self._reannounce_latest()   # sirada bekleyen istek yeniden sorulur
         if not self._loop or not self.session:
             return
         if pending_terminal is not None:
@@ -2149,14 +2355,18 @@ class JarvisLive:
         # argumanlar, 60 sn, tek kullanim); modelin confirm_code'u yok sayilir.
         # Aracin kendi onizleme kodu modele gitmez (security_gate.finish).
         _decision = _gate.authorize(name, args, _gate.Source.MODEL_LIVE)
-        _store = _gate.PendingSlotAdapter(self)
+        _store = self._approvals
         if _decision.verdict is _gate.Verdict.DENY:
             _gate.audit(_decision, _decision.model_message, executed=False)
             return types.FunctionResponse(id=fc.id, name=name,
                                           response={"result": _decision.model_message})
         _grant = _store.take_grant(_decision)
+        _rejected = _gate.rejected_by_user(_decision, _grant, _store)
+        if _rejected:
+            _gate.audit(_decision, _rejected, executed=False)
+            return types.FunctionResponse(id=fc.id, name=name, response={"result": _rejected})
         if _decision.verdict is _gate.Verdict.NEEDS_APPROVAL and _grant is None:
-            _store.request(_decision.call)
+            _store.request(_decision.call, message=_decision.user_prompt)
             _gate.audit(_decision, _decision.model_message, executed=False)
             return types.FunctionResponse(id=fc.id, name=name,
                                           response={"result": _decision.model_message})
@@ -2309,18 +2519,16 @@ class JarvisLive:
                         _computer_action = "restart"
                 if (
                     _computer_action in {"restart", "shutdown", "lock_screen"}
-                    and self._confirmation_granted_for(_computer_action)
+                    and self._approvals.consume(self._action_call(_computer_action))  # tek kullanimlik
                 ):
                     _computer_args["_user_confirmation_granted"] = True
                 r = await loop.run_in_executor(
                     None,
                     lambda: computer_settings(parameters=_computer_args, response=None, player=self.ui),
                 )
-                if _computer_action in {"restart", "shutdown", "lock_screen"}:
-                    if str(r).startswith("CONFIRMATION_REQUIRED:"):
-                        self._set_pending_dangerous(_computer_action)
-                    else:
-                        self._set_pending_dangerous(None)
+                if _computer_action in {"restart", "shutdown", "lock_screen"} \
+                        and str(r).startswith("CONFIRMATION_REQUIRED:"):
+                    r = self._queue_action_approval(_computer_action) or r
                 result = r or "Done."
 
             elif name == "terminal":
@@ -2410,14 +2618,10 @@ class JarvisLive:
                 _game_shutdown_requested = str(_game_args.get("shutdown_when_done", "false")).lower() == "true"
                 if _game_shutdown_requested:
                     _game_action = "game_shutdown"
-                    with self._confirmation_lock:
-                        _game_confirmed = self._confirmation_granted_for(_game_action)
-                        if _game_confirmed:
-                            self._set_pending_dangerous(None)  # tek kullanimlik
-                        else:
-                            self._set_pending_dangerous(_game_action)
+                    _game_confirmed = self._approvals.consume(self._action_call(_game_action))  # tek kullanimlik
+                    _game_rejected = None if _game_confirmed else self._queue_action_approval(_game_action)
                     if not _game_confirmed:
-                        result = "CONFIRMATION_REQUIRED:game_shutdown: İndirme tamamlanınca bilgisayar kapatılacak. Açıkça onaylıyor musunuz?"
+                        result = _game_rejected or "CONFIRMATION_REQUIRED:game_shutdown: İndirme tamamlanınca bilgisayar kapatılacak. Açıkça onaylıyor musunuz?"
                         r = None
                     else:
                         _game_args["_user_confirmation_granted"] = True
@@ -2441,12 +2645,10 @@ class JarvisLive:
                 result = str(r)
 
             elif name == "shutdown_jarvis":
-                with self._confirmation_lock:
-                    _shutdown_confirmed = self._confirmation_granted_for("shutdown_jarvis")
-                    if not _shutdown_confirmed:
-                        self._set_pending_dangerous("shutdown_jarvis")
+                _shutdown_confirmed = self._approvals.consume(self._action_call("shutdown_jarvis"))
+                _shutdown_rejected = None if _shutdown_confirmed else self._queue_action_approval("shutdown_jarvis")
                 if not _shutdown_confirmed:
-                    result = "CONFIRMATION_REQUIRED:shutdown_jarvis: JARVIS kapatılacak. Açıkça onaylıyor musunuz?"
+                    result = _shutdown_rejected or "CONFIRMATION_REQUIRED:shutdown_jarvis: JARVIS kapatılacak. Açıkça onaylıyor musunuz?"
                 else:
                     self.ui.write_log("SYS: Shutdown requested.")
                     self.speak("Goodbye, sir.")
@@ -2773,6 +2975,7 @@ class JarvisLive:
                             # flag and skip all further processing for that turn.
                             if self._interrupted:
                                 self._interrupted = False
+                                self.__dict__.pop("_voice_turn", None)
                                 in_buf  = []
                                 out_buf = []
                                 continue
@@ -2795,19 +2998,9 @@ class JarvisLive:
                             # ("evet... hayir dur" yanlislikla onay vermez).
                             # approve adimi calistirdigi icin olay dongusu
                             # bloklanmaz.
-                            if (
-                                full_in
-                                and self._brain_pending_task_id
-                                and (self._is_confirmation(full_in) or self._is_rejection(full_in))
-                            ):
-                                self._loop.run_in_executor(None, self._handle_brain_team_reply, full_in)
-                                full_in = ""
-                            elif (
-                                full_in
-                                and self._agent_pending_task_id
-                                and (self._is_confirmation(full_in) or self._is_rejection(full_in))
-                            ):
-                                self._loop.run_in_executor(None, self._handle_agent_loop_reply, full_in)
+                            _reply_handler = self._voice_turn_reply_handler(full_in)
+                            if _reply_handler is not None:
+                                self._loop.run_in_executor(None, _reply_handler)
                                 full_in = ""
                             # Sesli komutlardan dosya islemlerini deterministik router'a aktar.
                             try:

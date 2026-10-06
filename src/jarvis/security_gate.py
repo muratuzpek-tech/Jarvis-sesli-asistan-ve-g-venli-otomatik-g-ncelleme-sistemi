@@ -9,13 +9,16 @@ engellenen her çağrı audit()'e yazılır.
 ADIM 3.0: MODEL_LIVE kaynağından yalnızca modelin gerçekten erişebildiği
 araçlar kabul edilir (iç araçlar DENY, onay yuvasına dokunmaz).
 ADIM 3.1: tek denetim kaydı JARVIS_HOME/memory/audit.log (core/audit_log).
+ADIM 3.3: tek onay yuvası yerine MultiApprovalStore; modelin uydurduğu
+discovered_* adları DENY (bekleyen onaya dokunmaz).
 
 İçerik:
 
   * kapının veri tipleri (Source, Effect, Verdict, ResolvedCall, Decision),
-  * onay deposu arayüzü (ApprovalStore) ve bugünkü TEK onay yuvasını
-    (main.JarvisLive._set_pending_dangerous / _grant_dangerous_confirmation /
-    _consume_dangerous_confirmation) saran adaptör (PendingSlotAdapter),
+  * onay deposu arayüzü (ApprovalStore), çok-istekli onay deposu
+    (MultiApprovalStore, Adım 3.3: her istek kendi parmak izi, request_id,
+    türü ve TTL'si ile; "evet" yalnızca en son duyurulana) ve eski tek-yuva
+    arayüzünü bu depoya bağlayan ince sarmalayıcı (PendingSlotAdapter),
   * onay parmak izinin TEK kaynağı (fingerprint; main._action_fingerprint
     buraya devreder),
   * her araç için bir ToolSpec ve araçların HANGİ giriş yollarından
@@ -36,9 +39,13 @@ import abc
 import ast
 import enum
 import functools
+import itertools
 import os
 import re
 import shlex
+import threading
+import time
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -172,61 +179,333 @@ class ApprovalStore(abc.ABC):
         """Aracın önizleme kodunu saklar ve çağrıyı onay bekleyen yapar."""
 
 
-class PendingSlotAdapter(ApprovalStore):
-    """Bugünkü tek onay yuvasını (main.JarvisLive) ApprovalStore olarak
-    sunar. Hiçbir kural eklemez/değiştirmez: TTL (_CONFIRMATION_TTL_S), tek
-    kullanım, parmak izi eşleşmesi ve "yeni istek eski onayı taşımaz"
-    davranışları olduğu gibi main.py'den gelir."""
+# ── Çok-istekli onay deposu (Adım 3.3) ────────────────────────────────────
+#
+# Kullanıcı kararları (2026-10-06): sesli araç yolu onayı 60 sn, arka plan
+# (Brain Team / agent_loop) isteği 10 dk geçerli; "evet" yalnızca EN SON
+# duyurulan isteği onaylar, "hayır" yalnızca onu iptal eder; diğerleri
+# bekler ve sırayla yeniden sorulur.
 
-    def __init__(self, owner: Any) -> None:
-        self._owner = owner
+FOREGROUND_TTL_S = 60
+BACKGROUND_TTL_S = 600
 
-    def request(self, call: ResolvedCall) -> str:
-        self._owner._set_pending_dangerous(call.tool, call.fingerprint)
-        return call.fingerprint
+KIND_VOICE = "voice"              # sesli araç yolu (E1/E2) ve uyumluluk kayıtları
+KIND_AGENT_LOOP = "agent_loop"    # arka plan görev döngüsünün onay bekleyen adımı
+KIND_BRAIN_TEAM = "brain_team"    # Brain Team orkestratörünün onay bekleyen adımı
+
+_BACKGROUND_KINDS = {Source.AGENT_LOOP: KIND_AGENT_LOOP, Source.BRAIN_TEAM: KIND_BRAIN_TEAM}
+
+
+def _kind_of(call: ResolvedCall) -> str:
+    """İsteğin türü çağrının KAYNAĞINDAN gelir, araç adından değil: modelin
+    agent_loop(retry) çağrısı (MODEL_LIVE) sesli istektir; arka plan döngüsünün
+    adımı (ResolvedCall.for_pending, kaynak yok) agent_loop isteğidir."""
+    if call.source is not None:
+        return _BACKGROUND_KINDS.get(call.source, KIND_VOICE)
+    return {"agent_loop": KIND_AGENT_LOOP, "brain_team": KIND_BRAIN_TEAM}.get(call.tool, KIND_VOICE)
+
+
+@dataclass
+class ApprovalRequest:
+    """Depodaki tek onay isteği. request_id iç kimliktir; modele verilmez."""
+    request_id: str
+    call: ResolvedCall
+    kind: str
+    background: bool
+    task_id: str | None
+    asked_at: float                 # son duyurulma anı (arka planda: ilk duyuru)
+    seq: int                        # duyuru sırası; en büyüğü "en son duyurulan"
+    message: str | None = None      # yeniden sorulurken kullanıcıya okunacak metin
+    code: str | None = None         # aracın kendi önizleme kodu (modele gitmez)
+    granted_at: float | None = None
+
+    @property
+    def tool(self) -> str:
+        return self.call.tool
+
+    @property
+    def fingerprint(self) -> str:
+        return self.call.fingerprint
+
+    @property
+    def ttl(self) -> float:
+        return BACKGROUND_TTL_S if self.background else FOREGROUND_TTL_S
+
+
+class MultiApprovalStore(ApprovalStore):
+    """Her isteği kendi parmak izi, request_id, türü ve TTL'si ile tutar.
+
+    * request(): istek EN SON duyurulan olur; var olan istekler silinmez.
+      Aynı tür + aynı parmak izi yeniden istenirse eskisi düşer (verilmiş
+      onay yeni isteğe taşınmaz).
+    * answer(True/False): yalnızca en son duyurulan isteğe uygulanır.
+    * consume(): parmak izi eşleşen, kullanıcı onayı FOREGROUND_TTL_S
+      içinde verilmiş isteği tüketir (tek kullanım).
+    * Süresi dolan istekler görünmez: sesli istek son duyurusundan
+      FOREGROUND_TTL_S, arka plan isteği ilk duyurusundan BACKGROUND_TTL_S
+      sonra düşer. expire() düşen arka plan isteklerini (bildirim için) döner.
+    * "hayır" ile iptal edilen parmak izi, kullanıcının bir sonraki (ret
+      olmayan) turuna kadar reddedilmiş sayılır (is_denied); model aynı
+      çağrıyı hemen yeniden isteyip kuyruğun başına geçemez.
+
+    Onay yalnızca girdi katmanının bildirdiği gerçek kullanıcı turundan gelir;
+    bu sınıf kod üretmez ve modele hiçbir şey döndürmez.
+    """
+
+    def __init__(self, *, clock: Callable[[], float] | None = None, lock=None,
+                 on_drop: Callable[[ApprovalRequest], None] | None = None) -> None:
+        # time.monotonic çağrı anında okunur (testler onu yamayabilir).
+        self._clock = clock or (lambda: time.monotonic())
+        self._lock = lock if lock is not None else threading.RLock()
+        self._on_drop = on_drop
+        self._items: dict[str, ApprovalRequest] = {}
+        self._seq = itertools.count(1)
+        self._denied: set[str] = set()
+
+    # -- iç yardımcılar (kilit altında çağrılır) --
+
+    def _visible(self, rec: ApprovalRequest, now: float) -> bool:
+        if rec.granted_at is not None and now - rec.granted_at <= FOREGROUND_TTL_S:
+            return True
+        return now - rec.asked_at <= rec.ttl
+
+    def _ordered(self, kind: str | None = None) -> list[ApprovalRequest]:
+        now = self._clock()
+        return sorted((r for r in self._items.values()
+                       if self._visible(r, now) and (kind is None or r.kind == kind)),
+                      key=lambda r: r.seq)
+
+    def _drop(self, rid: str) -> ApprovalRequest | None:
+        rec = self._items.pop(rid, None)
+        if rec is not None and self._on_drop is not None:
+            try:
+                self._on_drop(rec)
+            except Exception:
+                pass
+        return rec
+
+    def _purge_foreground(self) -> None:
+        now = self._clock()
+        for rid in [r.request_id for r in self._items.values()
+                    if not r.background and not self._visible(r, now)]:
+            self._drop(rid)
+
+    # -- istek --
+
+    def request(self, call: ResolvedCall, *, background: bool | None = None,
+                task_id: str | None = None, kind: str | None = None,
+                message: str | None = None, code: str | None = None) -> str:
+        kind = kind or _kind_of(call)
+        if background is None:
+            background = kind != KIND_VOICE
+        with self._lock:
+            self._purge_foreground()
+            for rec in list(self._items.values()):
+                if rec.kind == kind and rec.fingerprint == call.fingerprint:
+                    self._drop(rec.request_id)
+            rid = uuid.uuid4().hex[:12]
+            self._items[rid] = ApprovalRequest(
+                request_id=rid, call=call, kind=kind, background=bool(background),
+                task_id=task_id, asked_at=self._clock(), seq=next(self._seq),
+                message=message, code=code)
+            return rid
+
+    def get(self, request_id: str | None) -> ApprovalRequest | None:
+        with self._lock:
+            rec = self._items.get(request_id) if request_id else None
+            return rec if rec is not None and self._visible(rec, self._clock()) else None
+
+    def records(self, kind: str | None = None) -> list[ApprovalRequest]:
+        """Görünür istekler, duyuru sırasıyla (en son duyurulan sonda)."""
+        with self._lock:
+            return self._ordered(kind)
+
+    def latest_record(self) -> ApprovalRequest | None:
+        with self._lock:
+            ordered = self._ordered()
+            return ordered[-1] if ordered else None
+
+    def latest(self) -> str | None:
+        rec = self.latest_record()
+        return rec.request_id if rec else None
+
+    def pending_ids(self) -> list[str]:
+        return [r.request_id for r in self.records()]
+
+    def reannounce(self) -> ApprovalRequest | None:
+        """Sırada bekleyen en son isteği yeniden duyurulmuş sayar (sesli
+        isteğin süresi yenilenir; arka plan isteğininki ilk duyurudan işler)."""
+        with self._lock:
+            rec = self.latest_record()
+            if rec is not None:
+                rec.seq = next(self._seq)
+                if not rec.background:
+                    rec.asked_at = self._clock()
+            return rec
+
+    # -- kullanıcı cevabı --
+
+    def grant(self, request_id: str) -> bool:
+        with self._lock:
+            rec = self.get(request_id)
+            if rec is None:
+                return False
+            rec.granted_at = self._clock()
+            return True
+
+    def revoke(self, request_id: str) -> None:
+        with self._lock:
+            rec = self._items.get(request_id)
+            if rec is not None:
+                rec.granted_at = None
+
+    def deny(self, request_id: str) -> ApprovalRequest | None:
+        """İsteği kullanıcının reddi ile düşürür; parmak izi bir sonraki
+        kullanıcı turuna kadar reddedilmiş sayılır."""
+        with self._lock:
+            rec = self._drop(request_id)
+            if rec is not None:
+                self._denied.add(rec.fingerprint)
+            return rec
+
+    def answer(self, confirmed: bool) -> str | None:
+        with self._lock:
+            rid = self.latest()
+            if rid is None:
+                return None
+            if confirmed:
+                self.grant(rid)
+            else:
+                self.deny(rid)
+            return rid
+
+    def is_denied(self, call: ResolvedCall) -> bool:
+        with self._lock:
+            return call.fingerprint in self._denied
+
+    def clear_denials(self) -> None:
+        with self._lock:
+            self._denied.clear()
+
+    def consume_record(self, call: ResolvedCall) -> ApprovalRequest | None:
+        with self._lock:
+            now = self._clock()
+            for rec in reversed(self._ordered()):
+                if (rec.tool == call.tool and rec.fingerprint == call.fingerprint
+                        and rec.granted_at is not None
+                        and now - rec.granted_at <= FOREGROUND_TTL_S):
+                    return self._items.pop(rec.request_id)
+            return None
+
+    def drop_kind(self, kind: str) -> None:
+        with self._lock:
+            for rid in [r.request_id for r in self._items.values() if r.kind == kind]:
+                self._drop(rid)
+
+    def expire(self) -> list[ApprovalRequest]:
+        """Süresi dolan istekleri siler; arka plan olanları döner."""
+        with self._lock:
+            now = self._clock()
+            gone = [r for r in self._items.values() if not self._visible(r, now)]
+            for rec in gone:
+                self._drop(rec.request_id)
+            return sorted((r for r in gone if r.background), key=lambda r: r.seq)
+
+    # -- ApprovalStore arayüzü --
 
     def grant_from_user_turn(self) -> None:
-        self._owner._grant_dangerous_confirmation()
+        self.answer(True)
 
     def consume(self, call: ResolvedCall) -> bool:
-        return self._owner._consume_dangerous_confirmation(call.tool, call.params)
+        return self.consume_record(call) is not None
 
     def cancel(self, request_id: str | None = None) -> None:
-        with self._owner._confirmation_lock:
-            if request_id is None or self._owner._pending_dangerous_fingerprint == request_id:
-                self._owner._set_pending_dangerous(None)
+        """request_id (ya da parmak izi) verilirse yalnızca o; yoksa hepsi."""
+        with self._lock:
+            for rec in list(self._items.values()):
+                if request_id is None or request_id in (rec.request_id, rec.fingerprint):
+                    self._drop(rec.request_id)
+            if request_id is None:
+                self._denied.clear()
 
     def pending(self) -> tuple[str, str] | None:
-        with self._owner._confirmation_lock:
-            action = self._owner._pending_dangerous_action
-            if action is None:
-                return None
-            return action, self._owner._pending_dangerous_fingerprint
+        rec = self.latest_record()
+        return (rec.tool, rec.fingerprint) if rec else None
 
     def take_grant(self, decision: "Decision") -> Grant | None:
         call = decision.call
         if call is None or decision.verdict is Verdict.DENY:
             return None
-        owner = self._owner
-        if decision.verdict is Verdict.NEEDS_APPROVAL:
-            if owner._consume_dangerous_confirmation(call.tool, call.params):
-                return Grant(call.fingerprint)
+        if decision.verdict is not Verdict.NEEDS_APPROVAL and \
+                decision.protocol not in (TOOL_CODE, TERMINAL_CODE):
             return None
-        if decision.protocol in (TOOL_CODE, TERMINAL_CODE):
-            # Kod yalnızca bu araç için saklanmış bir önizleme varsa ve
-            # kullanıcı AYNI çağrıyı onayladıysa geri verilir.
-            stored = owner._tool_confirm_code
-            if stored and stored[0] == call.tool and \
-                    owner._consume_dangerous_confirmation(call.tool, call.params):
-                owner._tool_confirm_code = None
-                return Grant(call.fingerprint, stored[2] if stored[1] == call.fingerprint else None)
-        return None
+        rec = self.consume_record(call)
+        if rec is None:
+            return None
+        return Grant(call.fingerprint, rec.code)
 
     def remember_code(self, call: ResolvedCall, code: str) -> None:
-        owner = self._owner
-        owner._discard_tool_confirm_code()   # önceki önizleme (terminal kaydı dahil) iptal
-        owner._tool_confirm_code = (call.tool, call.fingerprint, code)
-        owner._set_pending_dangerous(call.tool, call.fingerprint)
+        """Aracın önizleme kodu yalnızca en yeni önizlemede saklanır; önceki
+        önizleme (terminal kaydı dahil) düşer."""
+        with self._lock:
+            for rid in [r.request_id for r in self._items.values() if r.code]:
+                self._drop(rid)
+            self.request(call, code=code)
+
+
+def rejected_message(call: ResolvedCall) -> str:
+    """Kullanıcının az önce "hayır" dediği çağrı yeniden istendiğinde modele
+    giden metin (sır ya da kod içermez)."""
+    return (f"REDDEDILDI:{call.tool}: Kullanici bu islemi az once reddetti. Araci tekrar "
+            "cagirma ve onay isteme; kullanici yeniden acikca isterse o zaman cagir.")
+
+
+def rejected_by_user(decision: "Decision", grant: Grant | None,
+                     store: "MultiApprovalStore") -> str | None:
+    """Onay isteyecek (NEEDS_APPROVAL ya da önizleme kodlu) bir çağrı
+    kullanıcının az önce reddettiği çağrıysa ret metni; değilse None. Model
+    reddedilen çağrıyı hemen yeniden isteyip kuyruğun başına geçemez."""
+    call = decision.call
+    if grant is not None or call is None:
+        return None
+    if decision.verdict is not Verdict.NEEDS_APPROVAL and decision.protocol is None:
+        return None
+    return rejected_message(call) if store.is_denied(call) else None
+
+
+class PendingSlotAdapter(ApprovalStore):
+    """Eski adı korunan ince sarmalayıcı: JarvisLive'ın çok-istekli onay
+    deposunu (owner._approvals, MultiApprovalStore) eski tek-yuva arayüzüyle
+    sunar. Kural eklemez; request() eski sözleşmedeki gibi parmak izini döner."""
+
+    def __init__(self, owner: Any) -> None:
+        self._owner = owner
+
+    @property
+    def _store(self) -> MultiApprovalStore:
+        return self._owner._approvals
+
+    def request(self, call: ResolvedCall) -> str:
+        self._store.request(call)
+        return call.fingerprint
+
+    def grant_from_user_turn(self) -> None:
+        self._store.grant_from_user_turn()
+
+    def consume(self, call: ResolvedCall) -> bool:
+        return self._store.consume(call)
+
+    def cancel(self, request_id: str | None = None) -> None:
+        self._store.cancel(request_id)
+
+    def pending(self) -> tuple[str, str] | None:
+        return self._store.pending()
+
+    def take_grant(self, decision: "Decision") -> Grant | None:
+        return self._store.take_grant(decision)
+
+    def remember_code(self, call: ResolvedCall, code: str) -> None:
+        self._store.remember_code(call, code)
 
 
 # ── Araç tanımları (plan §3) ──────────────────────────────────────────────
@@ -665,7 +944,7 @@ _LIVE_POLICY: dict[str, tuple[Callable[[Mapping], str], str]] = {
     "save_memory": (_save_memory_live, "yalnızca talimata benzeyen içerik onay ister"),
     "youtube_video": (lambda p: APPROVE if _truthy(p.get("save", False)) else ALLOW,
                       "save=true dosya yazar; oynatma/özet bugünkü gibi serbest"),
-    # Kendi onay akışı olanlar (main.py dalı _confirmation_granted_for ile):
+    # Kendi onay akışı olanlar (main.py dalı onay deposundan tüketir):
     "computer_settings": (lambda p: ALLOW, "restart/shutdown/lock kendi onay akışında"),
     "game_updater": (lambda p: ALLOW, "shutdown_when_done kendi onay akışında"),
     "shutdown_jarvis": (lambda p: ALLOW, "kendi onay akışında"),
@@ -723,9 +1002,12 @@ def _model_live_names() -> frozenset[str]:
 
 def _model_reachable(tool: str) -> bool:
     # Çalışma anında registry'ye eklenenler de modelin araç listesine girer.
-    # discovered_* her zaman fail-closed onay ister (EXECUTE).
-    return (tool in _model_live_names() or tool.startswith(DISCOVERED_PREFIX)
-            or _registry_entry(tool) is not None)
+    # discovered_* öneki tek başına yetmez (Adım 3.3): modelin uydurduğu bir
+    # discovered_* adı fail-closed spec ile NEEDS_APPROVAL alıp onay kuyruğuna
+    # giriyor ve bekleyen onayın önüne geçiyordu. Modelin gerçekten
+    # erişebildiği discovered_* araçları (TOOL_DECLARATIONS) EXECUTE ile onay
+    # ister; entegrasyonla eklenenler agent_loop yolunda fail-closed kalır.
+    return tool in _model_live_names() or _registry_entry(tool) is not None
 
 
 def authorize(tool: str, args: Mapping | None, source: Source) -> Decision:

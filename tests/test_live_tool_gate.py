@@ -142,7 +142,7 @@ def test_read_tool_is_allowed_and_non_read_needs_approval():
     assert sg.authorize("weather_report", {"city": "Ankara"}, S).verdict is V.ALLOW
     assert sg.authorize("file_controller", {"action": "list"}, S).verdict is V.ALLOW
     for tool, args in [("send_message", {"receiver": "Ali"}), ("open_app", {"app_name": "x"}),
-                       ("computer_control", {"action": "type"}), ("discovered_yeni", {}),
+                       ("computer_control", {"action": "type"}), ("discovered_jc", {}),
                        ("file_controller", {"action": "delete", "name": "a.txt"}),
                        ("reminder", {"message": "x"})]:
         d = sg.authorize(tool, args, S)

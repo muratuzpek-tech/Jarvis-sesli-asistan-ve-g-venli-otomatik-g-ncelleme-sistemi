@@ -51,10 +51,6 @@ import jarvis.core.brain_orchestrator as bo
 
 S = sg.Source
 
-_STORE = pytest.mark.xfail(strict=True, raises=AttributeError,
-                           reason="3.3: security_gate.MultiApprovalStore henuz yok")
-
-
 class _Clock:
     def __init__(self):
         self.t = 1000.0
@@ -74,13 +70,11 @@ def _call(tool="send_message", **args):
 
 # ── 1) Cok-istekli onay deposu (3.3) ──
 
-@_STORE
 def test_store_ttl_constants():
     assert sg.FOREGROUND_TTL_S == 60
     assert sg.BACKGROUND_TTL_S == 600
 
 
-@_STORE
 def test_store_yes_approves_only_latest_announced_and_others_wait():
     store, _ = _store()
     a, b = _call(receiver="A"), _call(receiver="B")
@@ -94,7 +88,6 @@ def test_store_yes_approves_only_latest_announced_and_others_wait():
     assert store.latest() == rid_a            # A sirayla yeniden sorulur
 
 
-@_STORE
 def test_store_no_cancels_only_latest():
     store, _ = _store()
     a, b = _call(receiver="A"), _call(receiver="B")
@@ -106,7 +99,6 @@ def test_store_no_cancels_only_latest():
     assert store.consume(b) is False
 
 
-@_STORE
 def test_store_grant_is_single_use_and_bound_to_args():
     store, _ = _store()
     b = _call(receiver="B")
@@ -117,7 +109,6 @@ def test_store_grant_is_single_use_and_bound_to_args():
     assert store.consume(b) is False
 
 
-@_STORE
 def test_store_grant_does_not_move_to_a_newer_request():
     store, _ = _store()
     b, c = _call(receiver="B"), _call(receiver="C")
@@ -127,7 +118,6 @@ def test_store_grant_does_not_move_to_a_newer_request():
     assert store.consume(c) is False
 
 
-@_STORE
 def test_store_foreground_grant_expires_after_60s():
     store, clock = _store()
     b = _call(receiver="B")
@@ -137,7 +127,6 @@ def test_store_foreground_grant_expires_after_60s():
     assert store.consume(b) is False
 
 
-@_STORE
 def test_store_foreground_grant_valid_within_60s():
     store, clock = _store()
     b = _call(receiver="B")
@@ -147,7 +136,6 @@ def test_store_foreground_grant_valid_within_60s():
     assert store.consume(b) is True
 
 
-@_STORE
 def test_store_background_request_expires_after_10_minutes_and_is_reported():
     store, clock = _store()
     bg = sg.resolve("send_message", {"receiver": "Ali"}, S.AGENT_LOOP)
@@ -231,13 +219,10 @@ def _e1(jl, name, args):
 
 
 _MSG = {"receiver": "Ali", "message_text": "selam", "platform": "whatsapp"}
-_SLOT = pytest.mark.xfail(strict=True, raises=AssertionError,
-                          reason="3.3-3.5: tek onay yuvasi; yeni istek bekleyeni eziyor")
 
 
 # ── 2) Yuva ezmesi (3.3-3.5) ──
 
-@_SLOT
 def test_model_request_does_not_drop_pending_brain_approval(live):
     jl = live.jl
     jl.request_brain_team_approval("t1", live.orch.step, "Onay gerekiyor: a.txt")
@@ -252,7 +237,6 @@ def test_model_request_does_not_drop_pending_brain_approval(live):
     assert live.orch.approved == ["t1"]
 
 
-@_SLOT
 def test_brain_announcement_does_not_drop_pending_model_request(live):
     jl = live.jl
     assert _e1(jl, "send_message", _MSG).startswith("CONFIRMATION_REQUIRED")
@@ -265,7 +249,6 @@ def test_brain_announcement_does_not_drop_pending_model_request(live):
     assert len(live.sent) == 1
 
 
-@_SLOT
 def test_no_cancels_only_the_latest_announced_request(live):
     jl = live.jl
     jl.request_brain_team_approval("t1", live.orch.step, "Onay gerekiyor: a.txt")
@@ -277,8 +260,6 @@ def test_no_cancels_only_the_latest_announced_request(live):
     assert live.orch.approved == ["t1"]
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="3.3: ilgisiz metin bugun Brain/agent_loop bekleyenini de siliyor")
 def test_unrelated_text_does_not_drop_background_approval(live):
     jl = live.jl
     jl.request_brain_team_approval("t1", live.orch.step, "Onay gerekiyor: a.txt")
