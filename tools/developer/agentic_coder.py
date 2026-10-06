@@ -359,6 +359,10 @@ class CodingTask:
     # Aciklama GUI istiyor ama planda giris dosyasi yoktu: main.py (ya da baska
     # bir GUI giris dosyasi) yazilmadan gorev bitmez.
     entry_required: bool = False
+    # Aciklama GUI istiyor (_wants_gui): pencere kodu olmadan input() ile
+    # calisan sonuc reddedilir; GUI retleri sonuc notu icin sayilir.
+    gui_expected: bool = False
+    gui_rejects: int = 0
 
 
 @dataclass
@@ -768,10 +772,55 @@ def _uses_gui(files: dict) -> bool:
 # SMART EXIT ile "bitti" denildi. GUI isteyen aciklamada giris dosyasi beklenir.
 _GUI_HINT_RE = re.compile(r"tkinter|aray[üu]z|\bgui\b|pencere|tu[şs]\s*tak[ıi]m", re.IGNORECASE)
 _ENTRY_PLACEHOLDER = "main.py"
+# Canli hata: "Modern Windows tarzında bir hesap makinesi uygulaması yap" GUI
+# sayilmadi; sonuc input()/print() ile calisan penceresiz bir betikti. Tipik
+# masaustu uygulamasi + gorsel/bicim kelimesi birlikte gecerse GUI beklenir.
+_GUI_APP_RE = re.compile(
+    r"hesap\s*makine|calculator|\boyun|\bgame\b|not\s*defter|notepad|\bsaat\b|\bsaati\b"
+    r"|\bclock\b|zamanlay[ıi]c|\btimer\b|kronometre|stopwatch", re.IGNORECASE)
+_GUI_STYLE_RE = re.compile(
+    r"windows|modern|tarz|g[öo]rsel|d[üu][ğg]me|buton|button|ekran|uygulama", re.IGNORECASE)
+# Acikca komut satiri isteniyorsa ("komut satırı arayüzü" dahil) GUI beklenmez;
+# yalnizca GUI kutuphanesi/pencere acikca adlandirildiysa beklenir.
+_CLI_HINT_RE = re.compile(
+    r"komut\s*sat[ıi]r|terminal|\bcli\b|konsol|console|command[\s-]*line", re.IGNORECASE)
+_GUI_EXPLICIT_RE = re.compile(
+    r"tkinter|pyqt|pyside|\bwx|kivy|pygame|\bgui\b|pencere", re.IGNORECASE)
 
 
 def _wants_gui(description: str) -> bool:
-    return bool(_GUI_HINT_RE.search(description or ""))
+    text = description or ""
+    if _CLI_HINT_RE.search(text):
+        return bool(_GUI_EXPLICIT_RE.search(text))
+    return bool(_GUI_HINT_RE.search(text)
+                or (_GUI_APP_RE.search(text) and _GUI_STYLE_RE.search(text)))
+
+
+def _input_files(files: dict) -> list[str]:
+    """input() cagiran test-disi .py dosyalari (komut satirindan girdi bekler)."""
+    out = []
+    for fn, src in files.items():
+        if not fn.endswith(".py") or _is_test_file(fn):
+            continue
+        try:
+            tree = ast.parse(src or "")
+        except SyntaxError:
+            continue
+        if any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "input"
+               for n in ast.walk(tree)):
+            out.append(fn)
+    return out
+
+
+def _gui_gap(files: dict) -> list[str]:
+    """GUI beklenen projede pencere kodu (tkinter/PyQt/...) yokken input() ile
+    calisan dosyalar; bos liste = sorun yok."""
+    return [] if _uses_gui(files) else _input_files(files)
+
+
+_GUI_REJECT_MSG = ("GUI bekleniyor: pencereli GUI yaz (tkinter, PyQt/PySide, wx, kivy ya da "
+                   "pygame ile pencere, ekran ve düğmeler), input() kullanma; komut satırı "
+                   "programı kabul edilmez")
 
 
 def _is_runnable(fn: str, source: str) -> bool:
@@ -1183,6 +1232,9 @@ def _verify_project(task, run_pytest=True):
     _imp_problems, _ = _import_problems(task.files_written, task.project_path)
     problems.extend(_imp_problems)
     problems.extend(_missing_methods(task.files_written))
+    _gg = _gui_gap(task.files_written) if getattr(task, "gui_expected", False) else []
+    if _gg:
+        problems.append(f"GUI bekleniyordu ama pencere kodu yok, input() ile çalışıyor: {', '.join(_gg)}")
     # GUI (tkinter/PyQt...) projesinde "main.py --help" argumani tanimaz,
     # dogrudan pencereyi acar: yalnizca ast + gercek import denetimi yeterli.
     if _uses_gui(task.files_written):
@@ -1975,7 +2027,8 @@ class AgenticCoder:
                 task.expected_files.append('tests/test_core.py')
         # GUI isteniyor ama planda giris dosyasi yok: main.py beklenir (README'den
         # once). Test zorunlulugu (3+ dosya) bu ekleme yuzunden degismez.
-        if (_wants_gui(description)
+        task.gui_expected = _wants_gui(description)
+        if (task.gui_expected
                 and not any(Path(f).name in _ENTRY_SCRIPT_NAMES for f in task.expected_files)):
             task.entry_required = True
             task.expected_files.insert(task.expected_files.index('README.md'), _ENTRY_PLACEHOLDER)
@@ -2276,6 +2329,17 @@ class AgenticCoder:
                         f"yaz. Mevcut {filename}:\n```python\n{_prev[:3000]}\n```")
                     if self._reject(task, step, steps, filename, "API", content,
                                     f"API kaybı: {_names} kayboluyor — dosyanın TAMAMINI yaz"):
+                        break
+                    continue
+
+                # Canli hata: GUI istegine input()/print() ile calisan komut
+                # satiri programi yazildi ve BASARILI sayildi. Yazimdan sonra
+                # projede pencere kodu yoksa ve input() varsa RET.
+                if task.gui_expected and _gui_gap({**task.files_written, filename: content}):
+                    task.gui_rejects += 1
+                    task.errors.append(f"Iteration {i+1}: {filename}: GUI yok, input() var")
+                    last_error = f"GUI_REDDEDILDI ({filename}): {_GUI_REJECT_MSG}."
+                    if self._reject(task, step, steps, filename, "GUI", content, _GUI_REJECT_MSG):
                         break
                     continue
 
@@ -2762,6 +2826,8 @@ class AgenticCoder:
             return False
         if task.import_problems or task.ruff_problems or _method_gaps(task.files_written):
             return False
+        if task.gui_expected and _gui_gap(task.files_written):
+            return False
         for _fn, _fc in task.files_written.items():
             # Sadece .py derlenir; README.md'yi derlemek SMART EXIT'i
             # hic tetiklenmez yapiyordu (25 iterasyonun hepsi harcaniyordu).
@@ -2892,6 +2958,11 @@ class AgenticCoder:
         if _py and AgenticCoder._entry_file(task) is None:
             lines.append(f"Not: çalıştırılabilir giriş dosyası yok ({', '.join(_py)} yalnızca "
                          "modül; GUI ya da __main__ kodu içermiyor)")
+        if task.gui_expected and not _uses_gui(task.files_written):
+            _why = (f"input() ile çalışan komut satırı kodu {task.gui_rejects} kez reddedildi"
+                    if task.gui_rejects else "yazılan kod pencere açmıyor")
+            lines.append("Not: GUI bekleniyordu (pencereli masaüstü uygulaması) ama "
+                         "tkinter/PyQt/PySide/wx/kivy/pygame kodu yok; " + _why)
         lines.extend(task.notes)
         return "\n".join(lines)
 
