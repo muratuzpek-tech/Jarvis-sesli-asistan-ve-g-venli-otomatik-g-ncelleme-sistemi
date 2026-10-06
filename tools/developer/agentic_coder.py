@@ -1463,6 +1463,94 @@ def _placeholder_comment(code: str) -> tuple[int, str] | None:
     return None
 
 
+# Canli hata: ret yalnizca "SYNTAX_ERROR: line 14: unterminated string literal"
+# diyordu; model hatali satiri goremedi, 3 tur ayni hatayi tekrarladi. Mesaja
+# yalnizca O TEK satir (kirpilmis, en fazla 120 karakter) + sutun isareti eklenir.
+_SYNTAX_LINE_MAX = 120
+_SYNTAX_HINTS = (
+    ("triple-quoted", "üç tırnaklı dize kapanmamış"),
+    ("unterminated", "tırnaklar eşleşmiyor (dize aynı tırnakla açılıp kapanmalı: '…' ya da \"…\")"),
+    ("eol while scanning", "tırnaklar eşleşmiyor (dize aynı tırnakla açılıp kapanmalı: '…' ya da \"…\")"),
+    ("never closed", "parantez kapanmamış: ( [ { ile ) ] } eşleşmeli"),
+    ("unmatched", "parantez eşleşmiyor: fazladan kapanış ) ] }"),
+    ("does not match", "parantez türleri eşleşmiyor: ( ) [ ] { }"),
+    ("indent", "girinti hatalı: blok içi 4 boşluk, tutarlı girinti"),
+)
+
+
+def _syntax_context(code: str, e: SyntaxError) -> str:
+    """Hatali satir + sutun isareti + ipucu (dosyanin geri kalani YOK)."""
+    lines = (code or "").splitlines()
+    out = ""
+    if e.lineno and 1 <= e.lineno <= len(lines):
+        raw = lines[e.lineno - 1]
+        text = raw.strip()
+        col = max(0, (e.offset or 1) - 1 - (len(raw) - len(raw.lstrip())))
+        start = max(0, min(col - _SYNTAX_LINE_MAX // 2, len(text) - _SYNTAX_LINE_MAX))
+        text = text[start:start + _SYNTAX_LINE_MAX]
+        col = min(max(0, col - start), max(0, len(text) - 1))
+        label = f"  satır {e.lineno}: "
+        out = f"\n{label}{text}\n{' ' * (len(label) + col)}^ (sütun {(e.offset or 1)})"
+    msg = (e.msg or "").lower()
+    hint = next((h for k, h in _SYNTAX_HINTS if k in msg), "")
+    if not hint and isinstance(e, IndentationError):
+        hint = _SYNTAX_HINTS[-1][1]
+    return out + (f"\n  ipucu: {hint}" if hint else "")
+
+
+_QUOTE_PREFIX = "rRbBuUfF"
+_REPAIR_MAX_LINES = 50
+
+
+def _repair_mixed_quotes(code: str) -> tuple[str, list[int]] | None:
+    """Tek satirda karisik tirnakli dizeleri ('*", gibi) acilis tirnagina gore
+    kapatir. YALNIZCA onarilmis dosyanin tamami ast.parse ile gecerliyse
+    (yeni_icerik, onarilan_satirlar) doner; aksi halde None (icerige dokunulmaz)."""
+    lines = (code or "").split("\n")
+    fixed: list[int] = []
+    for _ in range(_REPAIR_MAX_LINES):
+        try:
+            ast.parse("\n".join(lines))
+        except SyntaxError as e:
+            msg = (e.msg or "").lower()
+            if not ((msg.startswith("unterminated string literal")
+                     or msg.startswith("unterminated f-string literal"))
+                    and e.lineno and e.offset and 1 <= e.lineno <= len(lines)):
+                return None
+            line = lines[e.lineno - 1]
+            i = e.offset - 1
+            while i < len(line) and line[i] in _QUOTE_PREFIX:
+                i += 1
+            if i >= len(line) or line[i] not in "'\"":
+                return None
+            q = line[i]
+            other = "\"" if q == "'" else "'"
+            j = line.find(other, i + 1)
+            if j < 0 or line.find(q, i + 1, j) >= 0 or "\\" in line[i + 1:j]:
+                return None
+            lines[e.lineno - 1] = line[:j] + q + line[j + 1:]
+            fixed.append(e.lineno)
+            continue
+        return ("\n".join(lines), fixed) if fixed else None
+    return None
+
+
+def _validation_category(msg: str) -> str:
+    """Ret sayaci icin dogrulama turu: eval, sozdizimi, stub, yer tutucu ayri
+    sayilir (eskiden hepsi 'VALIDATION' idi; eval + 2 SYNTAX gorevi durduruyordu)."""
+    if _EVAL_EXEC_MSG in msg:
+        return "EVAL"
+    if msg.startswith("SYNTAX_ERROR"):
+        return "SYNTAX"
+    if msg.startswith("JSON_ERROR"):
+        return "JSON"
+    if "fonksiyonu boş" in msg:
+        return "STUB"
+    if "yer tutucu" in msg:
+        return "YER_TUTUCU"
+    return "VALIDATION"
+
+
 def _validate_code(code: str, language: str = "python") -> tuple[bool, str]:
     """Kodda yasaklı kalıp var mı kontrol et. Ret mesajı modele NEYİ
     değiştirmesi gerektiğini söyler."""
@@ -1476,7 +1564,7 @@ def _validate_code(code: str, language: str = "python") -> tuple[bool, str]:
         tree = ast.parse(code)
     except SyntaxError as e:
         return False, (f"SYNTAX_ERROR: line {e.lineno}: {e.msg} — dosyanın TAM ve "
-                       "derlenebilir halini yaz")
+                       "derlenebilir halini yaz" + _syntax_context(code, e))
     stub = _stub_function(tree)
     if stub is not None:
         return False, (f"YASAK (line {stub.lineno}): '{stub.name}' fonksiyonu boş (yalnızca "
@@ -2251,6 +2339,14 @@ class AgenticCoder:
                     continue
                 if isinstance(content, str):
                     content = _strip_wrapping_fence(filename, content)
+                    # Karisik tirnak ('*",): yalnizca tum dosya gecerli olursa onar;
+                    # sonraki dogrulamalar (eval/stub/ruff) onarilmis icerikle calisir.
+                    if filename.endswith(".py"):
+                        _rq = _repair_mixed_quotes(content)
+                        if _rq is not None:
+                            content = _rq[0]
+                            self._ui_progress(
+                                f"    🔧 tırnak onarıldı: satır {', '.join(map(str, _rq[1]))}")
 
                 # Ayni dosya ayni icerikle art arda yaziliyorsa model dongude:
                 # kalan turlari (kotayi) yakmadan sebebiyle birlikte bitir.
@@ -2309,7 +2405,8 @@ class AgenticCoder:
                         # Ilk retde kisa, sonrakilerde tam (Calculator.calculate) ornek.
                         _n = task.eval_rejects[filename] = task.eval_rejects.get(filename, 0) + 1
                         last_error += "\n" + _safe_eval_hint(full=_n >= 2)
-                    if self._reject(task, step, steps, filename, "VALIDATION", content, val_msg):
+                    if self._reject(task, step, steps, filename,
+                                    _validation_category(val_msg), content, val_msg):
                         break
                     continue
 
@@ -2576,10 +2673,12 @@ class AgenticCoder:
         _reddedilen_<dosya>.txt olarak kaydeder ve ayni dosya + ayni kategori
         ust uste _REJECT_LIMIT kez reddedildiyse gorevi durdurur (True)."""
         reason = " ".join(str(reason).split())
-        step.detail = f"REDDEDİLDİ ({category}): {reason[:150]}"
+        # SYNTAX retlerinde hatali satir (<=120) + ipucu da gorunsun.
+        _cut = 400 if category == "SYNTAX" else 150
+        step.detail = f"REDDEDİLDİ ({category}): {reason[:_cut]}"
         step.success = False
         steps.append(step)
-        self._ui_progress(f"    ⛔ {filename} reddedildi: {reason[:150]}")
+        self._ui_progress(f"    ⛔ {filename} reddedildi: {reason[:_cut]}")
         try:
             (task.project_path / _rejected_copy_name(filename)).write_text(content or "", encoding="utf-8")
         except OSError as e:
