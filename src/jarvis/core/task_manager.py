@@ -1,17 +1,16 @@
-"""task_manager.py — 18. GÖREV KUYRUĞU (UNIFIED).
+"""task_manager.py — 18. GÖREV KUYRUĞU.
 
-DÜZELTMELER (2026-10-05):
-- Process-level lock entegrasyonu (deadlock koruma)
-- QueueConsistencyChecker entegrasyonu (payload integrity)
-- Atomic write operasyonları
-- Detaylı anomaly logging
-- Payload loss restore mekanizması
+Her görev: id, name, agent, priority, status, created_at, updated_at,
+retry_count, result, error. Durumlar: pending, running, waiting_approval,
+completed, failed, cancelled (kullanıcının talimatındaki isimlerle
+BİREBİR aynı).
 
-AYNEN KORUNDU:
-- Dosya yolu: tasks/brain_tasks.json
-- Temel API: create/get/update/list
-- Task yapısı: id, name, agent, priority, status, created_at, updated_at, retry_count, result, error, payload
-"""
+BİLEREK AYRI bir dosyada (tasks/brain_tasks.json): mevcut
+memory/agent_tasks.json, agent_loop.py'nin KENDİ basit döngüsüne ait ve
+ona dokunmamak kullanıcı talimatıydı ("mevcut scheduler sistemini
+bozma"). Bu, TAMAMEN AYRI, çoklu-beyin takımının kendi görev kuyruğu -
+iki sistem birbirine karışmaz, iki farklı onay kelime dağarcığı (main.py
+tarafında hangi tool'un çağrılacağı) main.py'de ayrıca netleştirilir."""
 from __future__ import annotations
 
 import json
@@ -52,10 +51,7 @@ def _make_logger() -> logging.Logger:
     gorevin payload'inin beklenmedik sekilde kuculmesi) ayri bir dosyaya
     (logs/task_manager.log) yaziyor - boylece bir sonraki sefer bu BURADAN
     doğrudan teshis edilebilir (disaridan/elle bir dosya degisikligi mi,
-    yoksa orchestrator'in kendi mantigi mi).
-    
-    2026-10-05: QueueConsistencyChecker tarafından ek detaylı logging yapılıyor
-    (logs/queue_consistency.log) — payload loss, state transitions, vb."""
+    yoksa orchestrator'in kendi mantigi mi)."""
     logger = logging.getLogger("jarvis.task_manager")
     if not logger.handlers:
         try:
@@ -73,44 +69,17 @@ _logger = _make_logger()
 
 
 class TaskManager:
-    """Merkezi görev yöneticisi.
-    
-    TASARIMI:
-    1. Atomic write (tempfile + replace)
-    2. Process-level lock (deadlock koruma) — process_lock.py
-    3. QueueConsistencyChecker (payload integrity) — queue_consistency.py
-    4. Detaylı anomaly detection ve logging
-    
-    NOTE: Process lock ve consistency checker optional (import yapılmazsa hata değil)
-    """
+    """agent_loop.py'nin _load_tasks/_save_tasks ile AYNI atomik-yazma
+    deseni (tempfile + replace) - kanıtlanmış, dosya bozulmasına karşı
+    güvenli bir yöntem, burada tekrar icat edilmiyor."""
 
     def __init__(self, path: Path = TASKS_PATH) -> None:
         self.path = path
-        # Optional: Process lock (deadlock koruma)
-        self._process_lock = None
-        try:
-            from jarvis.core.process_lock import get_process_lock
-            self._process_lock = get_process_lock()
-        except Exception:
-            pass
-        
-        # Optional: Consistency checker (payload integrity)
-        self._consistency = None
-        try:
-            from jarvis.core.queue_consistency import get_consistency_checker
-            self._consistency = get_consistency_checker()
-        except Exception:
-            pass
 
     def _load(self) -> list[dict]:
         try:
             if self.path.is_file():
-                # QueueConsistencyChecker varsa, JSON corruption check yap
-                if self._consistency:
-                    data = self._consistency.safe_load_json(self.path, default=[])
-                else:
-                    data = json.loads(self.path.read_text(encoding="utf-8"))
-                
+                data = json.loads(self.path.read_text(encoding="utf-8"))
                 if isinstance(data, list):
                     return data
         except Exception as e:
@@ -118,14 +87,6 @@ class TaskManager:
         return []
 
     def _save(self, tasks: list[dict]) -> None:
-        """Dosyaya kaydet (atomic + process heartbeat)."""
-        # Process lock heartbeat (alive check)
-        if self._process_lock:
-            try:
-                self._process_lock.heartbeat()
-            except Exception:
-                pass
-        
         # Butunluk kontrolu: TaskManager'in kendi API'sinde gorev SILEN hicbir
         # metod yok (create() sadece ekler, update() sadece degistirir) -
         # dolayisiyla dosyadaki gorev sayisi bu siniftan gecen HERHANGI bir
@@ -135,14 +96,11 @@ class TaskManager:
         try:
             on_disk_count = len(self._load())
             if on_disk_count > len(tasks):
-                msg = (
+                _logger.warning(
                     f"Gorev sayisi azaliyor: disktaki {on_disk_count} -> yazilacak {len(tasks)}. "
                     f"TaskManager'in kendi API'si gorev SILMEZ - bu dosyaya harici bir "
                     f"mudahaleye (elle duzenleme/rollback/senkronizasyon araci) isaret edebilir."
                 )
-                _logger.warning(msg)
-                if self._consistency:
-                    self._consistency.alert_anomaly("task_count_decrease", msg)
         except Exception:
             pass
 
@@ -173,16 +131,6 @@ class TaskManager:
             }
             tasks.append(task)
             self._save(tasks)
-            
-            # Checkpoint (QueueConsistencyChecker varsa)
-            if self._consistency:
-                self._consistency.checkpoint_task(task["id"], task, event="create")
-                self._consistency.log_task_transition(
-                    task["id"], task["name"], "—", "pending", 
-                    reason="created"
-                )
-            
-            _logger.info(f"Görev oluşturuldu: {task['id']} → {name[:60]!r} (agent={agent})")
             return task
 
     def get(self, task_id: str) -> dict | None:
@@ -192,63 +140,37 @@ class TaskManager:
         return None
 
     def update(self, task_id: str, **fields) -> dict | None:
-        """Görev güncelle (payload integrity kontrol + restore).
-        
-        DÜZELTME (2026-10-05): Payload keys kayıp tespit edilirse,
-        kayıp keys'ler eski payload'dan restore edilir ve uyarı loglanır.
-        """
         with _lock:
             tasks = self._load()
             for t in tasks:
                 if t["id"] == task_id:
-                    old_task = dict(t)
-                    
                     if "status" in fields and fields["status"] not in VALID_STATUSES:
                         raise ValueError(f"Geçersiz durum: {fields['status']}")
 
-                    # Payload integrity check + restore
+                    # Butunluk kontrolu: yeni payload, eskisinde olan ama
+                    # yenisinde OLMAYAN anahtarlar iceriyorsa (ozellikle
+                    # "plan"), bu bir gorevin ilerlemesinin sessizce
+                    # kaybedildigini gosterir - orchestrator'in KENDI mantigi
+                    # boyle bir seyi asla yapmaz (sadece EKLER/ILERLETIR),
+                    # dolayisiyla bu ya bir programlama hatasi ya da dosyaya
+                    # dis mudahaledir. Sessizce gecmek yerine ACIKCA logla.
                     if "payload" in fields and isinstance(t.get("payload"), dict) and isinstance(fields["payload"], dict):
                         old_keys = set(t["payload"].keys())
                         new_keys = set(fields["payload"].keys())
                         lost = old_keys - new_keys
-                        
                         if lost:
-                            msg = (
+                            _logger.warning(
                                 f"Gorev '{task_id}' ({t.get('name', '')[:60]!r}) payload'inda "
                                 f"anahtar kaybi tespit edildi: {sorted(lost)} — eski durum "
                                 f"status={t.get('status')!r}, bu beklenmedikse dosyaya harici "
                                 f"bir mudahale (elle duzenleme, senkronizasyon araci, rollback) "
                                 f"olup olmadigi kontrol edilmeli."
                             )
-                            _logger.warning(msg)
-                            
-                            if self._consistency:
-                                self._consistency.alert_anomaly("payload_loss_on_update", msg)
-                            
-                            # RESTORE: Kayıp keys'leri eski payload'dan geri koy
-                            for key in lost:
-                                fields["payload"][key] = t["payload"][key]
-                            _logger.info(f"📋 Kaybolan payload keys restore edildi: {sorted(lost)}")
 
                     t.update(fields)
                     t["updated_at"] = datetime.now().isoformat()
                     self._save(tasks)
-                    
-                    # Checkpoint (QueueConsistencyChecker varsa)
-                    if self._consistency:
-                        self._consistency.checkpoint_task(task_id, t, event="update")
-                        if "status" in fields:
-                            self._consistency.log_task_transition(
-                                task_id, t.get("name", "?"),
-                                old_task.get("status", "?"), fields["status"],
-                                reason=fields.get("reason", "")
-                            )
-                    
-                    _logger.info(
-                        f"Görev güncellendi: {task_id} → {fields.get('status', 'no-status-change')}"
-                    )
                     return t
-            
             _logger.warning(f"update(): '{task_id}' id'li gorev bulunamadi (mevcut gorev sayisi={len(tasks)}).")
             return None
 
