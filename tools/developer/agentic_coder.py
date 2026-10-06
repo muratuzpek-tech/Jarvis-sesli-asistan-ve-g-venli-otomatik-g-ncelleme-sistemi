@@ -1384,6 +1384,38 @@ def _contained_path(root: Path, name: str) -> Path | None:
     return candidate
 
 
+_MAX_FILENAME_LEN = 100
+
+
+def _filename_problem(name: Any) -> str | None:
+    """write/fix dosya adini diske dokunmadan once dogrula; sorun varsa
+    modele gidecek ret mesajini, yoksa None doner. 255 bayttan uzun ad
+    eskiden write_text'te OSError (File name too long) ile solve()'u
+    cokertiyordu. Kacis kurallari _contained_path ile aynidir (symlink
+    kontrolu yine orada yapilir)."""
+    if not isinstance(name, str) or not name.strip():
+        return "FILENAME_REJECTED: dosya adi bos ya da metin degil (ornek: main.py)."
+    if len(name) > _MAX_FILENAME_LEN:
+        return (f"FILENAME_REJECTED: dosya adi {len(name)} karakter; en fazla "
+                f"{_MAX_FILENAME_LEN} karakter olmali. Kisa bir ad kullan (ornek: main.py).")
+    try:
+        too_many_bytes = len(name.encode("utf-8")) > 255
+    except UnicodeEncodeError:
+        return "FILENAME_REJECTED: dosya adinda gecersiz karakter var (ornek: main.py)."
+    if too_many_bytes:
+        return (f"FILENAME_REJECTED: dosya adi 255 bayttan uzun; en fazla "
+                f"{_MAX_FILENAME_LEN} karakterlik ASCII bir ad kullan (ornek: main.py).")
+    if "\x00" in name or name.startswith(("/", "\\")) or ".." in re.split(r"[\\/]", name):
+        return ("PATH_REJECTED: dosya adi proje dizini icinde GORELI bir yol olmali "
+                "(mutlak yol ve '..' yasak).")
+    return None
+
+
+def _short_name(name: Any, limit: int = 40) -> str:
+    s = str(name)
+    return s if len(s) <= limit else s[:limit] + "…"
+
+
 def _run_file(path: Path, *, root: Path, timeout: int = _RUN_TIMEOUT) -> str:
     """Dosyayı çalıştır ve çıktıyı döndür (stdin=DEVNULL güvenli).
     Sadece `root` (proje dizini) icindeki dosyalar calistirilir."""
@@ -1996,6 +2028,19 @@ class AgenticCoder:
             if action in ("write", "fix"):
                 filename = args.get("filename") or target_filename or f"main.{_lang_ext(task.language)}"
                 content = args.get("content", "")
+                _name_err = _filename_problem(filename)
+                if _name_err:
+                    _shown = _short_name(filename)
+                    task.errors.append(f"Iteration {i+1}: {_shown}: {_name_err}")
+                    last_error = f"{_name_err} (verilen ad: {_shown})"
+                    _why = ("dosya adı çok uzun/geçersiz — en fazla "
+                            f"{_MAX_FILENAME_LEN} karakterlik kısa bir ad kullan"
+                            if _name_err.startswith("FILENAME_REJECTED") else
+                            "proje dizini dışı yol — proje içinde göreli bir dosya adı kullan")
+                    if self._reject(task, step, steps, _shown, "PATH",
+                                    content if isinstance(content, str) else "", _why):
+                        break
+                    continue
                 if isinstance(content, str):
                     content = _strip_wrapping_fence(filename, content)
 
@@ -2069,8 +2114,17 @@ class AgenticCoder:
                                     "proje dizini dışı yol — proje içinde göreli bir dosya adı kullan"):
                         break
                     continue
-                fpath.parent.mkdir(parents=True, exist_ok=True)
-                fpath.write_text(content, encoding="utf-8")
+                try:
+                    fpath.parent.mkdir(parents=True, exist_ok=True)
+                    fpath.write_text(content, encoding="utf-8")
+                except OSError as e:
+                    task.errors.append(f"Iteration {i+1}: {filename}: {type(e).__name__}")
+                    last_error = (f"FILENAME_REJECTED ({filename}): dosya yazilamadi "
+                                  f"({e.strerror or type(e).__name__}). Baska, kisa bir ad kullan.")
+                    if self._reject(task, step, steps, filename, "PATH", content,
+                                    f"dosya yazılamadı ({e.strerror or type(e).__name__}) — başka bir ad kullan"):
+                        break
+                    continue
                 # Stuck detection: same content repeatedly
                 _ch = str(hash(content))[:8]
                 if _ch == task.last_content_hash:
