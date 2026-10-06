@@ -212,6 +212,9 @@ class CodingTask:
     ruff_problems: dict = field(default_factory=dict)
     ruff_sig: frozenset = frozenset()
     ruff_streak: int = 0
+    # Ayni dosyanin ust uste reddi (dosya, kategori) -> sayac.
+    reject_key: tuple = ()
+    reject_count: int = 0
 
 
 @dataclass
@@ -532,6 +535,13 @@ def _import_problems(files: dict, root: Path, timeout: int = _IMPORT_CHECK_TIMEO
 
 
 _PYTEST_TIMEOUT = 60
+_REJECT_LIMIT = 3
+_REJECTED_PREFIX = "_reddedilen_"
+
+
+def _rejected_copy_name(filename: str) -> str:
+    safe = re.sub(r"[^\w.-]+", "_", filename or "").strip("._") or "dosya"
+    return f"{_REJECTED_PREFIX}{safe}.txt"
 _RUFF_STREAK_LIMIT = 3
 _SAME_WRITE_LIMIT = 3
 
@@ -727,22 +737,100 @@ def _eval_exec_call(tree: ast.AST) -> ast.Call | None:
     return None
 
 
-def _validate_code(code: str, language: str = "python") -> tuple[bool, str]:
-    """Kodda yasaklı kalıp var mı kontrol et."""
-    for pattern, label in _FORBIDDEN_PATTERNS:
-        if pattern.search(code):
-            return False, f"YASAK: {label} bulundu"
+# Python'da stub/yer tutucu denetimi ast + tokenize ile yapilir. Eskiden duz
+# metin aramasi docstring/metin/yorumdaki "pass" kelimesini, `except X: pass`,
+# `class Hata(Exception): pass`, Protocol govdesindeki `...` ve
+# `except NotImplementedError` satirlarini da stub sayip mesru kodu
+# reddediyordu (canli: "main.py yaz" 22 tur ust uste reddedildi).
+_PLACEHOLDER_COMMENT_RE = re.compile(
+    r"^\s*(?:(?P<tag>TODO|FIXME|XXX)\b"
+    r"|(?:buraya|burayı)\b.*\b(?:yaz|ekle|doldur|gel)"
+    r"|doldur\b|implement\b|your code)",
+    re.IGNORECASE,
+)
+_STUB_SKIP_DECORATORS = frozenset({"abstractmethod", "overload", "abstractproperty"})
 
-    # Python syntax kontrolü
-    if language == "python":
-        try:
-            tree = ast.parse(code)
-        except SyntaxError as e:
-            return False, f"SYNTAX_ERROR: line {e.lineno}: {e.msg}"
-        # Canli hata: "=" tusu eval() ile yazilmisti (kod enjeksiyonu).
-        bad = _eval_exec_call(tree)
-        if bad is not None:
-            return False, f"YASAK (line {bad.lineno}): {_EVAL_EXEC_MSG}"
+
+def _decorator_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Call):
+        node = node.func
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return node.id if isinstance(node, ast.Name) else ""
+
+
+def _is_stub_stmt(stmt: ast.stmt) -> bool:
+    if isinstance(stmt, ast.Pass):
+        return True
+    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and stmt.value.value is Ellipsis:
+        return True
+    if isinstance(stmt, ast.Raise) and stmt.exc is not None:
+        exc = stmt.exc.func if isinstance(stmt.exc, ast.Call) else stmt.exc
+        return isinstance(exc, ast.Name) and exc.id == "NotImplementedError"
+    return False
+
+
+def _stub_function(tree: ast.AST) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """Govdesi (docstring disinda) yalnizca pass / ... / raise NotImplementedError
+    olan fonksiyon. Protocol siniflari ve @abstractmethod/@overload haric."""
+    protocol_funcs: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and any(_decorator_name(b) == "Protocol" for b in node.bases):
+            protocol_funcs |= {id(n) for n in node.body}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or id(node) in protocol_funcs:
+            continue
+        if any(_decorator_name(d) in _STUB_SKIP_DECORATORS for d in node.decorator_list):
+            continue
+        body = node.body
+        if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            body = body[1:]
+        if not body or all(_is_stub_stmt(st) for st in body):
+            return node
+    return None
+
+
+def _placeholder_comment(code: str) -> tuple[int, str] | None:
+    """Yalnizca GERCEK yorumlarda (metin/docstring degil) yer tutucu."""
+    import io
+    import tokenize
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(code).readline):
+            if tok.type == tokenize.COMMENT and _PLACEHOLDER_COMMENT_RE.match(tok.string.lstrip("#")):
+                return tok.start[0], tok.string.strip()
+    except (tokenize.TokenError, SyntaxError):
+        return None
+    return None
+
+
+def _validate_code(code: str, language: str = "python") -> tuple[bool, str]:
+    """Kodda yasaklı kalıp var mı kontrol et. Ret mesajı modele NEYİ
+    değiştirmesi gerektiğini söyler."""
+    if language != "python":
+        for pattern, label in _FORBIDDEN_PATTERNS:
+            if pattern.search(code):
+                return False, f"YASAK: {label} bulundu — bu kalıbı kaldırıp gerçek kodu yaz"
+        return True, "OK"
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return False, (f"SYNTAX_ERROR: line {e.lineno}: {e.msg} — dosyanın TAM ve "
+                       "derlenebilir halini yaz")
+    stub = _stub_function(tree)
+    if stub is not None:
+        return False, (f"YASAK (line {stub.lineno}): '{stub.name}' fonksiyonu boş (yalnızca "
+                       "pass / ... / NotImplementedError) — gövdesine gerçek mantığı yaz")
+    placeholder = _placeholder_comment(code)
+    if placeholder is not None:
+        line, text = placeholder
+        return False, (f"YASAK (line {line}): yer tutucu yorum ({text[:60]}) — yorumu sil "
+                       "ve o kısmı gerçekten kodla (tam halini yaz)")
+    # Canli hata: "=" tusu eval() ile yazilmisti (kod enjeksiyonu).
+    bad = _eval_exec_call(tree)
+    if bad is not None:
+        return False, f"YASAK (line {bad.lineno}): {_EVAL_EXEC_MSG}"
 
     return True, "OK"
 
@@ -1371,10 +1459,11 @@ class AgenticCoder:
                 # 200 karakter kurali onlari sonsuza kadar reddediyordu.
                 _min_len = 0 if Path(filename).name == "__init__.py" else 200
                 if (not content and _min_len) or len(content.strip()) < _min_len:
-                    step.detail = f"COK KISA ({filename}, {len(content)} char) — en az {_min_len} gerekli, REDDEDILDI"
-                    step.success = False
-                    steps.append(step)
                     last_error = f"CONTENT_TOO_SHORT ({filename}): {len(content)} char yazdin. En az {_min_len} karakter dolu icerik yaz."
+                    if self._reject(task, step, steps, filename, "COK_KISA", content,
+                                    f"çok kısa ({len(content.strip())} karakter, en az {_min_len}) — "
+                                    "dosyanın tam ve dolu halini yaz"):
+                        break
                     continue
 
                 # Dogrulama dosya TURUNE gore: eskiden README.md dahil her
@@ -1384,19 +1473,18 @@ class AgenticCoder:
                 if not valid:
                     task.errors.append(f"Iteration {i+1}: {filename}: {val_msg}")
                     last_error = f"VALIDATION ({filename}): {val_msg}"
-                    step.detail = f"REDDEDİLDİ: {val_msg}"
-                    step.success = False
-                    steps.append(step)
+                    if self._reject(task, step, steps, filename, "VALIDATION", content, val_msg):
+                        break
                     continue
 
                 fpath = _contained_path(task.project_path, filename)
-                if fpath is None:
+                if fpath is None or fpath.name.startswith(_REJECTED_PREFIX):
                     task.errors.append(f"Iteration {i+1}: {filename}: proje dizini dışı")
                     last_error = (f"PATH_REJECTED ({filename}): dosya adi proje dizini "
                                   "icinde GORELI bir yol olmali (mutlak yol ve '..' yasak).")
-                    step.detail = f"REDDEDİLDİ: proje dışı yol {filename}"
-                    step.success = False
-                    steps.append(step)
+                    if self._reject(task, step, steps, filename, "PATH", content,
+                                    "proje dizini dışı yol — proje içinde göreli bir dosya adı kullan"):
+                        break
                     continue
                 fpath.parent.mkdir(parents=True, exist_ok=True)
                 fpath.write_text(content, encoding="utf-8")
@@ -1433,16 +1521,23 @@ class AgenticCoder:
                     task.ruff_problems[filename] = _ruff_left
                 else:
                     task.ruff_problems.pop(filename, None)
+                task.files_written[filename] = content
                 if _ruff_left:
                     last_error = (
                         f"RUFF ({filename}) kalan hatalar — SADECE bunlari duzelt, "
                         f"dosyanin TAM halini yaz:\n{_ruff_left}"
                     )
                     self._ui_progress(f"    ⚠️ ruff: {filename} içinde {len(_ruff_left.splitlines())} hata kaldı")
-                elif last_error.startswith(f"RUFF ({filename})"):
+                    # Dosya diskte kalir ama engellenir (accept/SMART EXIT yok).
+                    _first = _ruff_left.splitlines()[0]
+                    if self._reject(task, step, steps, filename, "RUFF", content,
+                                    f"ruff: {_first} — bu hatayı düzeltip dosyanın tam halini yaz"):
+                        break
+                    continue
+                if last_error.startswith(f"RUFF ({filename})"):
                     last_error = ""
 
-                task.files_written[filename] = content
+                task.reject_key, task.reject_count = (), 0
                 step.detail = f"📝 {filename} ({len(content)} chars)"
                 step.success = True
                 steps.append(step)
@@ -1482,12 +1577,14 @@ class AgenticCoder:
                 target = args.get("filename", "")
                 # Okunan icerik LLM'e (bulut) gider: proje disi okuma = veri sizintisi.
                 fpath = _contained_path(task.project_path, target)
-                if fpath is not None and fpath.is_file():
+                # Reddedilen icerik kopyalari yalnizca hata ayiklama icindir: model goremez.
+                if fpath is not None and fpath.is_file() and not fpath.name.startswith(_REJECTED_PREFIX):
                     content = fpath.read_text(encoding="utf-8")
                     last_run_output = f"FILE: {target}\n{content[:_MAX_OUTPUT_CHARS]}"
                     step.detail = f"👁️ {target} okundu"
                 else:
-                    listing = [p.name for p in task.project_path.iterdir()]
+                    listing = [p.name for p in task.project_path.iterdir()
+                               if not p.name.startswith(_REJECTED_PREFIX)]
                     last_run_output = f"DIR: {task.project_path}\nFiles: {listing}"
                     step.detail = "👁️ Dizin listelendi"
                 step.success = True
@@ -1578,6 +1675,30 @@ class AgenticCoder:
             task.mnf_streak += 1
         else:
             task.mnf_streak = 1 if task.import_missing else 0
+
+    def _reject(self, task: CodingTask, step: CodingStep, steps: list[CodingStep],
+                filename: str, category: str, content: str, reason: str) -> bool:
+        """Reddi ekrana yazar, son reddedilen icerigi proje klasorune
+        _reddedilen_<dosya>.txt olarak kaydeder ve ayni dosya + ayni kategori
+        ust uste _REJECT_LIMIT kez reddedildiyse gorevi durdurur (True)."""
+        reason = " ".join(str(reason).split())
+        step.detail = f"REDDEDİLDİ ({category}): {reason[:150]}"
+        step.success = False
+        steps.append(step)
+        self._ui_progress(f"    ⛔ {filename} reddedildi: {reason[:150]}")
+        try:
+            (task.project_path / _rejected_copy_name(filename)).write_text(content or "", encoding="utf-8")
+        except OSError as e:
+            logger.debug(f"[Coder] reddedilen içerik kaydedilemedi: {type(e).__name__}")
+        key = (filename, category)
+        task.reject_count = task.reject_count + 1 if key == task.reject_key else 1
+        task.reject_key = key
+        if task.reject_count < _REJECT_LIMIT:
+            return False
+        task.stop_reason = (f"döngü: {filename} {task.reject_count} kez reddedildi, "
+                            f"son sebep: {reason[:300]}")
+        self._ui_progress(f"  ❌ {task.stop_reason}")
+        return True
 
     @staticmethod
     def _smart_exit_candidate(task: CodingTask) -> bool:
