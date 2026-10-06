@@ -215,6 +215,7 @@ class CodingTask:
     # Ayni dosyanin ust uste reddi (dosya, kategori) -> sayac.
     reject_key: tuple = ()
     reject_count: int = 0
+    eval_rejects: dict = field(default_factory=dict)   # dosya -> eval/exec ret sayisi
 
 
 @dataclass
@@ -708,7 +709,69 @@ HER FONKSİYON ÇALIŞIR KOD İÇERMELİ. `python3 dosya.py` ile HATASIZ çalı�
 # ── Yardımcı Fonksiyonlar ────────────────────────────────────
 
 _EVAL_EXEC = frozenset({"eval", "exec"})
-_EVAL_EXEC_MSG = "eval/exec kullanma; ast.literal_eval ya da kendi ayrıştırıcını yaz"
+_EVAL_EXEC_MSG = (
+    "eval/exec kullanma; ast.literal_eval ya da kendi ayrıştırıcını yaz. "
+    "eval kullanma. Şu güvenli değerlendiriciyi Calculator sınıfına calculate(expr) "
+    "metodu olarak ekle ve main.py'de ekran metnini ona ver."
+)
+
+# eval reddinde modele verilen, kopyalanabilir guvenli degerlendirici. Kucuk
+# modeller (Ollama) alternatifi bilmeden ayni eval'i tekrar yaziyordu. Bu kod
+# kendi dogrulamamizdan (_validate_file, eval/exec kapisi, ruff) gecer.
+_SAFE_EVAL_SHORT = '''import ast
+import operator
+
+_OPS = {ast.Add: operator.add, ast.Sub: operator.sub,
+        ast.Mult: operator.mul, ast.Div: operator.truediv,
+        ast.Pow: operator.pow, ast.Mod: operator.mod}
+
+
+def safe_eval(expr: str) -> float:
+    """Yalnizca sayi, + - * / ** %, parantez ve tek terimli eksi; gerisi ValueError."""
+    def walk(node):
+        if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+            return node.value
+        if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
+            left, right = walk(node.left), walk(node.right)
+            if isinstance(node.op, ast.Pow) and abs(right) > 100:
+                raise ValueError("üs çok büyük")
+            return _OPS[type(node.op)](left, right)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return -walk(node.operand)
+        raise ValueError(f"izin verilmeyen ifade: {type(node).__name__}")
+    try:
+        tree = ast.parse(expr.strip(), mode="eval")
+    except SyntaxError as e:
+        raise ValueError("geçersiz ifade") from e
+    return walk(tree.body)
+'''
+
+_SAFE_EVAL_CLASS = '''
+
+class Calculator:
+    """Hesap makinesi: ekran metnini eval() kullanmadan hesaplar."""
+
+    def calculate(self, expr: str) -> float:
+        """Ekran metnini (ör. "2+3*4") hesaplar; geçersiz ifadede ValueError."""
+        return safe_eval(expr)
+'''
+
+
+def _safe_eval_code(full: bool = False) -> str:
+    """Kopyalanabilir guvenli degerlendirici: kisa (yalnizca safe_eval) ya da
+    tam (Calculator.calculate ile)."""
+    return _SAFE_EVAL_SHORT + (_SAFE_EVAL_CLASS if full else "")
+
+
+def _safe_eval_hint(full: bool) -> str:
+    if not full:
+        return ("KISA ÖRNEK (kopyala; Calculator sınıfına calculate(expr) metodu olarak bağla):\n"
+                f"```python\n{_safe_eval_code(False)}```")
+    return ("TAM ÖRNEK — bu kodu Calculator'ın bulunduğu dosyaya AYNEN koy (sınıfın kendi "
+            "metotlarını koru, calculate'i ekle):\n"
+            f"```python\n{_safe_eval_code(True)}```\n"
+            "main.py'de \"=\" tuşu: sonuc = Calculator().calculate(ekran_metni); "
+            "ValueError ve ZeroDivisionError yakala, ekrana \"Error\" yaz. eval/exec YOK.")
 
 
 def _is_builtins_ref(node: ast.AST) -> bool:
@@ -1473,6 +1536,10 @@ class AgenticCoder:
                 if not valid:
                     task.errors.append(f"Iteration {i+1}: {filename}: {val_msg}")
                     last_error = f"VALIDATION ({filename}): {val_msg}"
+                    if _EVAL_EXEC_MSG in val_msg:
+                        # Ilk retde kisa, sonrakilerde tam (Calculator.calculate) ornek.
+                        _n = task.eval_rejects[filename] = task.eval_rejects.get(filename, 0) + 1
+                        last_error += "\n" + _safe_eval_hint(full=_n >= 2)
                     if self._reject(task, step, steps, filename, "VALIDATION", content, val_msg):
                         break
                     continue
