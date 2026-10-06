@@ -109,7 +109,7 @@ def test_live_status_tracks_real_solve(home):
     assert run["description"] == "hesap makinesi yaz"
     assert run["project"] == "hesap"
     assert run["files"] == []
-    assert run["model"] == {"provider": "özel", "name": ""}
+    assert run["model"] == {"provider": "özel", "name": "", "num_ctx": 0}
 
     second = seen[1][0]
     assert second["iteration"] == 2
@@ -262,6 +262,7 @@ def test_publish_failure_never_breaks_solve(home, monkeypatch):
 def test_last_model_records_ollama(monkeypatch):
     monkeypatch.setattr(ac, "_gemini_api_key", lambda: "")
     monkeypatch.setenv("OLLAMA_CODER_MODEL", "qwen-test:1b")
+    monkeypatch.delenv("JARVIS_OLLAMA_NUM_CTX", raising=False)
 
     class _RespErr(Exception):
         pass
@@ -273,7 +274,7 @@ def test_last_model_records_ollama(monkeypatch):
     monkeypatch.setitem(sys.modules, "ollama", fake)
     out = ac.AgenticCoder._default_model("merhaba")
     assert out == '{"action": "inspect"}'
-    assert ac.last_model() == {"provider": "ollama", "name": "qwen-test:1b"}
+    assert ac.last_model() == {"provider": "ollama", "name": "qwen-test:1b", "num_ctx": 4096}
 
 
 def test_last_model_records_gemini(monkeypatch):
@@ -303,23 +304,29 @@ def test_last_model_records_gemini(monkeypatch):
     monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
 
     assert ac.AgenticCoder._default_model("merhaba") == '{"action": "accept"}'
-    assert ac.last_model() == {"provider": "gemini", "name": ac._GEMINI_CODER_MODEL}
+    assert ac.last_model() == {"provider": "gemini", "name": ac._GEMINI_CODER_MODEL, "num_ctx": 0}
 
 
-def test_default_model_run_reports_last_model(home, monkeypatch):
+def test_default_model_run_reports_planned_then_last_model(home, monkeypatch):
+    # Ilk cagridan once kosunun TAHMINI modeli (onceki kosunun eski modeli
+    # degil), cagridan sonra gercekten kullanilan model gorunur.
     project = home / "jarvis_programs" / "hesap"
-    monkeypatch.setattr(ac, "_last_model", ("ollama", "qwen-test:1b"))
+    monkeypatch.setattr(ac, "_gemini_api_key", lambda: "")
+    monkeypatch.setenv("OLLAMA_CODER_MODEL", "qwen-test:1b")
+    monkeypatch.delenv("JARVIS_OLLAMA_NUM_CTX", raising=False)
+    monkeypatch.setattr(ac, "_last_model", ("gemini", "eski-kosu", 0))
     seen: list[dict] = []
-    seq = iter([_decide({"action": "inspect", "args": {}})])
 
     def fake_default(prompt: str) -> str:
         seen.append(ac.live_status()[0]["model"])
-        return next(seq, _decide({"action": "inspect", "args": {}}))
+        ac._set_last_model("ollama", "gercek:7b", 2048)
+        return _decide({"action": "inspect", "args": {}})
 
     monkeypatch.setattr(ac.AgenticCoder, "_default_model", staticmethod(fake_default))
-    coder = ac.AgenticCoder(max_iterations=1)
+    coder = ac.AgenticCoder(max_iterations=2)
     asyncio.run(coder.solve(description="hesap makinesi yaz", project_path=str(project)))
-    assert seen == [{"provider": "ollama", "name": "qwen-test:1b"}]
+    assert seen == [{"provider": "ollama", "name": "qwen-test:1b", "num_ctx": 4096},
+                    {"provider": "ollama", "name": "gercek:7b", "num_ctx": 2048}]
 
 
 # ── 6) eszamanli yazma / okuma ──

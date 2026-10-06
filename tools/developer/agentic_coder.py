@@ -85,6 +85,10 @@ _OLLAMA_BASE = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/
 if not _OLLAMA_BASE.startswith("http"):
     _OLLAMA_BASE = f"http://{_OLLAMA_BASE}"
 _ollama_model_cache: str | None = None
+# Ollama baglam penceresi (token): JARVIS_OLLAMA_NUM_CTX, gecersizse varsayilan.
+_OLLAMA_NUM_CTX_DEFAULT = 4096
+# <think>...</think> bloklari (qwen3 dusunme ciktisi); kapanmamis blok sona kadar.
+_THINK_BLOCK_RE = re.compile(r"<think>.*?(?:</think>|\Z)", re.DOTALL | re.IGNORECASE)
 
 # 429 sonrasi Gemini'nin tekrar denenmeyecegi zaman (monotonic). Eskiden her
 # iterasyon dolu kotaya bir istek daha atip ancak sonra Ollama'ya dusuyordu.
@@ -128,6 +132,91 @@ def _pick_ollama_coder_model() -> str:
     _ollama_model_cache = chosen
     logger.info(f"[Coder] Ollama kod modeli: {chosen}")
     return chosen
+
+
+def _ollama_num_ctx() -> int:
+    raw = os.environ.get("JARVIS_OLLAMA_NUM_CTX", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return _OLLAMA_NUM_CTX_DEFAULT
+    return value if value > 0 else _OLLAMA_NUM_CTX_DEFAULT
+
+
+def _is_qwen3(model: str) -> bool:
+    return model.strip().lower().startswith("qwen3")
+
+
+def _strip_think(text: str) -> str:
+    """Dusunme bloklarini at. Sablon <think>'i prompt'a koyunca yanit yalnizca
+    '</think>' ile gelir: o durumda son '</think>' oncesi de atilir."""
+    text = _THINK_BLOCK_RE.sub("", text)
+    if "</think>" in text.lower():
+        text = text[text.lower().rindex("</think>") + len("</think>"):]
+    return text.strip()
+
+
+def ollama_generate(prompt: str) -> str:
+    """Yalnizca Ollama ile tek cagri (Gemini yok). Hata firlatir.
+
+    qwen3* modellerinde dusunme kapatilir (think=False; paket desteklemiyorsa
+    prompt sonuna /no_think) ve yanittaki <think> bloklari ayristirmadan once
+    temizlenir: dusunme metnindeki { } JSON ayristirmayi (ilk {...} / json_repair)
+    yanlis nesneye goturuyordu. Diger modellerde istek ve yanit degismez."""
+    import ollama
+    model = _pick_ollama_coder_model()
+    num_ctx = _ollama_num_ctx()
+    qwen3 = _is_qwen3(model)
+    kwargs: dict[str, Any] = dict(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        options={"temperature": 0.2, "num_predict": 8192, "num_ctx": num_ctx},
+    )
+    if qwen3:
+        kwargs["think"] = False
+
+    def chat(**extra):
+        nonlocal kwargs
+        try:
+            return ollama.chat(**extra, **kwargs)
+        except TypeError as e:
+            if "think" not in kwargs or "think" not in str(e):
+                raise
+            # Eski ollama paketi think parametresini tanimiyor: Qwen3'un
+            # kendi anahtari /no_think ile kapat.
+            kwargs = {k: v for k, v in kwargs.items() if k != "think"}
+            kwargs["messages"] = [{"role": "user", "content": f"{prompt}\n/no_think"}]
+            return ollama.chat(**extra, **kwargs)
+
+    try:
+        resp = chat(format="json")
+    except ollama.ResponseError as json_err:
+        # Canli testte format="json" istekleri ~170 token sonra HTTP
+        # 500 ile kesildi (ayni istek Jarvis disinda 200). JSON
+        # kisitini kaldirip bir kez daha dene; cikti zaten
+        # _parse_model_response + json_repair ile ayristiriliyor.
+        logger.warning(
+            f"[Coder] Ollama format=json hatası ({str(json_err)[:200]}) → kısıtsız tekrar"
+        )
+        resp = chat()
+    _set_last_model("ollama", model, num_ctx)
+    content = resp.get("message", {}).get("content", "") or ""
+    return _strip_think(content) if qwen3 else content
+
+
+def _planned_model() -> dict:
+    """Varsayilan zincirin (Gemini -> Ollama) bu kosuda kullanacagi model
+    (ilk cagridan ONCE bilinsin diye). Ag erisimi olabilir (Ollama etiketleri)."""
+    if _gemini_api_key() and _gemini_available():
+        return {"provider": "gemini", "name": _GEMINI_CODER_MODEL, "num_ctx": 0}
+    return {"provider": "ollama", "name": _pick_ollama_coder_model(), "num_ctx": _ollama_num_ctx()}
+
+
+def _model_line(model: dict) -> str:
+    if model.get("provider") == "özel":
+        return "🧠 özel model_fn"
+    line = f"🧠 {model.get('provider', '')} {model.get('name', '')}".rstrip()
+    return f"{line} ctx={model['num_ctx']}" if model.get("num_ctx") else line
 
 
 def _note_gemini_failure(exc: Exception) -> None:
@@ -175,21 +264,26 @@ _LIVE: OrderedDict[str, MappingProxyType] = OrderedDict()
 _LIVE_MAX_RUNS = 10
 _LIVE_MAX_EVENTS = 20
 _LIVE_MAX_FILES = 50
-_last_model: tuple[str, str] | None = None     # (saglayici, model adi)
+_last_model: tuple | None = None     # (saglayici, model adi, num_ctx)
+_last_model_seq = 0                  # _set_last_model cagri sayaci
 _KNOWN_ACTIONS = frozenset({"write", "fix", "accept", "run", "inspect", "error"})
 
 
-def _set_last_model(provider: str, name: str) -> None:
-    global _last_model
+def _set_last_model(provider: str, name: str, num_ctx: int = 0) -> None:
+    global _last_model, _last_model_seq
     with _LIVE_LOCK:
-        _last_model = (provider, name)
+        _last_model = (provider, name, num_ctx)
+        _last_model_seq += 1
 
 
 def last_model() -> dict | None:
-    """Varsayilan model zincirinin (Gemini -> Ollama) son kullandigi model."""
+    """Varsayilan model zincirinin (Gemini -> Ollama) son kullandigi model
+    (num_ctx: Ollama baglam penceresi, Gemini'de 0)."""
     with _LIVE_LOCK:
         lm = _last_model
-    return {"provider": lm[0], "name": lm[1]} if lm else None
+    if not lm:
+        return None
+    return {"provider": lm[0], "name": lm[1], "num_ctx": lm[2] if len(lm) > 2 else 0}
 
 
 def _live_clean(text: Any, limit: int) -> str:
@@ -240,7 +334,11 @@ def _live_snapshot(task: CodingTask, steps: list[CodingStep], status: str,
         "method": len(task.method_gaps),       # su an eksik metot sayisi
         "ruff": len(task.ruff_problems),       # ruff hatasi kalan dosya sayisi
     })
-    model = model or {"provider": "bilinmiyor", "name": ""}
+    model = model or {"provider": "bilinmiyor", "name": "", "num_ctx": 0}
+    try:
+        num_ctx = max(0, int(model.get("num_ctx") or 0))
+    except (TypeError, ValueError):
+        num_ctx = 0
     reason = task.stop_reason.split(":", 1)[0] if task.stop_reason else ""
     return MappingProxyType({
         "task_id": task.run_id,
@@ -252,10 +350,31 @@ def _live_snapshot(task: CodingTask, steps: list[CodingStep], status: str,
         "files": files,
         "rejects": rejects,
         "model": MappingProxyType({"provider": str(model.get("provider", "")),
-                                   "name": _live_clean(model.get("name", ""), 60)}),
+                                   "name": _live_clean(model.get("name", ""), 60),
+                                   "num_ctx": num_ctx}),
         "events": tuple(_live_clean(_event_text(s), 120) for s in steps[-_LIVE_MAX_EVENTS:]),
         "reason": _live_clean(reason, 60),
     })
+
+
+def _step_error_category(step: CodingStep) -> str:
+    """Adimin hata kategorisi (yoksa ""): REDDEDİLDİ (X) -> X, kilit, LLM..."""
+    detail = step.detail or ""
+    if step.action == "error":
+        return "LLM"
+    if detail.startswith("REDDEDİLDİ (") and ")" in detail:
+        return detail[len("REDDEDİLDİ ("):detail.index(")")]
+    if detail.startswith("REDDEDİLDİ"):
+        return "YOL"
+    if detail.startswith("KİLİTLİ"):
+        return "KİLİT"
+    if detail.startswith("❌ ACCEPT REJECTED"):
+        return "ACCEPT"
+    if detail.startswith("🔁 DÖNGÜ"):
+        return "DÖNGÜ"
+    if detail.startswith("🔄 STUCK"):
+        return "STUCK"
+    return ""
 
 
 def _live_publish(snapshot: MappingProxyType) -> None:
@@ -1926,6 +2045,10 @@ class AgenticCoder:
         self._ui = ui
         self._max = max_iterations
         self._live_ref: tuple[CodingTask, list[CodingStep]] | None = None
+        # Kosu basinda tahmin edilen model ve o anki _last_model_seq: kosu
+        # icinde gercek cagri olana dek panoda tahmin gorunur.
+        self._model_plan: dict | None = None
+        self._model_seq0 = 0
 
     @staticmethod
     def _default_model(prompt: str) -> str:
@@ -1975,25 +2098,7 @@ class AgenticCoder:
 
         # 2. Ollama fallback
         try:
-            import ollama
-            _ollama_kwargs = dict(
-                model=_pick_ollama_coder_model(),
-                messages=[{"role": "user", "content": prompt}],
-                options={"temperature": 0.2, "num_predict": 8192, "num_ctx": 16384},
-            )
-            try:
-                resp = ollama.chat(format="json", **_ollama_kwargs)
-            except ollama.ResponseError as json_err:
-                # Canli testte format="json" istekleri ~170 token sonra HTTP
-                # 500 ile kesildi (ayni istek Jarvis disinda 200). JSON
-                # kisitini kaldirip bir kez daha dene; cikti zaten
-                # _parse_model_response + json_repair ile ayristiriliyor.
-                logger.warning(
-                    f"[Coder] Ollama format=json hatası ({str(json_err)[:200]}) → kısıtsız tekrar"
-                )
-                resp = ollama.chat(**_ollama_kwargs)
-            _set_last_model("ollama", _ollama_kwargs["model"])
-            return resp.get("message", {}).get("content", "")
+            return ollama_generate(prompt)
         except Exception as e:
             logger.warning(f"[Coder] Ollama da yok ({type(e).__name__}: {str(e)[:200]})")
             return json.dumps({
@@ -2037,8 +2142,32 @@ class AgenticCoder:
 
     def _live_model(self) -> dict:
         if not self._uses_default_model:
-            return {"provider": "özel", "name": ""}
-        return last_model() or {"provider": "bilinmiyor", "name": ""}
+            return {"provider": "özel", "name": "", "num_ctx": 0}
+        with _LIVE_LOCK:
+            fresh = _last_model_seq > self._model_seq0
+        if fresh or self._model_plan is None:
+            return last_model() or {"provider": "bilinmiyor", "name": "", "num_ctx": 0}
+        return self._model_plan
+
+    def run_stats(self) -> dict | None:
+        """Son solve() kosusunun ozeti (olcum betigi icin); kosu yoksa None.
+        error_categories: ret kategorileri (SYNTAX, EVAL, ...), KİLİT, LLM hatasi."""
+        if self._live_ref is None:
+            return None
+        task, steps = self._live_ref
+        cats: dict[str, int] = {}
+        for step in steps:
+            cat = _step_error_category(step)
+            if cat:
+                cats[cat] = cats.get(cat, 0) + 1
+        return {
+            "accepted": task.accepted,
+            "iterations": task.iterations,
+            "rejects": task.reject_total,
+            "locks": task.lock_total,
+            "error_categories": cats,
+            "stop_reason": task.stop_reason,
+        }
 
     def _publish_live(self, status: str = "çalışıyor") -> None:
         """Panoya degismez ozet yayimlar. Hata asla disari sizmaz."""
@@ -2123,6 +2252,15 @@ class AgenticCoder:
         _tc_m = _re.search(r'(\d+)\s+(?:adet\s+)?test\b', description, _re.I)
         if _tc_m:
             task.min_test_count = int(_tc_m.group(1))
+        if self._uses_default_model:
+            with _LIVE_LOCK:
+                self._model_seq0 = _last_model_seq
+            try:
+                self._model_plan = await asyncio.to_thread(_planned_model)
+            except Exception as e:
+                logger.debug(f"[Coder] model tahmini başarısız: {type(e).__name__}")
+                self._model_plan = None
+        self._ui_progress(_model_line(self._live_model()))
         self._ui_progress(f"  [PLAN] Beklenen dosyalar: {task.expected_files}")
 
         steps: list[CodingStep] = []
