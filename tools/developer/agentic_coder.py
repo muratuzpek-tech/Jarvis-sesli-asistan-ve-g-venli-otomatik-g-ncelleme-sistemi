@@ -216,6 +216,17 @@ class CodingTask:
     reject_key: tuple = ()
     reject_count: int = 0
     eval_rejects: dict = field(default_factory=dict)   # dosya -> eval/exec ret sayisi
+    # Kilitli (zaten yazilmis) dosyaya tekrar yazma denemeleri: ust uste seri
+    # (dosya, sayac), toplam sayac; sonuca eklenecek notlar.
+    # Yerel sinifta olmayan metot cagrilari ve ayni sorun serisi.
+    method_gaps: list = field(default_factory=list)
+    method_sig: frozenset = frozenset()
+    method_streak: int = 0
+    lock_file: str = ""
+    lock_streak: int = 0
+    lock_total: int = 0
+    tests_skipped: bool = False
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -387,6 +398,232 @@ def _missing_local_modules(files: dict, root: Path) -> list[str]:
     return missing
 
 
+# ── Dosyalar arasi metot varlik kapisi (LLM'siz, ast) ─────────
+# main.py `self.calculator.calculate()` cagiriyor ama yerel Calculator
+# sinifinda `calculate` yoksa bu, cagri yalnizca bir GUI geri cagrisinda
+# calistigi icin --help / import / pytest ile yakalanmaz. Belirsiz her durumda
+# (dinamik atama, __getattr__, yerel olmayan taban, setattr) sessiz kalinir.
+
+_DYNAMIC_ATTR_HOOKS = frozenset({"__getattr__", "__getattribute__", "__dict__", "__slots__"})
+
+
+def _local_modules(files: dict) -> dict[str, tuple[str, ast.Module]]:
+    """Yerel modul adi -> (dosya, ast)."""
+    out = {}
+    for fn, src in files.items():
+        name = _module_name(fn)
+        if name is None:
+            continue
+        try:
+            out[name] = (fn, ast.parse(src))
+        except SyntaxError:
+            continue
+    return out
+
+
+def _resolve_from(fn: str, node: ast.ImportFrom) -> str | None:
+    if not node.level:
+        return node.module
+    pkg = list(Path(fn).parent.parts)
+    if node.level - 1 > len(pkg):
+        return None
+    base = pkg[:len(pkg) - (node.level - 1)]
+    return ".".join([*base, *([node.module] if node.module else [])]) or None
+
+
+def _top_classes(tree: ast.Module) -> dict[str, ast.ClassDef]:
+    return {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+
+
+def _import_table(fn: str, tree: ast.Module, modules: dict) -> tuple[dict, dict]:
+    """(ad -> (modul, sinif), ad -> modul): yerel modulden import edilen
+    siniflar ve yerel modul takma adlari (yalnizca modul duzeyindeki import'lar)."""
+    classes, mods = {}, {}
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            src = _resolve_from(fn, node)
+            if src not in modules:
+                continue
+            for a in node.names:
+                if a.name in _top_classes(modules[src][1]):
+                    classes[a.asname or a.name] = (src, a.name)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in modules and (a.asname or "." not in a.name):
+                    mods[a.asname or a.name] = a.name
+    return classes, mods
+
+
+def _class_attrs(modules: dict, mod: str, cls: str, _seen: frozenset = frozenset()) -> set | None:
+    """Sinifin (yerel tabanlar dahil) bilinen tum ozellik adlari; dinamik ya da
+    yerel olmayan tabanli siniflarda None (= denetleme)."""
+    if (mod, cls) in _seen or mod not in modules:
+        return None
+    fn, tree = modules[mod]
+    node = _top_classes(tree).get(cls)
+    if node is None or node.keywords:            # metaclass=... -> dinamik
+        return None
+    attrs: set[str] = set()
+    for item in node.body:
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            attrs.add(item.name)
+        elif isinstance(item, ast.Assign):
+            attrs.update(t.id for t in item.targets if isinstance(t, ast.Name))
+        elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+            attrs.add(item.target.id)
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Attribute) and isinstance(sub.ctx, ast.Store):
+            attrs.add(sub.attr)                   # self.x = ... (ornek ozniteligi)
+        elif (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+              and sub.func.id in ("setattr", "vars")):
+            return None
+        elif isinstance(sub, ast.Attribute) and sub.attr == "__dict__":
+            return None
+    if attrs & _DYNAMIC_ATTR_HOOKS:
+        return None
+    classes, mods = _import_table(fn, tree, modules)
+    for base in node.bases:
+        if isinstance(base, ast.Name) and base.id == "object":
+            continue
+        if isinstance(base, ast.Name) and base.id in _top_classes(tree):
+            target = (mod, base.id)
+        elif isinstance(base, ast.Name) and base.id in classes:
+            target = classes[base.id]
+        elif (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+              and base.value.id in mods):
+            target = (mods[base.value.id], base.attr)
+        else:
+            return None                            # yerel olmayan taban
+        inherited = _class_attrs(modules, *target, _seen | {(mod, cls)})
+        if inherited is None:
+            return None
+        attrs |= inherited
+    return attrs
+
+
+def _file_method_gaps(user_fn: str, tree: ast.Module, modules: dict) -> list[tuple]:
+    """Tek dosyadaki `x.metot()` / `self.x.metot()` cagrilarindan, x'in tek
+    ve kesin olarak bir yerel sinifin ornegi oldugu ama sinifta `metot`
+    bulunmayanlar: [(sinifin_dosyasi, sinif, metot, cagiran_dosya, satir)]."""
+    classes, mods = _import_table(user_fn, tree, modules)
+    if not classes and not mods:
+        return []
+
+    def cls_of(value):
+        if not isinstance(value, ast.Call):
+            return None
+        f = value.func
+        if isinstance(f, ast.Name) and f.id in classes:
+            return classes[f.id]
+        if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                and f.value.id in mods and f.attr in _top_classes(modules[mods[f.value.id]][1])):
+            return (mods[f.value.id], f.attr)
+        return None
+
+    bindings: dict[tuple, list] = {}
+    calls: list[tuple] = []
+    handled: set[int] = set()   # izlenen atamalarin hedef dugumleri
+
+    def visit(node, scopes, klass):
+        def key_of(target):
+            if isinstance(target, ast.Name):
+                return ("n", id(scopes[-1]), target.id)
+            if (isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+                    and target.value.id == "self" and klass is not None):
+                return ("s", id(klass), target.attr)
+            return None
+
+        def bind(k, value):
+            bindings.setdefault(k, []).append(value)
+
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                a = child.args
+                for arg in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]:
+                    if arg is not None:
+                        bind(("n", id(child), arg.arg), None)
+                visit(child, [*scopes, child], klass)
+                continue
+            if isinstance(child, ast.ClassDef):
+                visit(child, scopes, child)
+                continue
+            if isinstance(child, (ast.Global, ast.Nonlocal)):
+                for name in child.names:
+                    bind(("n", id(scopes[-1]), name), None)
+                    bind(("n", id(scopes[0]), name), None)
+            elif isinstance(child, (ast.Assign, ast.AnnAssign)) and child.value is not None:
+                for t in (child.targets if isinstance(child, ast.Assign) else [child.target]):
+                    k = key_of(t)
+                    if k is not None:
+                        bind(k, cls_of(child.value))
+                        handled.add(id(t))
+            elif (isinstance(child, (ast.Name, ast.Attribute)) and isinstance(child.ctx, ast.Store)
+                    and id(child) not in handled):
+                k = key_of(child)            # for/with/tuple/walrus... -> belirsiz
+                if k is not None:
+                    bind(k, None)
+            elif (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                    and not child.func.attr.startswith("__")):
+                recv = child.func.value
+                if isinstance(recv, ast.Name):
+                    calls.append((("n", [id(sc) for sc in scopes], recv.id),
+                                  child.func.attr, child.lineno))
+                elif key_of(recv) is not None:
+                    calls.append((key_of(recv), child.func.attr, child.lineno))
+            visit(child, scopes, klass)
+
+    visit(tree, [tree], None)
+
+    def resolve(key):
+        if key[0] == "n":
+            _, scope_ids, name = key
+            for sid in reversed(scope_ids):
+                vals = bindings.get(("n", sid, name))
+                if vals is not None:
+                    break
+            else:
+                return None
+        else:
+            vals = bindings.get(key)
+            if not vals:
+                return None
+        first = vals[0]
+        return first if first is not None and all(v == first for v in vals) else None
+
+    out = []
+    for key, method, line in calls:
+        target = resolve(key)
+        if target is None:
+            continue
+        attrs = _class_attrs(modules, *target)
+        if attrs is None or method in attrs:
+            continue
+        out.append((modules[target[0]][0], target[1], method, user_fn, line))
+    return out
+
+
+def _method_gaps(files: dict) -> list[tuple[str, str, str, str, int]]:
+    """Yerel sinif ornegi uzerinden cagrilan ama sinifta olmayan metotlar
+    (cagiran dosya + metot basina ilk satir)."""
+    modules = _local_modules(files)
+    gaps: dict[tuple, tuple] = {}
+    for user_fn, src in files.items():
+        if not user_fn.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        for gap in _file_method_gaps(user_fn, tree, modules):
+            gaps.setdefault(gap[:4], gap)
+    return sorted(gaps.values(), key=lambda g: (g[3], g[4]))
+
+
+def _missing_methods(files: dict) -> list[str]:
+    return [f"{p}: {c} sınıfında '{m}' metodu yok ({u} satır {ln} kullanıyor)"
+            for p, c, m, u, ln in _method_gaps(files)]
+
+
 def _uses_gui(files: dict) -> bool:
     for fn, src in files.items():
         if fn.endswith(".py") and any(m.split(".")[0] in _GUI_MODULES for m in _imported_modules(fn, src)):
@@ -545,6 +782,12 @@ def _rejected_copy_name(filename: str) -> str:
     return f"{_REJECTED_PREFIX}{safe}.txt"
 _RUFF_STREAK_LIMIT = 3
 _SAME_WRITE_LIMIT = 3
+_METHOD_STREAK_LIMIT = 3    # ayni eksik metot bu kadar tur duzelmezse gorev biter
+_LOCK_STREAK_LIMIT = 2      # ayni dosyaya ust uste kilit -> eksik dosyayi LLM'siz uret
+_LOCK_TOTAL_LIMIT = 4       # toplam kilit bunu gecerse gorev biter
+_TEST_CORE_ATTEMPTS = 2
+# Model yazmayi reddederse deterministik uretilen dosyalar.
+_GENERATED_FILES = ("README.md", "tests/__init__.py", "tests/test_core.py")
 
 
 def _is_test_file(fn: str) -> bool:
@@ -639,6 +882,7 @@ def _verify_project(task, run_pytest=True):
         problems.append(f"Eksik modül dosyası: {_mf} (import ediliyor ama yazılmadı)")
     _imp_problems, _ = _import_problems(task.files_written, task.project_path)
     problems.extend(_imp_problems)
+    problems.extend(_missing_methods(task.files_written))
     # GUI (tkinter/PyQt...) projesinde "main.py --help" argumani tanimaz,
     # dogrudan pencereyi acar: yalnizca ast + gercek import denetimi yeterli.
     if _uses_gui(task.files_written):
@@ -1376,6 +1620,22 @@ class AgenticCoder:
                 self._ui_progress(f"  ❌ {task.final_response}")
                 break
 
+            # ── eksik metot: tum dosyalar yazildiktan sonra 3 tur duzelmezse dur ──
+            task.method_gaps = _method_gaps(task.files_written)
+            _msig = frozenset(task.method_gaps)
+            if not _msig or self._next_missing(task):
+                task.method_streak = 0     # model once eksik dosyalari yazsin
+            else:
+                task.method_streak = task.method_streak + 1 if _msig == task.method_sig else 1
+            task.method_sig = _msig
+            if task.method_streak > _METHOD_STREAK_LIMIT:
+                task.stop_reason = task.final_response = (
+                    f"EKSİK METOT düzelmedi ({_METHOD_STREAK_LIMIT} tur üst üste): "
+                    + "; ".join(_missing_methods(task.files_written))[:400] + " — görev durduruldu."
+                )
+                self._ui_progress(f"  ❌ {task.final_response}")
+                break
+
             # ── pytest geri bildirimi: SMART EXIT adayi + test dosyasi varsa ──
             if self._smart_exit_candidate(task) and any(map(_is_test_file, task.files_written)):
                 await asyncio.to_thread(self._sync_pytest, task)
@@ -1398,6 +1658,12 @@ class AgenticCoder:
                 prompt += ("\n═══ RUFF: GERÇEK HATALAR (tanımsız ad / sözdizimi) — DÜZELTMEDEN "
                            "ACCEPT YOK; dosyanın TAM halini yaz ═══\n")
                 prompt += "\n".join(task.ruff_problems.values())[:1500] + "\n"
+            if task.method_gaps:
+                prompt += ("\n═══ EKSİK METOT (başka dosyadaki sınıfta yok) — EKLEMEDEN "
+                           "ACCEPT YOK; ilgili dosyanın TAM halini yaz ═══\n")
+                for _p, _c, _m, _u, _ln in task.method_gaps[:5]:
+                    prompt += (f"  → {_p} dosyasına {_c}.{_m} metodunu ekle "
+                               f"({_u} satır {_ln} çağırıyor)\n")
             if task.import_problems:
                 prompt += "\n═══ IMPORT DENEMESİ BAŞARISIZ (düzelt) ═══\n"
                 prompt += "\n".join(f"  {p}" for p in task.import_problems[:5]) + "\n"
@@ -1474,11 +1740,17 @@ class AgenticCoder:
                 _fn_target = args.get("filename", "")
                 if _fn_target:
                     task.rewrite_counts[_fn_target] = task.rewrite_counts.get(_fn_target, 0) + 1
-                    if task.rewrite_counts[_fn_target] > 3 and _fn_target in task.files_written:
-                        step.detail = f"SKIP: {_fn_target} zaten 3+ kez yazildi (locked)"
-                        step.success = True
-                        steps.append(step)
+                    # Kilit yalnizca eksik dosya varken ve dosya temizken: ruff
+                    # hatasi olan dosyanin duzeltilmesi engellenmez.
+                    if (task.rewrite_counts[_fn_target] > 3 and _fn_target in task.files_written
+                            and _fn_target not in task.ruff_problems
+                            and all(g[0] != _fn_target for g in task.method_gaps)
+                            and self._next_missing(task)):
+                        last_error = await self._handle_lock(task, step, steps, _fn_target)
+                        if task.stop_reason:
+                            break
                         continue
+                    task.lock_file, task.lock_streak = "", 0
             if action in ("write", "fix"):
                 filename = args.get("filename") or target_filename or f"main.{_lang_ext(task.language)}"
                 content = args.get("content", "")
@@ -1767,17 +2039,180 @@ class AgenticCoder:
         self._ui_progress(f"  ❌ {task.stop_reason}")
         return True
 
+    # ── Kilitli dosya: gorunur ret + deterministik ilerleme ──────
+
+    @staticmethod
+    def _next_missing(task: CodingTask) -> str | None:
+        """Plandaki (expected_files + auto_expected) henuz yazilmamis ilk dosya."""
+        for name in dict.fromkeys(task.expected_files + task.auto_expected):
+            if name not in task.files_written:
+                return name
+        return None
+
+    async def _handle_lock(self, task: CodingTask, step: CodingStep,
+                           steps: list[CodingStep], filename: str) -> str:
+        """Kilitli dosyaya yazma denemesi: ekrana ve modele sonraki eksik
+        dosyayi soyler. Ust uste _LOCK_STREAK_LIMIT kilitte uretilebilir eksik
+        dosyalari LLM'siz yazar; toplam _LOCK_TOTAL_LIMIT asilirsa stop_reason
+        koyar. Donus: modele gidecek last_error."""
+        task.lock_total += 1
+        task.lock_streak = task.lock_streak + 1 if task.lock_file == filename else 1
+        task.lock_file = filename
+        nxt = self._next_missing(task)
+        step.detail = f"KİLİTLİ: {filename} zaten yazıldı ({task.lock_total}. kilit)"
+        step.success = False
+        steps.append(step)
+        self._ui_progress(f"    ⛔ {filename} kilitli (zaten yazıldı), şimdi {nxt} yaz")
+        if task.lock_total > _LOCK_TOTAL_LIMIT:
+            task.stop_reason = f"döngü: {filename} kilitli, model {nxt}'ya geçmedi"
+            self._ui_progress(f"  ❌ {task.stop_reason}")
+            return ""
+        if task.lock_streak >= _LOCK_STREAK_LIMIT and nxt in _GENERATED_FILES:
+            await self._generate_missing(task)
+            task.lock_file, task.lock_streak = "", 0
+            nxt = self._next_missing(task)
+        if nxt is None:
+            return f"{filename} TAMAM ve kilitli, TEKRAR YAZMA. Tüm dosyalar yazıldı: şimdi accept yap."
+        return f"{filename} TAMAM ve kilitli, TEKRAR YAZMA. Şimdi SADECE {nxt} yaz."
+
+    async def _generate_missing(self, task: CodingTask) -> None:
+        """Siradaki eksik dosya(lar) README.md / tests/ ise onlari LLM'siz
+        (test_core.py icin dar bir prompt'la) yazar; zincir uretilemeyen
+        ilk dosyada durur."""
+        while (name := self._next_missing(task)) in _GENERATED_FILES:
+            if name == "README.md":
+                content = self._readme_template(task)
+            elif name == "tests/__init__.py":
+                content = ""
+            else:
+                content = await self._write_test_core(task)
+                if content is None:
+                    self._skip_tests(task)
+                    continue
+            if not await asyncio.to_thread(self._store_generated, task, name, content):
+                return
+
+    def _store_generated(self, task: CodingTask, name: str, content: str) -> bool:
+        fpath = _contained_path(task.project_path, name)
+        if fpath is None:
+            return False
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        fpath.write_text(content, encoding="utf-8")
+        task.files_written[name] = content
+        self._ui_progress(f"    🤖 {name} otomatik yazıldı (LLM'siz, {len(content):,} chars)")
+        return True
+
+    def _readme_template(self, task: CodingTask) -> str:
+        files = [f for f in dict.fromkeys(task.expected_files + list(task.files_written))
+                 if f != "README.md"]
+        entry = self._entry_file(task) or next((f for f in files if f.endswith(".py")), None)
+        lines = [
+            f"# {task.project_path.name}",
+            "",
+            task.description.strip(),
+            "",
+            "Bu README, model yazmadığı için Jarvis agentic coder tarafından şablondan",
+            "otomatik üretildi. Aşağıda projedeki dosyalar ve çalıştırma komutu yer alır.",
+            "",
+            "## Dosyalar",
+            "",
+            *(f"- `{f}`" for f in files),
+            "",
+            "## Çalıştırma",
+            "",
+            "```bash",
+            f"cd {task.project_path}",
+            f"python3 {entry}" if entry else "# çalıştırılabilir giriş dosyası yok",
+            "```",
+        ]
+        if any(f.startswith("tests/") or _is_test_file(f) for f in files):
+            lines += ["", "## Testler", "", "```bash", "python3 -m pytest -q", "```"]
+        return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _module_api(task: CodingTask) -> list[str]:
+        """Yazilmis (test disi) modullerin adi ve ust duzey public adlari."""
+        out = []
+        for fn, src in task.files_written.items():
+            if not fn.endswith(".py") or _is_test_file(fn) or Path(fn).name == "__init__.py":
+                continue
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                continue
+            names = [n.name for n in tree.body
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                     and not n.name.startswith("_")]
+            out.append(f"  - {fn[:-3].replace('/', '.')}: {', '.join(names) or '(public ad yok)'}")
+        return out
+
+    async def _write_test_core(self, task: CodingTask) -> str | None:
+        """tests/test_core.py icin modele DAR bir prompt verir (sadece o dosya +
+        modul adlari). _TEST_CORE_ATTEMPTS denemede gecerli, ruff-temiz ve
+        pytest'ten gecen icerik gelmezse None."""
+        name = "tests/test_core.py"
+        error = ""
+        for _ in range(_TEST_CORE_ATTEMPTS):
+            prompt = "\n".join([
+                f"SADECE {name} dosyasını yaz (başka dosya YOK). pytest testleri olsun.",
+                "Proje kökündeki modüller (import adı: ad listesi):",
+                *self._module_api(task),
+                "Kurallar: modülleri proje kökünden import et (ör. `from calc import topla`), "
+                "en az 2 `def test_...` ve gerçek assert yaz; input()/GUI penceresi açma.",
+                *([f"Önceki deneme reddedildi: {error[:600]}"] if error else []),
+                'SADECE JSON: {"action": "write", "args": {"filename": "' + name
+                + '", "content": "<dosyanın tam içeriği>"}}',
+            ])
+            raw = await asyncio.to_thread(self._model_fn, prompt)
+            args = (_parse_model_response(raw) or {}).get("args") or {}
+            content = args.get("content") if isinstance(args, dict) else None
+            if not isinstance(content, str) or "def test_" not in content:
+                error = "yanıtta `def test_...` içeren content yok"
+                continue
+            ok, msg = _validate_file(name, content, task.language)
+            if not ok:
+                error = msg
+                continue
+            fpath = task.project_path / name
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            fpath.write_text(content, encoding="utf-8")
+            fixed, ruff_left = await asyncio.to_thread(_ruff_autofix, fpath)
+            content = fixed if fixed is not None else content
+            error = (f"ruff: {ruff_left}" if ruff_left
+                     else await asyncio.to_thread(_run_project_pytest, task.project_path))
+            if not error:
+                return content
+            fpath.unlink(missing_ok=True)
+        return None
+
+    def _skip_tests(self, task: CodingTask) -> None:
+        """test_core.py yazilamadi: plandan cikar; bizim urettigimiz bos
+        tests/__init__.py de kalkar (aksi halde 'test dosyasinda def test_ yok')."""
+        for name in ("tests/test_core.py", "tests/__init__.py"):
+            if name == "tests/__init__.py" and task.files_written.get(name, "").strip():
+                continue
+            for lst in (task.expected_files, task.auto_expected):
+                if name in lst:
+                    lst.remove(name)
+            if name in task.files_written:
+                del task.files_written[name]
+                (task.project_path / name).unlink(missing_ok=True)
+        task.tests_skipped = True
+        note = "tests/test_core.py yazılamadı, atlandı"
+        task.notes.append(note)
+        self._ui_progress(f"    ⚠️ {note}")
+
     @staticmethod
     def _smart_exit_candidate(task: CodingTask) -> bool:
         """Tum gerekli dosyalar yazildi, .py'ler derleniyor, import temiz."""
         _enforce = {'README.md'}
         _has_test = any('test' in f.lower() for f in task.files_written)
         _planned = [f for f in task.expected_files if f not in task.auto_expected]
-        if not _has_test and len(_planned) >= 3:
+        if not _has_test and len(_planned) >= 3 and not task.tests_skipped:
             _enforce.add('tests/__init__.py')
         if not (set(task.expected_files) | _enforce).issubset(task.files_written):
             return False
-        if task.import_problems or task.ruff_problems:
+        if task.import_problems or task.ruff_problems or _method_gaps(task.files_written):
             return False
         for _fn, _fc in task.files_written.items():
             # Sadece .py derlenir; README.md'yi derlemek SMART EXIT'i
@@ -1895,6 +2330,7 @@ class AgenticCoder:
         ]
         if task.missing_modules:
             lines.append(f"Eksik modül: {', '.join(task.missing_modules)}")
+        lines.extend(task.notes)
         return "\n".join(lines)
 
     def _build_summary(self, task: CodingTask, steps: list[CodingStep]) -> str:
