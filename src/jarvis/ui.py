@@ -1472,7 +1472,7 @@ class _CommandWorker:
 
     def __init__(self, name: str = "ui-command"):
         import queue
-        self._queue: "queue.Queue[tuple]" = queue.Queue()
+        self._queue: queue.Queue[tuple] = queue.Queue()
         self._thread = threading.Thread(target=self._run, daemon=True, name=name)
         self._thread.start()
 

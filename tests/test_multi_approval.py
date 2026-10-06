@@ -25,7 +25,6 @@ sozlesme testlerinin KAPSAMADIGI durumlar:
 IZOLASYON: HOME/JARVIS_HOME tmp_path; ag/LLM yok.
 """
 import asyncio
-import os
 from types import SimpleNamespace
 
 import pytest

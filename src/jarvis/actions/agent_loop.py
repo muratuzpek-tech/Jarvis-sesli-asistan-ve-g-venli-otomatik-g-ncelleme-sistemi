@@ -251,7 +251,7 @@ def _find_task(tasks: list[dict], task_id: str) -> dict | None:
 
 
 def approve_task(task_id: str, *, expected_action: dict,
-                 grant: "_gate.Grant | None" = None) -> str:
+                 grant: _gate.Grant | None = None) -> str:
     """Onay bekleyen bir adimi GERCEKTEN calistirir. YALNIZCA main.py'nin
     kullanici-turu onay yolu (_handle_agent_loop_reply) cagirir; Gemini
     araci (agent_loop_tool) bu fonksiyona ulasamaz. expected_action,

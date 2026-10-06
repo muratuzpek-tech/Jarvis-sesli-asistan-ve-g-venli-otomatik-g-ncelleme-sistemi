@@ -421,7 +421,7 @@ class BrainOrchestrator:
             lines.append(f"[{t['id']}] {t['status']}: {t['name'][:70]}{extra}")
         return f"{len(all_tasks)} takım görevi (son {len(lines)} tanesi):\n" + "\n".join(lines)
 
-    def approve(self, task_id: str, *, approved_call: "_gate.ResolvedCall | None" = None) -> str:
+    def approve(self, task_id: str, *, approved_call: _gate.ResolvedCall | None = None) -> str:
         """Onay bekleyen adimi calistirir. YALNIZCA main.py'nin kullanici-turu
         onay yolu cagirir ve depodaki kendi istegini tuketen onayin cagrisini
         (approved_call) verir. Calistirmadan hemen once adim yeniden cozulur
@@ -820,7 +820,7 @@ class BrainOrchestrator:
         base_path = task.get("payload", {}).get("_active_folder", ".")
         return self._resolve_action_with_file_modification(task, step, base_path)
 
-    def _approval_call(self, task: dict | None, step: dict) -> "_gate.ResolvedCall":
+    def _approval_call(self, task: dict | None, step: dict) -> _gate.ResolvedCall:
         """Adimin kapidaki cozulmus hali (arac + normalize argumanlar, kaynak
         BRAIN_TEAM). Onay istegi bu cagriya baglanir; calistirmadan hemen once
         yeniden hesaplanir ve parmak izi onaylananla birebir eslesmelidir."""

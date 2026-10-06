@@ -31,7 +31,6 @@ if _platform.system() == "Windows":
 import asyncio
 from .security_gate import fingerprint as _gate_fingerprint
 from . import security_gate as _gate
-import json
 import os
 import re
 import threading
@@ -1600,7 +1599,7 @@ class JarvisLive:
                     result = await asyncio.wait_for(
                         asyncio.shield(task), timeout=self._BACKGROUND_START_WAIT_S
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     if self._bg_tasks is None:
                         self._bg_tasks = set()
                     self._bg_tasks.add(task)

@@ -77,6 +77,43 @@ def _real_audit_logs_untouched():
     assert not changed, f"Test GERCEK denetim kaydina yazdi: {changed}"
 
 
+# ── Depo icindeki proje yedekleri ─────────────────────────────────────────
+#
+# JarvisBackupTool.for_jarvis() yedekleri HOME/JARVIS_HOME'dan BAGIMSIZ olarak
+# depodaki src/jarvis_yedekler/ klasorune yazar (backups_root_for(
+# jarvis_project_root())). HOME izolasyonu bunu engellemez; bir test gercek
+# executor uzerinden backup_create calistirirsa depoda yedek birakir. Her
+# testten once/sonra (ve oturum sonunda) bu klasorun alt ogeleri
+# karsilastirilir; yeni bir oge olusursa test basarisiz olur. Yol cagri
+# aninda ayni fonksiyonlardan hesaplanir (tek kaynak: backup_tool).
+
+def _project_backups_root() -> Path | None:
+    try:
+        from jarvis.backup_tool import backups_root_for, jarvis_project_root
+        return backups_root_for(jarvis_project_root())
+    except Exception:
+        return None
+
+
+def _project_backups(root: Path | None) -> frozenset[str]:
+    if root is None or not root.is_dir():
+        return frozenset()
+    return frozenset(p.name for p in root.iterdir())
+
+
+@pytest.fixture(autouse=True)
+def _no_project_backups_in_repo():
+    root = _project_backups_root()
+    before = _project_backups(root)
+    yield
+    created = sorted(_project_backups(root) - before)
+    assert not created, (
+        f"Test depoya proje yedegi yazdi ({root}): {created}. "
+        "Yedek araci HOME'dan bagimsiz olarak depoya yazar; testte arac fonksiyonunu "
+        "kayit tutan bir fonksiyonla degistirin ya da jarvis_project_root'u tmp'ye "
+        "yonlendirin.")
+
+
 # ── Kullanici dizinlerinin izolasyonu ─────────────────────────────────────
 #
 # Iki katman:
@@ -148,9 +185,16 @@ def _isolated_user_dirs(tmp_path_factory, monkeypatch):
 
 def pytest_sessionstart(session):
     session.config._real_audit_hashes = _audit_hashes()
+    root = _project_backups_root()
+    session.config._project_backups = (root, _project_backups(root))
 
 
 def pytest_sessionfinish(session, exitstatus):
+    root, backups_before = getattr(session.config, "_project_backups", (None, frozenset()))
+    created = sorted(_project_backups(root) - backups_before)
+    if created:
+        print(f"\nHATA: test paketi depoya proje yedegi yazdi ({root}): {created}")
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
     before = getattr(session.config, "_real_audit_hashes", None)
     if before is None:
         return
