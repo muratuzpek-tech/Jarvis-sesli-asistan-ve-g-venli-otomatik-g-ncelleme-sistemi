@@ -298,7 +298,11 @@ class BrainOrchestrator:
             except Exception:
                 target = f"{params.get('path', '')}/{params.get('name', '')}"
         elif params:
-            target = ", ".join(f"{k}={str(v)[:60]}" for k, v in params.items() if k != "content")
+            # Gizli argumanlar (ör. vault password) "***", icerik alanlari
+            # yalnizca uzunluk: bu metin kullaniciya, modele ve
+            # task_results.log'a gider.
+            from jarvis.core.audit_log import format_params
+            target = format_params(params, limit=60)
         return {"tool": tool, "action": action, "target": target}
 
     def _audit(self, event: str, task: dict | None, step: dict | None, *, result="",
@@ -420,8 +424,10 @@ class BrainOrchestrator:
             return f"'{task_id}' onay bekleyen bir AI takım görevi değil (durum: {task['status']})."
 
         step = task["payload"]["pending_step"]
+        ran = False   # adim calisti mi? (sonraki hata "post_failure" olarak kaydedilir)
         try:
             result = self._execute_step(task, step)
+            ran = True
             self._audit("approved_executed", task, step, result=result, approved=True,
                         executed=True, verdict="needs_approval")
             task["payload"]["pending_step"] = None
@@ -429,8 +435,9 @@ class BrainOrchestrator:
             self.tasks.update(task_id, status="pending", payload=task["payload"])
             return f"Onaylandı ve gerçekleştirildi: {str(result)[:200]}"
         except Exception as e:
-            self._audit("approved_failed", task, step, result=f"HATA: {e}", approved=True,
-                        executed=True, verdict="needs_approval")
+            self._audit("post_failure" if ran else "approved_failed", task, step,
+                        result=f"HATA: {e}", approved=True, executed=True,
+                        verdict="needs_approval")
             task["payload"]["pending_step"] = None
             self.tasks.update(task_id, status="failed", error=str(e), payload=task["payload"])
             self._notify_result(self.tasks.get(task_id))
@@ -1363,14 +1370,18 @@ class BrainOrchestrator:
             return
 
         step_with_risk = {**step, "risk": risk}
+        ran = False   # adim calisti mi? (sonraki hata "post_failure" olarak kaydedilir)
         try:
             result = self._execute_step(task, step)
+            ran = True
             self._audit("executed", task, step_with_risk, result=result, executed=True, verdict="allow")
             self._finish_step(task, step, result)
             self.tasks.update(task["id"], payload=payload)
         except Exception as e:
-            self._audit("execution_failed", task, step_with_risk, result=f"HATA: {e}",
-                        executed=True, verdict="allow")
+            # Tek tutarli dizi: calismadiysa "execution_failed"; calistiktan
+            # sonra (_finish_step / kayit) hata verdiyse "executed" + "post_failure".
+            self._audit("post_failure" if ran else "execution_failed", task, step_with_risk,
+                        result=f"HATA: {e}", executed=True, verdict="allow")
             payload.setdefault("failed_steps", []).append(step.get("description", ""))
             payload["step_index"] = idx + 1
             self.tasks.update(task["id"], payload=payload)

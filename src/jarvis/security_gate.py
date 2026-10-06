@@ -683,8 +683,11 @@ _LIVE_POLICY: dict[str, tuple[Callable[[Mapping], str], str]] = {
 
 
 def _approval_texts(call: ResolvedCall) -> tuple[str, str]:
+    from jarvis.core.audit_log import format_params
     danger = "TEHLIKELI" if call.effect >= Effect.EXTERNAL else "DIKKAT"
-    ps = ", ".join(f"{k}={str(v)[:40]}" for k, v in call.params.items())
+    # Gizli argumanlar "***", icerik alanlari yalnizca uzunluk (kesme tek
+    # basina kisa bir parolayi gizlemez).
+    ps = format_params(call.params, limit=40)
     model_message = (
         f"CONFIRMATION_REQUIRED:{call.tool}:{danger} arac cagrisi: {ps}. Kullaniciya "
         f"ne yapilacagini TEK cumleyle anlat ve 'evet' ya da 'hayir' demesini iste. "

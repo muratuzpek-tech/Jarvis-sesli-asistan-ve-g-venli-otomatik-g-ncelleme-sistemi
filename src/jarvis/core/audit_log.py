@@ -39,7 +39,7 @@ _PROTECTED_FIELDS = frozenset({
 # (bu degerler ASLA ham loglanmaz, SHA-256 hash olarak kaydedilir)
 _SENSITIVE_PATTERNS = (
     "code", "pass", "secret", "token", "key", "auth",
-    "cred", "pin", "otp", "session",
+    "cred", "pin", "otp", "session", "parola", "sifre", "şifre",
 )
 
 
@@ -70,10 +70,11 @@ def _is_sensitive_key(key) -> bool:
     return any(p in kl for p in _SENSITIVE_PATTERNS)
 
 
-def mask_params(params) -> dict:
-    """Arac argumanlarinin denetim kaydina yazilabilir hali: gizli anahtar
-    adlari ve icerik alanlari maskelenir, kalanlar kisaltilir ve onay kodu
-    temizlenir. Ic ice sozlukler ayni kuralla islenir."""
+def mask_params(params, limit: int = 80) -> dict:
+    """Arac argumanlarinin denetim kaydina / onay metnine yazilabilir hali:
+    gizli anahtar adlari "***", icerik alanlari yalnizca uzunluk; kalanlar
+    limit karaktere kisaltilir ve onay kodu temizlenir. Ic ice sozlukler ayni
+    kuralla islenir."""
     if not isinstance(params, dict):
         return {}
     out: dict = {}
@@ -84,10 +85,16 @@ def mask_params(params) -> dict:
         elif kl in _CONTENT_KEYS:
             out[k] = f"<{len(str(v))} karakter gizlendi>"
         elif isinstance(v, dict):
-            out[k] = mask_params(v)
+            out[k] = mask_params(v, limit)
         else:
-            out[k] = redact_text(v)[:80]
+            out[k] = redact_text(v)[:limit]
     return out
+
+
+def format_params(params, limit: int = 80) -> str:
+    """Kullaniciya/modele gosterilen onay metinleri icin "k=v, ..." -
+    mask_params kurallariyla (gizli degerler ve icerik asla ham yazilmaz)."""
+    return ", ".join(f"{k}={v}" for k, v in mask_params(params, limit).items())
 
 
 def _get_log_path():

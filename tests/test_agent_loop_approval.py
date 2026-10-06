@@ -219,7 +219,10 @@ def test_approval_request_shows_tool_args_and_target(env):
     ])
     _hook(env)
     text = "\n".join(env.spoken + env.jl.ui.logs)
-    assert "send_message" in text and "Ali" in text and "selam aaaa1111" in text
+    assert "send_message" in text and "Ali" in text
+    # Icerik alanlari (message_text) onay metnine ham yazilmaz, yalnizca
+    # uzunlugu gorunur (Adim 3.2b).
+    assert "selam aaaa1111" not in text and "message_text=<14 karakter gizlendi>" in text
     assert "aaaa1111" in text
     low = text.casefold()
     assert "evet" in low and "hayır" in low

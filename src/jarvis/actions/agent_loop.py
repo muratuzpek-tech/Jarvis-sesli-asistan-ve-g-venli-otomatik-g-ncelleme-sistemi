@@ -48,7 +48,7 @@ from jarvis.actions.tools_kopru import (
     call_tool, is_destructive,
 )
 from jarvis.paths import memory_dir
-from jarvis.core.audit_log import log_action, log_tool_event
+from jarvis.core.audit_log import format_params, log_action, log_tool_event
 
 
 TASKS_PATH      = memory_dir() / "agent_tasks.json"
@@ -431,7 +431,8 @@ def describe_pending_action(task: dict) -> str:
     pending = task.get("pending_action") or {}
     tool = str(pending.get("tool") or "?")
     params = pending.get("parameters") or {}
-    args = ", ".join(f"{k}={str(v)[:120]}" for k, v in params.items()) or "—"
+    # Gizli argumanlar "***", icerik alanlari yalnizca uzunluk.
+    args = format_params(params, limit=120) or "—"
     return (
         f"Onay gerekiyor: arka plan görevi '{str(task.get('goal', ''))[:80]}' şu adımı "
         f"çalıştırmak istiyor. Araç: {tool}. Argümanlar: {args}. "
