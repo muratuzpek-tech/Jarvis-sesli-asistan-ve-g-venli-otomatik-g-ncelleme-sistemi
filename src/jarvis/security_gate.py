@@ -218,6 +218,9 @@ class ApprovalRequest:
     message: str | None = None      # yeniden sorulurken kullanıcıya okunacak metin
     code: str | None = None         # aracın kendi önizleme kodu (modele gitmez)
     granted_at: float | None = None
+    # Arka plan isteğinde onayın bağlı olduğu plan adımı (ör. Brain görev id +
+    # adım içeriği); çağrının parmak iziyle BİRLİKTE eşleşmelidir.
+    binding: str | None = None
 
     @property
     def tool(self) -> str:
@@ -294,20 +297,24 @@ class MultiApprovalStore(ApprovalStore):
 
     def request(self, call: ResolvedCall, *, background: bool | None = None,
                 task_id: str | None = None, kind: str | None = None,
-                message: str | None = None, code: str | None = None) -> str:
+                message: str | None = None, code: str | None = None,
+                binding: str | None = None) -> str:
         kind = kind or _kind_of(call)
         if background is None:
             background = kind != KIND_VOICE
         with self._lock:
             self._purge_foreground()
             for rec in list(self._items.values()):
-                if rec.kind == kind and rec.fingerprint == call.fingerprint:
+                # Aynı görevin aynı çağrısı yeniden istenirse eskisi düşer;
+                # AYNI çağrıyı isteyen FARKLI görevler ayrı kayıt kalır.
+                if (rec.kind == kind and rec.fingerprint == call.fingerprint
+                        and rec.task_id == task_id):
                     self._drop(rec.request_id)
             rid = uuid.uuid4().hex[:12]
             self._items[rid] = ApprovalRequest(
                 request_id=rid, call=call, kind=kind, background=bool(background),
                 task_id=task_id, asked_at=self._clock(), seq=next(self._seq),
-                message=message, code=code)
+                message=message, code=code, binding=binding)
             return rid
 
     def get(self, request_id: str | None) -> ApprovalRequest | None:
@@ -396,6 +403,18 @@ class MultiApprovalStore(ApprovalStore):
                         and now - rec.granted_at <= FOREGROUND_TTL_S):
                     return self._items.pop(rec.request_id)
             return None
+
+    def consume_request(self, request_id: str, call: ResolvedCall) -> ApprovalRequest | None:
+        """YALNIZCA bu request_id'li kaydı tüketir: kullanıcı onayı
+        FOREGROUND_TTL_S içinde verilmiş VE kaydın parmak izi çalıştırılacak
+        çağrınınkiyle birebir aynı olmalı. Başka bir kaydın onayı kullanılmaz."""
+        with self._lock:
+            rec = self.get(request_id)
+            if (rec is None or rec.granted_at is None
+                    or self._clock() - rec.granted_at > FOREGROUND_TTL_S
+                    or rec.tool != call.tool or rec.fingerprint != call.fingerprint):
+                return None
+            return self._items.pop(rec.request_id)
 
     def drop_kind(self, kind: str) -> None:
         with self._lock:
@@ -961,6 +980,23 @@ _LIVE_POLICY: dict[str, tuple[Callable[[Mapping], str], str]] = {
 }
 
 
+def _settings_loop_policy(params: Mapping) -> str:
+    from jarvis.actions.tools_kopru import _SAFE_SETTINGS_ACTIONS
+    action = str(params.get("action", "")).lower().strip().replace(" ", "_").replace("-", "_")
+    return ALLOW if action in _SAFE_SETTINGS_ACTIONS else APPROVE
+
+
+# Arka plan görev döngüsü (AGENT_LOOP) politikası. Tabloda olmayan araç:
+# READ -> ALLOW, geri kalan her şey -> APPROVE. Tablodaki ALLOW'lar bugünkü
+# onaysız çalışma kümesini (tools_kopru._READONLY_TOOLS /
+# _SAFE_SETTINGS_ACTIONS) korur; tek kaynak oradaki tablolardır.
+_AGENT_LOOP_POLICY: dict[str, tuple[Callable[[Mapping], str], str]] = {
+    "computer_settings": (_settings_loop_policy, "yalnızca ses/parlaklık onaysız"),
+    "github_arac_bul_ve_degerlendir": (lambda p: ALLOW,
+                                       KNOWN_UNGATED_NON_READ["github_arac_bul_ve_degerlendir"]),
+}
+
+
 def _approval_texts(call: ResolvedCall) -> tuple[str, str]:
     from jarvis.core.audit_log import format_params
     danger = "TEHLIKELI" if call.effect >= Effect.EXTERNAL else "DIKKAT"
@@ -1027,6 +1063,9 @@ def authorize(tool: str, args: Mapping | None, source: Source) -> Decision:
                        if source in (Source.MODEL_LIVE, Source.REACT) else None)
     if source is Source.MODEL_LIVE and tool in _LIVE_POLICY:
         policy_fn, reason = _LIVE_POLICY[tool]
+        policy = policy_fn(call.params)
+    elif source is Source.AGENT_LOOP and tool in _AGENT_LOOP_POLICY:
+        policy_fn, reason = _AGENT_LOOP_POLICY[tool]
         policy = policy_fn(call.params)
     elif registry_policy is not None:
         policy, reason = registry_policy
@@ -1111,6 +1150,17 @@ def finish(decision: Decision, result: Any, store: ApprovalStore | None) -> Any:
     return result
 
 
+def is_preview(decision: Decision, raw_result: Any) -> bool:
+    """Aracın ham çıktısı yalnızca bir önizleme mi (ONAY GEREKLİ + kod)?
+    Öyleyse araç asıl işi YAPMADI: denetim kaydında executed=False."""
+    if decision.protocol == TERMINAL_CODE:
+        return strip_terminal_code(raw_result)[1] is not None
+    if decision.protocol == TOOL_CODE:
+        head = str(raw_result or "").partition("\n\n")[0]
+        return head.startswith("ONAY GEREKL") and _CONFIRM_CODE_RE.search(head) is not None
+    return False
+
+
 # Etki -> denetim kaydindaki risk etiketi.
 _EFFECT_RISK = {Effect.READ: "low", Effect.MUTATE: "medium", Effect.EXTERNAL: "high",
                 Effect.EXECUTE: "high", Effect.SYSTEM: "high"}
@@ -1146,6 +1196,23 @@ def audit(decision: Decision, result: Any, *, executed: bool,
         )
     except Exception:
         pass   # denetim kaydı yazılamazsa araç akışı bozulmaz
+
+
+def audit_denied(call: ResolvedCall, *, source: str | None = None,
+                 task_id: str | None = None) -> None:
+    """Kullanıcının "hayır"ı: action="denied" satırı (tool, parmak izi hash'i,
+    maskeli params, approved=False, executed=False). Brain/agent_loop ret
+    satırlarıyla aynı biçim (core/audit_log.log_tool_event)."""
+    from jarvis.core.audit_log import log_tool_event
+    try:
+        log_tool_event(
+            source=source or (call.source.value if call.source else Source.MODEL_LIVE.value),
+            event="denied", tool=call.tool, params=dict(call.params),
+            result="kullanıcı reddetti", approved=False, executed=False,
+            verdict=Verdict.NEEDS_APPROVAL.value,
+            risk=_EFFECT_RISK.get(call.effect, "high"), task_id=task_id)
+    except Exception:
+        pass   # denetim kaydı yazılamazsa akış bozulmaz
 
 
 def execute(decision: Decision, grant: Grant | None,

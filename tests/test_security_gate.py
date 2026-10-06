@@ -165,13 +165,21 @@ def test_adapter_cancel_and_ttl(jl, monkeypatch):
 
 
 def test_pseudo_actions_brain_and_agent_loop_round_trip(jl):
+    # Adim 3.4: agent_loop istegi depoda GERCEK cagri olarak (arac + argumanlar,
+    # kaynak AGENT_LOOP) durur; ayni gorevin ayni adimi yeniden duyurulursa
+    # "zaten soruluyor" sayilir ve ikinci kayit acilmaz.
     from jarvis import security_gate as sg
-    store = sg.PendingSlotAdapter(jl)
-    args = jl._agent_loop_fingerprint_args("abcd1234", {"tool": "send_message", "parameters": {"x": "1"}})
-    call = sg.ResolvedCall.for_pending("agent_loop", args)
-    store.request(call)
-    assert jl.request_agent_loop_approval("abcd1234", {"tool": "send_message", "parameters": {"x": "1"}},
-                                          "m") is True   # ayni adim zaten soruluyor
+    jl.speak = lambda *a, **k: None          # duyuru canli oturuma konusur
+    pending = {"tool": "send_message", "parameters": {"x": "1"}}
+    assert jl.request_agent_loop_approval("abcd1234", pending, "m") is True
+    assert jl.request_agent_loop_approval("abcd1234", pending, "m") is True   # ayni adim zaten soruluyor
+    recs = jl._approvals.records(sg.KIND_AGENT_LOOP)
+    assert len(recs) == 1 and recs[0].call.tool == "send_message" and recs[0].task_id == "abcd1234"
+    # Eski bicimli sozde kayit (for_pending) gercek cagri yerine gecmez.
+    jl._approvals.cancel()
+    sg.PendingSlotAdapter(jl).request(sg.ResolvedCall.for_pending(
+        "agent_loop", jl._agent_loop_fingerprint_args("abcd1234", pending)))
+    assert jl.request_agent_loop_approval("abcd1234", pending, "m") is False
 
 
 # ── Adim 1: ToolSpec + tutarlilik ──
@@ -314,4 +322,6 @@ def test_only_the_gated_paths_import_the_gate():
             if any(m.split(".")[-1] == "security_gate" for m in mods):
                 users.append(str(path.relative_to(root)))
                 break
-    assert sorted(users) == ["src/jarvis/main.py", "tools/agent/react_runtime.py"], users
+    # Adim 3.4: agent_loop (E5) ve Brain Team (E6) de kapidan gecer.
+    assert sorted(users) == ["src/jarvis/actions/agent_loop.py", "src/jarvis/core/brain_orchestrator.py",
+                             "src/jarvis/main.py", "tools/agent/react_runtime.py"], users

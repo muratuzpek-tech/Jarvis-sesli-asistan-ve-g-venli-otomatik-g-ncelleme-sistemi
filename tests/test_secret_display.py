@@ -233,7 +233,9 @@ def test_post_failure_after_approved_execution_is_a_single_sequence(brain):
     o._finish_step = _boom
     t = o.tasks.create(name="x", agent="executor_ai", payload=_plan("Masaüstüne a.txt oluştur"))
     o._tick()
-    out = o.approve(t["id"])
+    task = o.tasks.get(t["id"])
+    # main.py'nin kullanici-turu yolu gibi: onaylanan cagri verilir (Adim 3.4).
+    out = o.approve(t["id"], approved_call=o._approval_call(task, task["payload"]["pending_step"]))
     rows = _events(t["id"])
     assert [r["action"] for r in rows] == ["approval_requested", "approved_executed", "post_failure"]
     assert len({r["fingerprint"] for r in rows}) == 1

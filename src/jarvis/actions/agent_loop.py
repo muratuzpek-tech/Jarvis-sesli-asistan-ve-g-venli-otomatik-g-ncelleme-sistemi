@@ -45,8 +45,9 @@ from pathlib import Path
 from jarvis.actions.resilience import CircuitBreaker, call_with_resilience
 from jarvis.actions.tools_kopru import (
     ALLOWED_TOOLS, TOOL_DESCRIPTIONS, NotAllowedTool, call_approved_tool,
-    call_tool, is_destructive,
+    call_tool,
 )
+from jarvis import security_gate as _gate
 from jarvis.paths import memory_dir
 from jarvis.core.audit_log import format_params, log_action, log_tool_event
 
@@ -249,12 +250,18 @@ def _find_task(tasks: list[dict], task_id: str) -> dict | None:
     return None
 
 
-def approve_task(task_id: str, *, expected_action: dict) -> str:
+def approve_task(task_id: str, *, expected_action: dict,
+                 grant: "_gate.Grant | None" = None) -> str:
     """Onay bekleyen bir adimi GERCEKTEN calistirir. YALNIZCA main.py'nin
     kullanici-turu onay yolu (_handle_agent_loop_reply) cagirir; Gemini
     araci (agent_loop_tool) bu fonksiyona ulasamaz. expected_action,
     kullaniciya sorulan ve onun onayladigi adimdir: gorevdeki bekleyen adim
-    o arada degistiyse hicbir sey calistirilmaz."""
+    o arada degistiyse hicbir sey calistirilmaz.
+
+    Calistirmadan hemen once kapi sorulur (authorize, kaynak AGENT_LOOP):
+    DENY -> calismaz; NEEDS_APPROVAL -> yalnizca depodaki kendi istegini
+    tuketen kullanici onayinin Grant'i ile ve Grant'in parmak izi calisacak
+    cagrininkiyle birebir ayniysa."""
     with _tasks_lock:
         tasks = _load_tasks()
         task = _find_task(tasks, task_id)
@@ -264,6 +271,20 @@ def approve_task(task_id: str, *, expected_action: dict) -> str:
             return f"'{task_id}' onay bekleyen bir görev değil (durum: {task['status']})."
 
         pending = task["pending_action"]
+        decision = _gate.authorize(str(pending.get("tool") or ""),
+                                   pending.get("parameters") or {}, _gate.Source.AGENT_LOOP)
+        if decision.verdict is _gate.Verdict.DENY:
+            _log_event({"event": "gate_denied", "task_id": task_id, "tool": pending.get("tool")})
+            _audit("gate_denied", task, pending.get("tool"), pending.get("parameters"),
+                   result=decision.reason, verdict=decision.verdict.value)
+            return f"'{task_id}' adımı güvenlik kapısı tarafından reddedildi; çalıştırılmadı."
+        if decision.verdict is _gate.Verdict.NEEDS_APPROVAL and (
+                grant is None or grant.fingerprint != decision.call.fingerprint):
+            _log_event({"event": "approval_missing", "task_id": task_id})
+            _audit("approval_missing", task, pending.get("tool"), pending.get("parameters"),
+                   result="geçerli kullanıcı onayı yok; çalıştırılmadı",
+                   verdict=decision.verdict.value)
+            return f"'{task_id}' için geçerli kullanıcı onayı yok; hiçbir şey çalıştırılmadı."
         if pending != expected_action:
             _log_event({"event": "approval_mismatch", "task_id": task_id})
             _audit("approval_mismatch", task, pending.get("tool"), pending.get("parameters"),
@@ -271,7 +292,10 @@ def approve_task(task_id: str, *, expected_action: dict) -> str:
             return (f"'{task_id}' için bekleyen adım, onaylanan adımla aynı değil; "
                     "hiçbir şey çalıştırılmadı.")
         try:
-            result = call_approved_tool(pending["tool"], pending["parameters"])
+            # Arac YALNIZCA kapinin cozdugu argumanlarla calisir (modelin /
+            # planner'in confirm_code'u cagrinin parcasi degildir).
+            params = _gate.prepare(decision, grant)
+            result = call_approved_tool(pending["tool"], params)
             task["history"].append({
                 "tool": pending["tool"], "parameters": pending["parameters"],
                 "note": pending.get("note", ""), "result": result, "approved": True,
@@ -615,7 +639,20 @@ def _process_task(task: dict, tasks: list[dict]) -> None:
         _log_event({"event": "not_allowed_tool", "task_id": task["id"], "tool": tool})
         return
 
-    if is_destructive(tool, parameters):
+    # Calistirmadan hemen once kapi (kaynak AGENT_LOOP): DENY -> calismaz,
+    # NEEDS_APPROVAL -> kullaniciya sorulur, ALLOW -> kapinin cozdugu
+    # argumanlarla calisir.
+    decision = _gate.authorize(tool, parameters, _gate.Source.AGENT_LOOP)
+    if decision.verdict is _gate.Verdict.DENY:
+        task["status"] = "failed"
+        task["history"].append({"tool": tool, "note": f"Güvenlik kapısı reddetti: {decision.reason}",
+                                "result": "gate_denied"})
+        _log_event({"event": "gate_denied", "task_id": task["id"], "tool": tool})
+        _audit("gate_denied", task, tool, parameters, result=decision.reason,
+               verdict=decision.verdict.value)
+        return
+
+    if decision.verdict is _gate.Verdict.NEEDS_APPROVAL:
         task["status"] = "awaiting_approval"
         task["pending_action"] = {"tool": tool, "parameters": parameters, "note": note}
         _log_event({"event": "awaiting_approval", "task_id": task["id"], "tool": tool, "note": note})
@@ -624,7 +661,7 @@ def _process_task(task: dict, tasks: list[dict]) -> None:
         return
 
     try:
-        result = call_tool(tool, parameters)
+        result = call_tool(tool, _gate.prepare(decision, None))
         task["planning_retries"] = 0
         task["history"].append({"tool": tool, "parameters": parameters, "note": note, "result": result})
         _log_event({"event": "step_ok", "task_id": task["id"], "tool": tool, "result": str(result)[:200]})

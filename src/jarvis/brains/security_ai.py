@@ -15,6 +15,8 @@ kullanıcıya gösterilecek okunabilir 'reason' metnini üretir, KARARI değil.
 """
 from __future__ import annotations
 
+import re
+
 from jarvis.brains.base_brain import BaseBrain, BrainError
 
 # 15. RİSK SİSTEMİ + 5. bölümdeki "kontrol edeceği işlemler" listesiyle
@@ -49,7 +51,42 @@ _MEDIUM_RISK = {
     # GUARD: executor varyasyonları (2026-10-03 güvenlik fix)
     ("coder_ai", "write_file"),
 }
-# Geri kalan her şey (okuma, analiz, araştırma, loglama) varsayılan olarak LOW.
+# Bilinen SALT-OKUNUR işlemler (Adım 3.4): yalnızca bunlar LOW. (tool, None)
+# aracın her eylemi demektir. windows_system sabit bir allowlist'ten
+# (windows_shell) komut seçer; research/github araması yalnızca okur.
+_LOW_RISK = {
+    ("research_ai", None),
+    ("github_search", None),
+    ("github_arama", None),
+    ("windows_system", None),
+    ("web_search", None),
+    ("weather_report", None),
+    ("system_status", None),
+    ("coder_ai", "analyze"),
+}
+# Tablolarda olmayan (tanınmayan / sınıflandırılamayan) her şey MEDIUM -
+# eskiden LOW'du ve yeni bir executor eylemi sessizce onaysız kalıyordu.
+_DEFAULT_RISK = "medium"
+
+# Araç ya da eylem adında KELİME olarak geçerse riski HIGH'a yükselten
+# anahtar kelimeler (yalnızca yukarı; alt-dize değil: "information" içindeki
+# "format" sayılmaz).
+_DANGEROUS_WORDS = frozenset({
+    "rm", "rmdir", "del", "delete", "remove", "erase", "wipe", "shred", "unlink",
+    "format", "mkfs", "fdisk", "dd", "truncate", "drop",
+    "shutdown", "poweroff", "halt", "reboot", "restart",
+    "sudo", "su", "chmod", "chown", "kill", "pkill", "killall", "uninstall",
+    "sil", "kapat", "biçimlendir",
+})
+_WORD_RE = re.compile(r"[^\wçğıöşü]+|_", re.UNICODE)
+
+
+def _has_dangerous_word(*names) -> bool:
+    for name in names:
+        words = {w for w in _WORD_RE.split(str(name or "").casefold()) if w}
+        if words & _DANGEROUS_WORDS:
+            return True
+    return False
 
 
 SYSTEM_PROMPT = """Sen JARVIS AI Beyin Takımı'nın GÜVENLİK BEYNİsin (security_ai).
@@ -126,13 +163,19 @@ class SecurityAI(BaseBrain):
             from jarvis.actions.file_controller import is_readonly_action
             return "low" if is_readonly_action(action) else "high"
         norm_action = SecurityAI._normalize_action(action)
+        # Tehlikeli anahtar kelime her zaman HIGH'a yükseltir (asla aşağı).
+        if _has_dangerous_word(tool, action, norm_action):
+            return "high"
         # Hem orijinal hem normalize edilmiş halini kontrol et
         for act in (norm_action, action):
             if (tool, act) in _HIGH_RISK or (tool, None) in _HIGH_RISK:
                 return "high"
             if (tool, act) in _MEDIUM_RISK or (tool, None) in _MEDIUM_RISK:
                 return "medium"
-        return "low"
+        for act in (norm_action, action):
+            if (tool, act) in _LOW_RISK or (tool, None) in _LOW_RISK:
+                return "low"
+        return _DEFAULT_RISK
 
     def handle(self, message: dict) -> dict:
         payload = message.get("payload") or {}

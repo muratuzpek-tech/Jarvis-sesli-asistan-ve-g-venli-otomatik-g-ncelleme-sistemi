@@ -241,18 +241,29 @@ def orch(tmp_path, monkeypatch):
         lg.setLevel(level)
 
 
-def _brain_task(o, risk):
+_CREATE_FM = {"action": "create_file", "path": "desktop", "name": "a.txt",
+              "content": "gizli dosya içeriği"}
+
+
+def _brain_task(o, risk, file_mod=_CREATE_FM):
     o._risk_of_step = lambda step, task=None: (risk, f"test: {risk}")
     t = o.tasks.create(name="[FILE_MODIFICATION] a.txt", agent="executor_ai", payload={
         "goal": "Masaüstüne a.txt oluştur",
         "plan": [{"order": 1, "description": "Masaüstüne a.txt oluştur", "agent": "executor_ai",
                   "operation": "execute"}],
         "step_index": 0, "history": [], "audit_retries": 0,
-        "file_modification": {"action": "create_file", "path": "desktop", "name": "a.txt",
-                              "content": "gizli dosya içeriği"},
+        "file_modification": dict(file_mod),
     })
     o._tick()
     return t["id"]
+
+
+def _approve_as_user(o, tid):
+    """main.py'nin kullanici-turu yolunun yaptigi gibi onaylar: depodaki
+    istegin cagrisi (adimin kapidaki cozulmus hali) approved_call olarak
+    verilir (Adim 3.4; onay kaniti olmadan approve calistirmaz)."""
+    task = o.tasks.get(tid)
+    return o.approve(tid, approved_call=o._approval_call(task, task["payload"]["pending_step"]))
 
 
 def _brain_rows(event):
@@ -264,7 +275,7 @@ def test_brain_request_and_approve_are_audited(orch):
     req = _brain_rows("approval_requested")
     assert req and req[-1]["task_id"] == tid and req[-1]["verdict"] == "needs_approval"
     assert req[-1]["executed"] is False and req[-1]["approved"] is False
-    orch.approve(tid)
+    _approve_as_user(orch, tid)
     assert orch.executed
     done = _brain_rows("approved_executed")
     assert done and done[-1]["task_id"] == tid and done[-1]["approved"] is True
@@ -279,7 +290,9 @@ def test_brain_deny_is_audited(orch):
 
 
 def test_brain_unapproved_low_risk_step_is_audited_as_executed(orch):
-    tid = _brain_task(orch, "low")
+    # Adim 3.4: onaysiz calisabilen adim kapinin ALLOW dedigi (okuma) adimdir;
+    # create_file gibi bir degisiklik risk "low" olsa da kapidan onay ister.
+    tid = _brain_task(orch, "low", {"action": "list", "path": "desktop"})
     assert orch.executed
     rows = _brain_rows("executed")
     assert rows and rows[-1]["task_id"] == tid
@@ -290,7 +303,7 @@ def test_brain_audit_masks_resolved_secret_params(orch):
     orch._resolve_step_call = lambda task, step: ("vault_encrypt",
                                                   {"source": "/tmp/a.txt", "password": "S3cret!pw"})
     tid = _brain_task(orch, "high")
-    orch.approve(tid)
+    _approve_as_user(orch, tid)
     assert "S3cret!pw" not in _raw()
     row = _brain_rows("approval_requested")[-1]
     assert row["tool"] == "vault_encrypt" and row["params"]["password"] == "***"

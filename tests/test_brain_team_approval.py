@@ -124,7 +124,9 @@ def env(tmp_path, monkeypatch):
     approved = []
     real_approve = orch.approve
 
-    def _record_approve(task_id):
+    def _record_approve(task_id, **_kw):
+        # main, depodaki kendi istegini tuketen onayin cagrisini (approved_call)
+        # verir (Adim 3.4); kaydedici yalnizca hangi gorevin onaylandigini tutar.
         approved.append(task_id)
         return f"Onaylandı ve gerçekleştirildi: {task_id}"
 

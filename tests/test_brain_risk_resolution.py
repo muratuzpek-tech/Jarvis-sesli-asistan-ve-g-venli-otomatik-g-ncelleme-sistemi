@@ -193,13 +193,21 @@ def test_resolution_error_is_fail_closed_high(orch, monkeypatch):
     assert orch.execute_calls == []
 
 
+def _approve_as_user(o, tid):
+    """main.py'nin kullanici-turu yolunun yaptigi gibi onaylar: depodaki
+    istegin cagrisi (adimin kapidaki cozulmus hali) approved_call olarak
+    verilir (Adim 3.4; onay kaniti olmadan approve calistirmaz)."""
+    task = o.tasks.get(tid)
+    return o.approve(tid, approved_call=o._approval_call(task, task["payload"]["pending_step"]))
+
+
 # ── Risk icin sorulan == yurutulecek ──
 
 @pytest.mark.parametrize("action", list(MUTATING))
 def test_asked_equals_executed_after_approval(orch, action):
     t = _tick(orch, "Masaüstüne notlar3.txt oluştur", MUTATING[action])
     assert t["status"] == "waiting_approval"
-    orch.approve(t["id"])
+    _approve_as_user(orch, t["id"])
     assert orch.executed, "onaydan sonra adim calistirilmadi"
     assert orch.asked == orch.executed == [("file_controller", action)]
 
@@ -213,5 +221,5 @@ def test_asked_equals_executed_without_file_modification(orch):
     """file_modification yoksa iki taraf da ayni aciklama cozumlemesini kullanir."""
     t = _tick(orch, "rapor.txt adlı bir dosya oluştur", None)
     assert t["status"] == "waiting_approval"
-    orch.approve(t["id"])
+    _approve_as_user(orch, t["id"])
     assert orch.asked == orch.executed == [("file_controller", "create_file")]

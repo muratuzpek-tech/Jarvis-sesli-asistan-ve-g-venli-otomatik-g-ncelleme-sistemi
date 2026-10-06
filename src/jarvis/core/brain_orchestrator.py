@@ -89,6 +89,7 @@ from jarvis.core.message_bus import MessageBus
 from jarvis.core.task_manager import TaskManager, TASKS_PATH, WAITING_APPROVAL
 from jarvis.core import watchdog
 from jarvis.actions import capability_resolver
+from jarvis import security_gate as _gate
 
 DEFAULT_INTERVAL_S = 20.0
 MAX_AUDIT_ROUNDS = 2   # ayni adim en fazla bu kadar kez tekrar denenir
@@ -364,8 +365,12 @@ class BrainOrchestrator:
             return
         hook = getattr(player, "request_brain_team_approval", None)
         try:
+            call = self._approval_call(task, step)
+        except Exception:
+            call = None   # cozulemeyen adim: onay sozde cagriya baglanir, calisamaz
+        try:
             if callable(hook):
-                hook(task["id"], step, message)
+                hook(task["id"], step, message, call=call)
                 return
             log_fn = getattr(player, "write_log", None) or getattr(getattr(player, "ui", None), "write_log", None)
             if callable(log_fn):
@@ -416,7 +421,12 @@ class BrainOrchestrator:
             lines.append(f"[{t['id']}] {t['status']}: {t['name'][:70]}{extra}")
         return f"{len(all_tasks)} takım görevi (son {len(lines)} tanesi):\n" + "\n".join(lines)
 
-    def approve(self, task_id: str) -> str:
+    def approve(self, task_id: str, *, approved_call: "_gate.ResolvedCall | None" = None) -> str:
+        """Onay bekleyen adimi calistirir. YALNIZCA main.py'nin kullanici-turu
+        onay yolu cagirir ve depodaki kendi istegini tuketen onayin cagrisini
+        (approved_call) verir. Calistirmadan hemen once adim yeniden cozulur
+        ve kapiya sorulur (kaynak BRAIN_TEAM): DENY ya da onaylanan parmak izi
+        ile calisacak cagrinin parmak izi birebir esit degilse calismaz."""
         task = self.tasks.get(task_id)
         if task is None:
             return f"'{task_id}' id'li AI takım görevi bulunamadı."
@@ -424,7 +434,34 @@ class BrainOrchestrator:
             return f"'{task_id}' onay bekleyen bir AI takım görevi değil (durum: {task['status']})."
 
         step = task["payload"]["pending_step"]
+        try:
+            call = self._approval_call(task, step)
+            decision = _gate.authorize(call.tool, call.params, _gate.Source.BRAIN_TEAM)
+        except Exception as e:
+            call, decision = None, None
+            resolve_error = e
+        if decision is not None and decision.verdict is _gate.Verdict.DENY:
+            self._audit("gate_denied", task, step, result=decision.reason, verdict="deny")
+            task["payload"]["pending_step"] = None
+            self.tasks.update(task_id, status="failed", payload=task["payload"],
+                              error=f"Güvenlik kapısı reddetti: {decision.reason}")
+            self._notify_result(self.tasks.get(task_id))
+            return f"Adım güvenlik kapısı tarafından reddedildi; çalıştırılmadı ({decision.reason})."
+        if call is None or approved_call is None or approved_call.tool != call.tool \
+                or approved_call.fingerprint != call.fingerprint:
+            # Onaylanan cagri ile calisacak cagri ayni degil (adim/hedef
+            # degismis ya da onay kaniti yok): calistirma, guncel hali sor.
+            why = (f"çözümlenemedi: {resolve_error}" if call is None
+                   else "onaylanan çağrı ile çalıştırılacak çağrı aynı değil")
+            self._audit("approval_mismatch", task, step, result=why, verdict="needs_approval")
+            if call is not None:
+                self._request_approval(task)
+            return f"Onay uygulanmadı: {why}. Hiçbir şey çalıştırılmadı."
+        grant = _gate.Grant(call.fingerprint) if decision.verdict is _gate.Verdict.NEEDS_APPROVAL else None
+        _gate.prepare(decision, grant)   # savunma derinligi: yetki yoksa PermissionError
+
         ran = False   # adim calisti mi? (sonraki hata "post_failure" olarak kaydedilir)
+        task["_approved_call"] = call     # yurutme bu cagriyla, yeniden cozumleme yok
         try:
             result = self._execute_step(task, step)
             ran = True
@@ -442,6 +479,8 @@ class BrainOrchestrator:
             self.tasks.update(task_id, status="failed", error=str(e), payload=task["payload"])
             self._notify_result(self.tasks.get(task_id))
             return f"Onaylandı ama çalıştırılırken hata oluştu: {e}"
+        finally:
+            task.pop("_approved_call", None)
 
     def deny(self, task_id: str) -> str:
         task = self.tasks.get(task_id)
@@ -773,8 +812,34 @@ class BrainOrchestrator:
         """Risk degerlendirmesinin, onay metninin ve yurutmenin ORTAK karar
         noktasi: executor adiminin GERCEKTEN calistiracagi (tool, params)."""
         task = task or {"payload": {}}
+        # Onaylanmis / kapidan gecmis cagri yurutme sirasinda SABITTIR:
+        # yeniden cozumleme yapilmaz (plan §4.1-1). Yalnizca bellekte durur.
+        pinned = task.get("_approved_call")
+        if pinned is not None:
+            return pinned.tool, dict(pinned.params)
         base_path = task.get("payload", {}).get("_active_folder", ".")
         return self._resolve_action_with_file_modification(task, step, base_path)
+
+    def _approval_call(self, task: dict | None, step: dict) -> "_gate.ResolvedCall":
+        """Adimin kapidaki cozulmus hali (arac + normalize argumanlar, kaynak
+        BRAIN_TEAM). Onay istegi bu cagriya baglanir; calistirmadan hemen once
+        yeniden hesaplanir ve parmak izi onaylananla birebir eslesmelidir."""
+        task = task or {"payload": {}}
+        agent = step.get("agent")
+        desc = step.get("description", "")
+        if agent == "executor_ai":
+            tool, params = self._resolve_step_call(task, step)
+        elif agent == "coder_ai":
+            tool, params = "coder_ai", {
+                "operation": step.get("operation", "modify"),
+                "file_path": step.get("file_path") or task.get("payload", {}).get("file_path") or "",
+                "change_request": desc,
+            }
+        elif agent == "research_ai":
+            tool, params = "research_ai", {"query": desc}
+        else:
+            raise ValueError(f"Bilinmeyen/uygun olmayan beyin: {agent!r}")
+        return _gate.resolve(tool, params, _gate.Source.BRAIN_TEAM)
 
     def _risk_of_step(self, step: dict, task: dict | None = None) -> tuple[str, str]:
         """Riski BELİRLEYEN yer security_ai beynidir (deterministik kural
@@ -1368,7 +1433,28 @@ class BrainOrchestrator:
                 return
 
         risk, reason = self._risk_of_step(step, task)
-        if risk == "high":
+        # Calistirmadan hemen once kapi (kaynak BRAIN_TEAM). classify_risk
+        # yalnizca YUKARI yuvarlar: kapi onay istiyorsa risk dusuk olsa da
+        # beklenir; DENY ise adim hic calismaz.
+        try:
+            call = self._approval_call(task, step)
+            decision = _gate.authorize(call.tool, call.params, _gate.Source.BRAIN_TEAM)
+        except Exception:
+            call, decision = None, None   # cozulemedi: _risk_of_step zaten HIGH
+        if decision is not None and decision.verdict is _gate.Verdict.DENY:
+            self._audit("gate_denied", task, step, result=decision.reason, verdict="deny")
+            payload.setdefault("failed_steps", []).append(step.get("description", ""))
+            payload["step_index"] = idx + 1
+            self.tasks.update(task["id"], payload=payload)
+            self._safe_memory_event(step.get("agent", "?"), "gate_denied", decision.reason[:200])
+            return
+        if decision is None or decision.verdict is _gate.Verdict.NEEDS_APPROVAL:
+            if risk != "high" and decision is not None:
+                reason = f"{reason} (güvenlik kapısı: {decision.reason})"
+            risk_needs_approval = True
+        else:
+            risk_needs_approval = risk == "high"
+        if risk_needs_approval:
             step_with_risk = {**step, "risk": risk, "reason": reason}
             payload["pending_step"] = step_with_risk
             self.tasks.update(task["id"], status=WAITING_APPROVAL, payload=payload)
@@ -1381,6 +1467,7 @@ class BrainOrchestrator:
 
         step_with_risk = {**step, "risk": risk}
         ran = False   # adim calisti mi? (sonraki hata "post_failure" olarak kaydedilir)
+        task["_approved_call"] = call     # kapidan gecen cagri; yeniden cozumleme yok
         try:
             result = self._execute_step(task, step)
             ran = True
@@ -1396,6 +1483,8 @@ class BrainOrchestrator:
             payload["step_index"] = idx + 1
             self.tasks.update(task["id"], payload=payload)
             self._safe_memory_event(step.get("agent", "?"), "step_error", str(e)[:200])
+        finally:
+            task.pop("_approved_call", None)
 
     def _worker_loop(self, interval_seconds: float) -> None:
         print(f"[BrainTeam] ✅ AI Beyin Takımı başladı ({interval_seconds:.0f}sn'de bir kontrol).")

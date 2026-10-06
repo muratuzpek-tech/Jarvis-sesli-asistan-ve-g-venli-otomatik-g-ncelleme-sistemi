@@ -80,7 +80,8 @@ class _FakeOrch:
         self.tasks = _FakeTasks({"id": "t1", "status": "waiting_approval",
                                  "payload": {"pending_step": self.step}})
 
-    def approve(self, task_id):
+    def approve(self, task_id, **_kw):
+        # main, depodaki kendi istegini tuketen onayin cagrisini verir (Adim 3.4).
         self.approved.append(task_id)
         return f"Onaylandı: {task_id}"
 
