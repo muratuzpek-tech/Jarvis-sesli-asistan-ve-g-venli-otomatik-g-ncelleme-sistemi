@@ -65,6 +65,34 @@ def redact_text(text) -> str:
     return out
 
 
+MASK = "***"
+
+# DISKTEKI DURUM (gorev deposu) icin DAR liste: yalnizca gercekten gizli
+# degerler. _SENSITIVE_PATTERNS'in genis alt-dize eslesmesi ("pass" ->
+# "passed", "code" -> "exit_code") log icin zararsizdir ama calisan durumu
+# bozardi.
+_SECRET_KEY_NAMES = frozenset({
+    "password", "passwd", "pwd", "passphrase", "parola", "sifre", "şifre",
+    "token", "access_token", "refresh_token", "secret", "client_secret",
+    "key", "api_key", "apikey", "private_key", "confirm_code",
+})
+_SECRET_KEY_SUFFIXES = ("_password", "_token", "_secret", "_key", "_parola", "_sifre")
+
+
+def is_secret_key(key) -> bool:
+    """Degeri diske ham yazilmamasi gereken anahtar (dar, kesin liste)."""
+    kl = str(key).lower()
+    return kl in _SECRET_KEY_NAMES or kl.endswith(_SECRET_KEY_SUFFIXES)
+
+
+def masked_secret_keys(params) -> list[str]:
+    """Gizli anahtarli olup degeri maske (***) olan argumanlar: gercek deger
+    bellekte yok demektir; bu argumanlarla hicbir sey calistirilmamali."""
+    if not isinstance(params, dict):
+        return []
+    return [str(k) for k, v in params.items() if is_secret_key(k) and v == MASK]
+
+
 def _is_sensitive_key(key) -> bool:
     kl = str(key).lower()
     return any(p in kl for p in _SENSITIVE_PATTERNS)
@@ -80,12 +108,17 @@ def mask_params(params, limit: int = 80) -> dict:
     out: dict = {}
     for k, v in params.items():
         kl = str(k).lower()
-        if _is_sensitive_key(k):
-            out[k] = "***"
+        if isinstance(v, bool) or v is None:
+            out[k] = v                     # bayrak gizli olamaz (ör. "passed")
+        elif _is_sensitive_key(k):
+            out[k] = MASK
         elif kl in _CONTENT_KEYS:
             out[k] = f"<{len(str(v))} karakter gizlendi>"
         elif isinstance(v, dict):
             out[k] = mask_params(v, limit)
+        elif isinstance(v, (list, tuple)):
+            out[k] = [mask_params(x, limit) if isinstance(x, dict) else redact_text(x)[:limit]
+                      for x in v]
         else:
             out[k] = redact_text(v)[:limit]
     return out

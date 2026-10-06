@@ -68,6 +68,48 @@ def _make_logger() -> logging.Logger:
 _logger = _make_logger()
 
 
+# Gizli argumanlar (ör. vault password) diske HAM yazilmaz: _save diske
+# maskeli (***) kopya yazar, gercek degeri yalnizca bu SUREC BELLEGINDE
+# (dosya yolu, gorev id) -> {json yolu: deger} olarak tutar; _load diskteki
+# maskeyi bellekteki degerle geri doldurur. Boylece onaydan sonra adim gercek
+# degerle yeniden cozulur. Surec yeniden baslarsa deger kaybolur ve maske
+# kalir - yurutme bunu reddeder (brain_orchestrator._execute_step), "***" ile
+# hicbir sey calistirilmaz. Terminal durumdaki gorevin degerleri birakilir.
+_SECRETS: dict[tuple[str, str], dict[tuple, object]] = {}
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _strip_secrets(obj, path: tuple, found: dict):
+    """obj'nin gizli anahtarli degerleri maskelenmis derin kopyasi; gercek
+    degerler found'a (json yolu -> deger) yazilir."""
+    from jarvis.core.audit_log import MASK, is_secret_key
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if is_secret_key(k) and isinstance(v, str) and v and v != MASK:
+                found[path + (k,)] = v
+                out[k] = MASK
+            else:
+                out[k] = _strip_secrets(v, path + (k,), found)
+        return out
+    if isinstance(obj, list):
+        return [_strip_secrets(v, path + (i,), found) for i, v in enumerate(obj)]
+    return obj
+
+
+def _restore_secrets(task: dict, secrets: dict) -> None:
+    from jarvis.core.audit_log import MASK
+    for path, value in secrets.items():
+        node = task
+        try:
+            for part in path[:-1]:
+                node = node[part]
+            if node[path[-1]] == MASK:
+                node[path[-1]] = value
+        except (KeyError, IndexError, TypeError):
+            continue   # yapi degismis (ör. adim ilerlemis): o deger artik kullanilmiyor
+
+
 class TaskManager:
     """agent_loop.py'nin _load_tasks/_save_tasks ile AYNI atomik-yazma
     deseni (tempfile + replace) - kanıtlanmış, dosya bozulmasına karşı
@@ -81,6 +123,10 @@ class TaskManager:
             if self.path.is_file():
                 data = json.loads(self.path.read_text(encoding="utf-8"))
                 if isinstance(data, list):
+                    for t in data:
+                        secrets = _SECRETS.get((str(self.path), str(t.get("id"))))
+                        if secrets and isinstance(t, dict):
+                            _restore_secrets(t, secrets)
                     return data
         except Exception as e:
             print(f"[TaskManager] ⚠️ {self.path.name} okunamadı: {e}")
@@ -104,11 +150,22 @@ class TaskManager:
         except Exception:
             pass
 
+        on_disk = []
+        for t in tasks:
+            found: dict = {}
+            masked = _strip_secrets(t, (), found) if isinstance(t, dict) else t
+            key = (str(self.path), str(t.get("id")) if isinstance(t, dict) else "")
+            if isinstance(t, dict) and t.get("status") in _TERMINAL_STATUSES:
+                _SECRETS.pop(key, None)
+            elif found:
+                _SECRETS.setdefault(key, {}).update(found)
+            on_disk.append(masked)
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             "w", dir=self.path.parent, delete=False, encoding="utf-8", suffix=".tmp",
         ) as tmp:
-            json.dump(tasks, tmp, indent=2, ensure_ascii=False)
+            json.dump(on_disk, tmp, indent=2, ensure_ascii=False)
             temp_name = tmp.name
         Path(temp_name).replace(self.path)
 

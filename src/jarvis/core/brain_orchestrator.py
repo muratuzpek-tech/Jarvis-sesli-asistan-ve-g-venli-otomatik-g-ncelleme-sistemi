@@ -942,6 +942,16 @@ class BrainOrchestrator:
             # sonucu uretir, bir daha birbirinden sapmaz (bkz. o metodun
             # docstring'i).
             action, params = self._resolve_step_call(task, step)
+            # Gizli argumanlar diske maskeli yazilir, gercek deger yalnizca
+            # surec belleginde durur (core/task_manager). Deger yoksa (ör.
+            # yeniden baslatma) maske ile calistirma - fail-closed.
+            from jarvis.core.audit_log import masked_secret_keys
+            missing = masked_secret_keys(params)
+            if missing:
+                raise RuntimeError(
+                    f"Gizli argüman(lar) ({', '.join(missing)}) bellekte yok (Jarvis yeniden "
+                    "başlatılmış olabilir; güvenlik için diske yazılmadı). Adım çalıştırılmadı; "
+                    "görevi değeri yeniden vererek başlatın.")
 
             # DUZELTME (code review bulgusu, 2026-09-28, PR #3): icerik
             # geri-kazanim + "sessizce bos yazma" korumasi ARTIK yukaridaki
