@@ -327,6 +327,10 @@ class CodingTask:
     # erken bitiren sebep (ayni dosya/icerik dongusu, kalici eksik modul).
     pytest_key: tuple = ()
     pytest_error: str = ""
+    # Son pytest kosusunun teshisi (_pytest_diagnose) ve uyumsuz testin dar
+    # prompt ile yeniden uretilmesinin denendigi durumlar (pytest_key).
+    pytest_diag: list = field(default_factory=list)
+    test_regen_keys: set = field(default_factory=set)
     same_write_key: str = ""
     same_write_count: int = 0
     stop_reason: str = ""
@@ -968,9 +972,10 @@ def _is_test_file(fn: str) -> bool:
     return fn.endswith(".py") and (stem.startswith("test_") or stem.endswith("_test"))
 
 
-def _run_project_pytest(root: Path, timeout: int = _PYTEST_TIMEOUT) -> str:
-    """Proje testlerini ekransiz, stdin kapali calistirir. Bos donus = gecti
-    (ya da toplanacak test yok); degilse modele verilecek hata metni."""
+def _pytest_output(root: Path, timeout: int = _PYTEST_TIMEOUT) -> tuple[str, str]:
+    """Proje testlerini ekransiz, stdin kapali calistirir.
+    Donus: ("", "") gecti (ya da toplanacak test yok); (cikti, "") basarisiz;
+    ("", mesaj) pytest calistirilamadi / zaman asimi."""
     try:
         r = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider"],
@@ -978,14 +983,136 @@ def _run_project_pytest(root: Path, timeout: int = _PYTEST_TIMEOUT) -> str:
             errors="replace", stdin=subprocess.DEVNULL, timeout=timeout, env=_headless_env(),
         )
     except subprocess.TimeoutExpired:
-        return f"PYTEST ZAMAN AŞIMI ({timeout}s): testler bitmiyor (sonsuz döngü / input() bekleyen test?)"
+        return "", f"PYTEST ZAMAN AŞIMI ({timeout}s): testler bitmiyor (sonsuz döngü / input() bekleyen test?)"
     except Exception as e:
-        return f"PYTEST çalıştırılamadı: {type(e).__name__}"
+        return "", f"PYTEST çalıştırılamadı: {type(e).__name__}"
     if r.returncode in (0, 5):  # 5: toplanacak test yok
-        return ""
-    out = ((r.stdout or "") + (r.stderr or "")).strip()
-    return ("PYTEST BAŞARISIZ — testler geçmiyor; çıktıyı oku ve KODU (ya da hatalı testi) "
-            f"düzelt:\n{out[-600:]}")
+        return "", ""
+    return ((r.stdout or "") + (r.stderr or "")).strip() or f"pytest exit {r.returncode}", ""
+
+
+# ── pytest basarisizligi: hangi dosya hatali? ─────────────────
+# Canli hata: test pytest.raises(ZeroDivisionError) bekliyor, kod ValueError
+# atiyordu. --tb=short ciktisinin son karesi `calculator.py:37 ... E ValueError`
+# oldugu icin model 9 tur calculator.py'yi "duzeltti"; beklentinin test
+# dosyasinda oldugu hic soylenmiyordu.
+_PYTEST_FAILED_RE = re.compile(r"^FAILED (?P<file>[^\s:]+)::(?P<test>\S+)(?: - (?P<msg>.*))?$", re.MULTILINE)
+_PYTEST_HEADER_RE = re.compile(r"^_{3,} (?P<name>\S.*?) _{3,}$", re.MULTILINE)
+_PYTEST_FRAME_RE = re.compile(r"^(?P<file>[^\s:][^:\n]*\.py):(?P<line>\d+): in \S+", re.MULTILINE)
+_PYTEST_E_RE = re.compile(r"^E +(?P<text>.+)$", re.MULTILINE)
+_DID_NOT_RAISE_RE = re.compile(r"DID NOT RAISE <class '(?:[\w.]+\.)?(?P<exc>\w+)'>")
+_EXC_NAME_RE = re.compile(r"^(?:[\w.]+\.)?(?P<exc>[A-Z]\w*)(?::|$)")
+
+
+def _pytest_raises_expected(source: str, line: int) -> list[str]:
+    """Test kaynaginda `line` satirini saran `with pytest.raises(X)` ifadelerinin
+    beklenen istisna adlari (ic ice olandan disa)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    found: list[tuple[int, list[str]]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.With, ast.AsyncWith)):
+            continue
+        if not (node.lineno <= line <= (node.end_lineno or node.lineno)):
+            continue
+        for item in node.items:
+            call = item.context_expr
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "raises" and call.args):
+                continue
+            arg = call.args[0]
+            elts = arg.elts if isinstance(arg, ast.Tuple) else [arg]
+            names = [e.attr if isinstance(e, ast.Attribute) else getattr(e, "id", "") for e in elts]
+            found.append((node.lineno, [n for n in names if n]))
+    return [n for _, names in sorted(found, reverse=True) for n in names]
+
+
+def _pytest_diagnose(output: str, files: dict) -> list[dict]:
+    """Basarisiz her test icin hatali dosyayi belirler.
+    kind: "raise_missing" (DID NOT RAISE), "raise_type" (pytest.raises(X) ama Y
+    firladi), "assert" (test dosyasindaki assert) -> hatali dosya TEST dosyasi;
+    "source" -> hatali dosya traceback'teki son proje (test disi) dosyasi."""
+    headers = list(_PYTEST_HEADER_RE.finditer(output))
+    summary_at = output.find("short test summary info")
+    out: list[dict] = []
+    for m in _PYTEST_FAILED_RE.finditer(output):
+        test_file, test, msg = m.group("file"), m.group("test"), (m.group("msg") or "").strip()
+        short = test.rsplit("::", 1)[-1]
+        block = ""
+        for i, h in enumerate(headers):
+            if h.group("name").rsplit(".", 1)[-1] == short:
+                end = headers[i + 1].start() if i + 1 < len(headers) else len(output)
+                if summary_at > h.start():
+                    end = min(end, summary_at)
+                block = output[h.start():end]
+                break
+        frames = [(f.group("file"), int(f.group("line"))) for f in _PYTEST_FRAME_RE.finditer(block)]
+        e_line = next((e.group("text").strip() for e in _PYTEST_E_RE.finditer(block)), msg)
+        diag = {"test": short, "test_file": test_file, "file": test_file, "kind": "",
+                "expected": "", "actual": "", "where": ""}
+        nr = _DID_NOT_RAISE_RE.search(msg) or _DID_NOT_RAISE_RE.search(block)
+        actual_m = _EXC_NAME_RE.match(msg) or _EXC_NAME_RE.match(e_line)
+        test_line = next((ln for f, ln in frames if f == test_file), 0)
+        expected = (_pytest_raises_expected(files.get(test_file, ""), test_line)
+                    if test_line and test_file in files else [])
+        deepest = frames[-1] if frames else (test_file, 0)
+        if nr:
+            diag.update(kind="raise_missing", expected=nr.group("exc"))
+        elif expected and actual_m and actual_m.group("exc") not in expected:
+            src = next((f for f, _ in reversed(frames) if f != test_file), test_file)
+            diag.update(kind="raise_type", expected=" / ".join(expected),
+                        actual=actual_m.group("exc"), where=src)
+        elif deepest[0] == test_file and (e_line.startswith(("assert", "AssertionError"))
+                                          or msg.startswith(("assert", "AssertionError"))):
+            diag.update(kind="assert", actual=e_line[:160], where=f"{test_file}:{deepest[1]}")
+        else:
+            src = next((f for f, _ in reversed(frames) if not _is_test_file(f)), "")
+            diag.update(kind="source", file=src or test_file,
+                        actual=(e_line or msg)[:160],
+                        where=f"{deepest[0]}:{deepest[1]}" if frames else "")
+        out.append(diag)
+    return out
+
+
+def _test_mismatches(diags: list[dict]) -> list[dict]:
+    """Beklentisi kodla uyumsuz (hatali dosyasi test dosyasi olan) basarisizliklar."""
+    return [d for d in diags if d["kind"] != "source"]
+
+
+def _pytest_message(output: str, diags: list[dict]) -> str:
+    """Modele giden pytest hatasi: once HATALI DOSYA satirlari, sonra cikti."""
+    lines = ["PYTEST BAŞARISIZ — testler geçmiyor."]
+    for d in diags:
+        if d["kind"] == "raise_missing":
+            why = (f"`pytest.raises({d['expected']})` bekliyor ama kod hiç istisna "
+                   "fırlatmıyor (DID NOT RAISE)")
+        elif d["kind"] == "raise_type":
+            why = (f"`pytest.raises({d['expected']})` bekliyor ama {d['where']} "
+                   f"{d['actual']} fırlatıyor")
+        elif d["kind"] == "assert":
+            why = f"test beklentisi tutmuyor ({d['where']}: {d['actual']})"
+        else:
+            lines.append(f"HATALI DOSYA: {d['file']} — {d['test']}: {d['actual']}"
+                         + (f" ({d['where']})" if d["where"] else "")
+                         + f" → {d['file']} dosyasını düzelt.")
+            continue
+        lines.append(f"HATALI DOSYA: {d['file']} — {d['test']}: {why}. Test beklentisi "
+                     f"kaynak kodla uyumsuz: KAYNAK KODU DEĞİL {d['file']} dosyasını kodla "
+                     f"uyumlu olacak şekilde düzelt ({d['file']} yazmak SERBEST; dosyanın TAMAMINI yaz).")
+    if len(diags) == 0:
+        lines.append("Çıktıyı oku ve hatalı dosyayı düzelt.")
+    return "\n".join(lines) + f"\n{output[-600:]}"
+
+
+def _run_project_pytest(root: Path, timeout: int = _PYTEST_TIMEOUT, files: dict | None = None) -> str:
+    """Bos donus = gecti (ya da toplanacak test yok); degilse modele verilecek
+    hata metni (hatali dosya adiyla)."""
+    output, err = _pytest_output(root, timeout)
+    if not output:
+        return err
+    return _pytest_message(output, _pytest_diagnose(output, files or {}))
 
 
 _EOF_RE = re.compile(r"^EOFError\b", re.MULTILINE)
@@ -1368,6 +1495,27 @@ def _validate_file(filename: str, content: str, language: str = "python") -> tup
         except json.JSONDecodeError as e:
             return False, f"JSON_ERROR: line {e.lineno}: {e.msg}"
     return True, "OK"
+
+
+def _public_api(source: str) -> set[str] | None:
+    """Ust duzey public sinif/fonksiyon adlari; ayrisamazsa None."""
+    try:
+        tree = ast.parse(source or "")
+    except SyntaxError:
+        return None
+    return {n.name for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and not n.name.startswith("_")}
+
+
+def _lost_api(previous: str | None, new: str) -> list[str]:
+    """Onceki surumde olup yeni icerikte olmayan ust duzey public adlar.
+    Ilk yazimda (onceki surum yok) ya da onceki surum ayrisamazsa bos."""
+    before = _public_api(previous) if previous else None
+    after = _public_api(new)
+    if not before or after is None:
+        return []
+    return sorted(before - after)
 
 
 def _contained_path(root: Path, name: str) -> Path | None:
@@ -1908,17 +2056,21 @@ class AgenticCoder:
             # ── pytest geri bildirimi: SMART EXIT adayi + test dosyasi varsa ──
             if self._smart_exit_candidate(task) and any(map(_is_test_file, task.files_written)):
                 await asyncio.to_thread(self._sync_pytest, task)
+                if await self._regen_mismatched_tests(task):
+                    await asyncio.to_thread(self._sync_pytest, task)
             else:
-                task.pytest_error, task.pytest_key = "", ()
-            if task.pytest_error:
-                last_error = task.pytest_error
+                task.pytest_error, task.pytest_key, task.pytest_diag = "", (), []
 
             task.iterations = i + 1
             self._publish_live()      # tur basi
             self._ui_progress(f"  ⚙️ Iterasyon {task.iterations}/{self._max}")
 
             # ── LLM'e sorma ────────────────────────────────────
-            prompt = self._build_prompt(task, steps, last_run_output, last_error, target_filename)
+            # pytest hatasi last_error'a YAZILMAZ, her tur guncel haliyle eklenir.
+            # Eskiden onceki eylemin taze ret mesaji (ör. eval reddi + guvenli
+            # ornek) bir sonraki turda degismemis pytest ciktisiyla eziliyordu.
+            _err = "\n\n".join(e for e in (last_error, task.pytest_error) if e)
+            prompt = self._build_prompt(task, steps, last_run_output, _err, target_filename)
             _auto_missing = [f for f in task.auto_expected if f not in task.files_written]
             if _auto_missing:
                 prompt += "\n\n═══ EKSİK MODÜL DOSYASI (import ediliyor ama YOK) ═══\n"
@@ -1949,7 +2101,9 @@ class AgenticCoder:
             if task.files_written:
                 _wl = list(task.files_written.keys())
                 prompt += f"\n═══ YAZILAN: {_wl} ═══\n"
-                prompt += f"═══ FARKLI BİR DOSYA YAZ! {_wl[-1]} TEKRAR YAZMA! ═══\n"
+                # pytest'in HATALI DOSYA dedigi dosyaya "tekrar yazma" denmez.
+                if _wl[-1] not in self._fault_files(task):
+                    prompt += f"═══ FARKLI BİR DOSYA YAZ! {_wl[-1]} TEKRAR YAZMA! ═══\n"
             raw = await asyncio.to_thread(self._model_fn, prompt)
             self._ui_progress(f"    🔍 RAW[:200]: {repr(raw[:200])}")
             decision = _parse_model_response(raw)
@@ -2019,6 +2173,7 @@ class AgenticCoder:
                     if (task.rewrite_counts[_fn_target] > 3 and _fn_target in task.files_written
                             and _fn_target not in task.ruff_problems
                             and all(g[0] != _fn_target for g in task.method_gaps)
+                            and _fn_target not in self._fault_files(task)
                             and self._next_missing(task)):
                         last_error = await self._handle_lock(task, step, steps, _fn_target)
                         if task.stop_reason:
@@ -2105,6 +2260,25 @@ class AgenticCoder:
                         break
                     continue
 
+                # Canli hata: bir fix calculator.py'yi 1069 karakterden 291'e
+                # indirdi, Calculator sinifi kayboldu (model parca yazdi).
+                # Onceki surumdeki ust duzey public ad kayboluyorsa RET; ilk
+                # yazim ya da tum adlari koruyan yeniden yazim serbest.
+                _prev = task.files_written.get(filename)
+                _lost = _lost_api(_prev, content) if filename.endswith(".py") else []
+                if _lost:
+                    _names = ", ".join(_lost)
+                    task.errors.append(f"Iteration {i+1}: {filename}: API kaybı: {_names}")
+                    last_error = (
+                        f"API_KAYBI ({filename}): yeni içerik önceki sürümdeki şu üst düzey "
+                        f"adları kaybettiriyor: {_names}. Parça/yama YAZMA — {filename} "
+                        "dosyasının TAMAMINI (mevcut tüm sınıf ve fonksiyonlar + değişikliğin) "
+                        f"yaz. Mevcut {filename}:\n```python\n{_prev[:3000]}\n```")
+                    if self._reject(task, step, steps, filename, "API", content,
+                                    f"API kaybı: {_names} kayboluyor — dosyanın TAMAMINI yaz"):
+                        break
+                    continue
+
                 fpath = _contained_path(task.project_path, filename)
                 if fpath is None or fpath.name.startswith(_REJECTED_PREFIX):
                     task.errors.append(f"Iteration {i+1}: {filename}: proje dizini dışı")
@@ -2125,6 +2299,9 @@ class AgenticCoder:
                                     f"dosya yazılamadı ({e.strerror or type(e).__name__}) — başka bir ad kullan"):
                         break
                     continue
+                # Onceki inspect/run ciktisi artik eski dosya durumunu anlatir:
+                # eskiden hic temizlenmiyor, model eski icerigi gormeye devam ediyordu.
+                last_run_output = ""
                 # Stuck detection: same content repeatedly
                 _ch = str(hash(content))[:8]
                 if _ch == task.last_content_hash:
@@ -2461,17 +2638,20 @@ class AgenticCoder:
             out.append(f"  - {fn[:-3].replace('/', '.')}: {', '.join(names) or '(public ad yok)'}")
         return out
 
-    async def _write_test_core(self, task: CodingTask) -> str | None:
-        """tests/test_core.py icin modele DAR bir prompt verir (sadece o dosya +
-        modul adlari). _TEST_CORE_ATTEMPTS denemede gecerli, ruff-temiz ve
-        pytest'ten gecen icerik gelmezse None."""
-        name = "tests/test_core.py"
+    async def _write_test_core(self, task: CodingTask, name: str = "tests/test_core.py",
+                               context: list[str] | None = None) -> str | None:
+        """Test dosyasi icin modele DAR bir prompt verir (sadece o dosya +
+        modul adlari, varsa ek baglam). _TEST_CORE_ATTEMPTS denemede gecerli,
+        ruff-temiz ve pytest'ten gecen icerik gelmezse None; dosyanin onceki
+        icerigi (varsa) geri konur."""
         error = ""
+        previous = task.files_written.get(name)
         for _ in range(_TEST_CORE_ATTEMPTS):
             prompt = "\n".join([
                 f"SADECE {name} dosyasını yaz (başka dosya YOK). pytest testleri olsun.",
                 "Proje kökündeki modüller (import adı: ad listesi):",
                 *self._module_api(task),
+                *(context or []),
                 "Kurallar: modülleri proje kökünden import et (ör. `from calc import topla`), "
                 "en az 2 `def test_...` ve gerçek assert yaz; input()/GUI penceresi açma.",
                 *([f"Önceki deneme reddedildi: {error[:600]}"] if error else []),
@@ -2489,17 +2669,68 @@ class AgenticCoder:
             if not ok:
                 error = msg
                 continue
+            lost = _lost_api(previous, content)
+            if lost:     # yeniden uretimde test silerek "gecmek" yok
+                error = f"şu testler kayboldu, hepsini koru: {', '.join(lost)}"
+                continue
             fpath = task.project_path / name
             fpath.parent.mkdir(parents=True, exist_ok=True)
             fpath.write_text(content, encoding="utf-8")
             fixed, ruff_left = await asyncio.to_thread(_ruff_autofix, fpath)
             content = fixed if fixed is not None else content
             error = (f"ruff: {ruff_left}" if ruff_left
-                     else await asyncio.to_thread(_run_project_pytest, task.project_path))
+                     else await asyncio.to_thread(_run_project_pytest, task.project_path,
+                                                  _PYTEST_TIMEOUT, {**task.files_written, name: content}))
             if not error:
                 return content
-            fpath.unlink(missing_ok=True)
+            if previous is None:
+                fpath.unlink(missing_ok=True)
+            else:
+                fpath.write_text(previous, encoding="utf-8")
         return None
+
+    @staticmethod
+    def _fault_files(task: CodingTask) -> set[str]:
+        """Son pytest kosusunun HATALI DOSYA dedigi dosyalar."""
+        return {d["file"] for d in task.pytest_diag if d.get("file")}
+
+    def _regen_context(self, task: CodingTask, name: str) -> list[str]:
+        """Uyumsuz testi yeniden uretmek icin: mevcut test, test edilen yerel
+        modullerin GUNCEL icerigi ve pytest ciktisi."""
+        test_src = task.files_written.get(name, "")
+        imported = {m.split(".")[0] for m in _imported_modules(name, test_src)}
+        sources = [fn for fn in task.files_written
+                   if fn.endswith(".py") and not _is_test_file(fn) and Path(fn).name != "__init__.py"
+                   and (_module_name(fn) or "").split(".")[0] in imported]
+        lines = [f"MEVCUT {name} kaynak kodla UYUMSUZ (pytest başarısız). Kaynak kod doğru "
+                 "kabul edilir: testleri kaynak kodun GERÇEK davranışına (istisna türleri, "
+                 "dönüş değerleri) uydur, aynı test adlarını koru:",
+                 f"```python\n{test_src[:3000]}\n```"]
+        for fn in sources:
+            lines.append(f"GÜNCEL {fn}:\n```python\n{task.files_written[fn][:4000]}\n```")
+        lines.append(f"pytest çıktısı:\n{task.pytest_error[:1500]}")
+        return lines
+
+    async def _regen_mismatched_tests(self, task: CodingTask) -> bool:
+        """pytest basarisizligi test dosyasindaki bir beklenti uyusmazligiysa
+        (DID NOT RAISE / farkli istisna turu / assert), o test dosyasini dar
+        prompt'la (kaynak modulun guncel icerigi + pytest ciktisi) yeniden
+        uretir: en fazla _TEST_CORE_ATTEMPTS deneme, ayni dosya durumu icin bir
+        kez. Basarisizsa eski icerik kalir; model HATALI DOSYA mesajiyla
+        test dosyasini kendisi duzeltebilir (kilit/"tekrar yazma" yok)."""
+        mism = [d for d in _test_mismatches(task.pytest_diag) if d["file"] in task.files_written]
+        if not mism or task.pytest_key in task.test_regen_keys:
+            return False
+        task.test_regen_keys.add(task.pytest_key)
+        name = mism[0]["file"]
+        self._ui_progress(f"    🧪 {name} kaynak kodla uyumsuz ({mism[0]['test']}) → dar prompt ile yeniden üretiliyor")
+        content = await self._write_test_core(task, name=name, context=self._regen_context(task, name))
+        if content is None:
+            self._ui_progress(f"    ⚠️ {name} yeniden üretilemedi; model düzeltecek")
+            return False
+        task.files_written[name] = content
+        self._ui_progress(f"    🤖 {name} kaynak kodla uyumlu yeniden yazıldı ({len(content):,} chars)")
+        return True
 
     def _skip_tests(self, task: CodingTask) -> None:
         """test_core.py yazilamadi: plandan cikar; bizim urettigimiz bos
@@ -2549,7 +2780,9 @@ class AgenticCoder:
         if key == task.pytest_key:
             return
         task.pytest_key = key
-        task.pytest_error = _run_project_pytest(task.project_path)
+        output, err = _pytest_output(task.project_path)
+        task.pytest_diag = _pytest_diagnose(output, task.files_written) if output else []
+        task.pytest_error = _pytest_message(output, task.pytest_diag) if output else err
 
     # ── Prompt Builder ─────────────────────────────────────────
 
@@ -2598,7 +2831,7 @@ class AgenticCoder:
         else:
             parts.append("  -> Tum dosyalar yazildi. Run et, test et, sonra ACCEPT.")
         _wr = list(task.files_written.keys())
-        if _wr:
+        if _wr and _wr[-1] not in self._fault_files(task):
             _lc = task.files_written[_wr[-1]]
             parts.append(_lc[:300])
             parts.append('ONCEKI DOSYA YUKARIDA. AYNISINI TEKRAR YAZMA!')

@@ -218,6 +218,10 @@ def test_failing_pytest_is_fed_back_and_blocks_smart_exit(home):
     fixed = {"done": False}
 
     def model(prompt: str) -> str:
+        if "SADECE tests/test_calc.py" in prompt:
+            # Uyumsuz testin dar prompt'la yeniden uretimi: bu senaryoda
+            # basarisiz olur, duzeltmeyi ana dongudeki model yapar.
+            return _decide({"action": "inspect", "args": {}})
         prompts.append(prompt)
         step = next(seq, None)
         if step:
