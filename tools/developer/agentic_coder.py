@@ -352,6 +352,9 @@ class CodingTask:
     lock_total: int = 0
     tests_skipped: bool = False
     notes: list[str] = field(default_factory=list)
+    # Aciklama GUI istiyor ama planda giris dosyasi yoktu: main.py (ya da baska
+    # bir GUI giris dosyasi) yazilmadan gorev bitmez.
+    entry_required: bool = False
 
 
 @dataclass
@@ -754,6 +757,51 @@ def _uses_gui(files: dict) -> bool:
         if fn.endswith(".py") and any(m.split(".")[0] in _GUI_MODULES for m in _imported_modules(fn, src)):
             return True
     return False
+
+
+# Canli hata: Jarvis'in yeniden cagrisinda aciklama "Tkinter ile ... calculator.py"
+# oldu; plan [calculator.py, README.md] cikti, GUI'siz calculator.py yazilip
+# SMART EXIT ile "bitti" denildi. GUI isteyen aciklamada giris dosyasi beklenir.
+_GUI_HINT_RE = re.compile(r"tkinter|aray[üu]z|\bgui\b|pencere|tu[şs]\s*tak[ıi]m", re.IGNORECASE)
+_ENTRY_PLACEHOLDER = "main.py"
+
+
+def _wants_gui(description: str) -> bool:
+    return bool(_GUI_HINT_RE.search(description or ""))
+
+
+def _is_runnable(fn: str, source: str) -> bool:
+    """Calistirilinca bir sey yapan dosya: giris adi, __main__ korumasi ya da
+    ust duzeyde calisan kod (yalnizca import/def/class/atama olan modul degil)."""
+    if Path(fn).name in _ENTRY_SCRIPT_NAMES:
+        return True
+    try:
+        tree = ast.parse(source or "")
+    except SyntaxError:
+        return False
+    if _has_main_guard(tree) or _toplevel_blocks(tree):
+        return True
+    inert = (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef,
+             ast.ClassDef, ast.Assign, ast.AnnAssign)
+    return any(not isinstance(s, inert)
+               and not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))
+               for s in tree.body)
+
+
+def _gui_entry_files(files: dict) -> list[str]:
+    """GUI giris dosyasi sayilanlar: main.py/cli.py/app.py/__main__.py ya da
+    pencereyi (kendisi veya import ettigi yerel modul uzerinden) acan, calistirilabilir dosya."""
+    gui_local = {_module_name(fn) for fn, src in files.items() if _uses_gui({fn: src})}
+    out = []
+    for fn, src in files.items():
+        if not fn.endswith(".py") or _is_test_file(fn):
+            continue
+        if Path(fn).name in _ENTRY_SCRIPT_NAMES:
+            out.append(fn)
+        elif _is_runnable(fn, src) and (
+                _uses_gui({fn: src}) or gui_local & set(_imported_modules(fn, src))):
+            out.append(fn)
+    return out
 
 
 def _headless_env() -> dict:
@@ -1286,6 +1334,21 @@ def _lang_ext(language: str) -> str:
 _CODE_SUFFIXES = {".py", ".js", ".ts", ".go", ".rb", ".php", ".sh", ".java", ".rs", ".c", ".cpp"}
 
 
+# Canli hata: model icerigi ```python ... ``` icinde verdi, citler dosyaya
+# girdi ve gecerli kod SyntaxError ile reddedildi. Yalnizca TUM icerigi saran
+# cit soyulur (ilk satir ```dil, son satir ```); ortadaki ``` (docstring,
+# metin) korunur. Markdown dosyalarinda cit icerigin parcasi olabilir.
+_WRAP_FENCE_RE = re.compile(r"\A\s*```[\w+.#-]*[ \t]*\n(?P<body>.*?\n)?[ \t]*```\s*\Z", re.DOTALL)
+_FENCE_KEEP_SUFFIXES = {".md", ".markdown", ".rst", ".txt"}
+
+
+def _strip_wrapping_fence(filename: str, content: str) -> str:
+    if Path(filename).suffix.lower() in _FENCE_KEEP_SUFFIXES:
+        return content
+    m = _WRAP_FENCE_RE.match(content or "")
+    return (m.group("body") or "") if m else content
+
+
 def _validate_file(filename: str, content: str, language: str = "python") -> tuple[bool, str]:
     """Dosya turune gore dogrulama.
 
@@ -1730,6 +1793,12 @@ class AgenticCoder:
                 task.expected_files.append('tests/__init__.py')
             if 'tests/test_core.py' not in task.expected_files:
                 task.expected_files.append('tests/test_core.py')
+        # GUI isteniyor ama planda giris dosyasi yok: main.py beklenir (README'den
+        # once). Test zorunlulugu (3+ dosya) bu ekleme yuzunden degismez.
+        if (_wants_gui(description)
+                and not any(Path(f).name in _ENTRY_SCRIPT_NAMES for f in task.expected_files)):
+            task.entry_required = True
+            task.expected_files.insert(task.expected_files.index('README.md'), _ENTRY_PLACEHOLDER)
         _tc_m = _re.search(r'(\d+)\s+(?:adet\s+)?test\b', description, _re.I)
         if _tc_m:
             task.min_test_count = int(_tc_m.group(1))
@@ -1763,6 +1832,7 @@ class AgenticCoder:
             self._publish_live()      # onceki eylemin sonu (to_thread isi yok)
             # ── Import denetimi (LLM'siz): eksik yerel modul + gercek import ──
             await asyncio.to_thread(self._sync_imports, task)
+            self._sync_entry(task)
             if task.mnf_streak > _MNF_STREAK_LIMIT:
                 # Ayni ModuleNotFoundError modele 3 tur gosterildi, duzelmedi:
                 # kalan turlar kota yakmasin.
@@ -1840,6 +1910,10 @@ class AgenticCoder:
                 prompt += "\n\n═══ KALAN DOSYALAR (HENÜZ YAZILMADI — HEMEN ŞİMDİ YAZ) ═══\n"
                 for _mf in _missing:
                     prompt += f"  → {_mf}\n"
+                if task.entry_required and _ENTRY_PLACEHOLDER in _missing:
+                    prompt += (f"  ({_ENTRY_PLACEHOLDER}: GUI giriş dosyası — pencere/arayüz burada "
+                               "kurulur, `if __name__ == \"__main__\":` ile başlatılır; "
+                               "giriş dosyası olmadan görev BİTMEZ)\n")
             if task.files_written:
                 _wl = list(task.files_written.keys())
                 prompt += f"\n═══ YAZILAN: {_wl} ═══\n"
@@ -1922,6 +1996,8 @@ class AgenticCoder:
             if action in ("write", "fix"):
                 filename = args.get("filename") or target_filename or f"main.{_lang_ext(task.language)}"
                 content = args.get("content", "")
+                if isinstance(content, str):
+                    content = _strip_wrapping_fence(filename, content)
 
                 # Ayni dosya ayni icerikle art arda yaziliyorsa model dongude:
                 # kalan turlari (kotayi) yakmadan sebebiyle birlikte bitir.
@@ -2126,6 +2202,7 @@ class AgenticCoder:
                     + self._result_block(task))
 
         # FINAL QUALITY GATE — accepted HERE only
+        self._sync_entry(task)
         _ok, _vp = await asyncio.to_thread(_verify_project, task, run_pytest=True)
         task.accepted = _ok and not task.stop_reason
         if not task.missing_modules:
@@ -2182,6 +2259,21 @@ class AgenticCoder:
             task.mnf_streak += 1
         else:
             task.mnf_streak = 1 if task.import_missing else 0
+
+    @staticmethod
+    def _sync_entry(task: CodingTask) -> None:
+        """GUI gorevinde baska bir giris dosyasi (app.py, pencereyi acan
+        calistirilabilir dosya) yazildiysa bekleyen main.py plandan cikar;
+        yoksa (geri) eklenir."""
+        if not task.entry_required:
+            return
+        ph = _ENTRY_PLACEHOLDER
+        if _gui_entry_files(task.files_written):
+            if ph in task.expected_files and ph not in task.files_written:
+                task.expected_files.remove(ph)
+        elif ph not in task.expected_files:
+            at = task.expected_files.index("README.md") if "README.md" in task.expected_files else len(task.expected_files)
+            task.expected_files.insert(at, ph)
 
     def _reject(self, task: CodingTask, step: CodingStep, steps: list[CodingStep],
                 filename: str, category: str, content: str, reason: str) -> bool:
@@ -2338,6 +2430,7 @@ class AgenticCoder:
             if not isinstance(content, str) or "def test_" not in content:
                 error = "yanıtta `def test_...` içeren content yok"
                 continue
+            content = _strip_wrapping_fence(name, content)
             ok, msg = _validate_file(name, content, task.language)
             if not ok:
                 error = msg
@@ -2376,7 +2469,8 @@ class AgenticCoder:
         """Tum gerekli dosyalar yazildi, .py'ler derleniyor, import temiz."""
         _enforce = {'README.md'}
         _has_test = any('test' in f.lower() for f in task.files_written)
-        _planned = [f for f in task.expected_files if f not in task.auto_expected]
+        _planned = [f for f in task.expected_files if f not in task.auto_expected
+                    and not (task.entry_required and f == _ENTRY_PLACEHOLDER)]
         if not _has_test and len(_planned) >= 3 and not task.tests_skipped:
             _enforce.add('tests/__init__.py')
         if not (set(task.expected_files) | _enforce).issubset(task.files_written):
@@ -2476,15 +2570,18 @@ class AgenticCoder:
 
     @staticmethod
     def _entry_file(task: CodingTask) -> str | None:
-        """Gercek giris dosyasi: main.py > cli.py > app.py > ilk test-disi .py.
-        Eskiden ozet her projede 'python3 main.py' diyordu (main.py olmasa da)."""
+        """Gercek giris dosyasi: main.py > cli.py > app.py > calistirilabilir ilk
+        test-disi .py. Eskiden ozet her projede 'python3 main.py' diyordu (main.py
+        olmasa da); sonra yalnizca modul olan calculator.py'yi (GUI/__main__ yok)
+        giris sayiyordu."""
         py_files = [f for f in task.files_written if f.endswith(".py")]
         for preferred in ("main.py", "cli.py", "app.py"):
             if preferred in py_files:
                 return preferred
         for f in py_files:
             name = Path(f).name
-            if not name.startswith("test_") and name != "__init__.py" and "/" not in f:
+            if (not name.startswith("test_") and name != "__init__.py" and "/" not in f
+                    and _is_runnable(f, task.files_written[f])):
                 return f
         return None
 
@@ -2497,8 +2594,17 @@ class AgenticCoder:
             f"Durum: {'BAŞARILI' if task.accepted else 'BAŞARISIZ'}",
             f"Proje klasörü: {task.project_path}",
         ]
+        missing = [f for f in task.expected_files
+                   if f not in task.files_written and not (task.project_path / f).is_file()]
+        if missing:
+            lines.append(f"Eksik dosya: {', '.join(missing)}")
         if task.missing_modules:
             lines.append(f"Eksik modül: {', '.join(task.missing_modules)}")
+        _py = [f for f in task.files_written if f.endswith(".py") and not _is_test_file(f)
+               and Path(f).name != "__init__.py"]
+        if _py and AgenticCoder._entry_file(task) is None:
+            lines.append(f"Not: çalıştırılabilir giriş dosyası yok ({', '.join(_py)} yalnızca "
+                         "modül; GUI ya da __main__ kodu içermiyor)")
         lines.extend(task.notes)
         return "\n".join(lines)
 
