@@ -201,6 +201,13 @@ class CodingTask:
     import_check_key: tuple = ()
     mnf_streak: int = 0
     missing_modules: list[str] = field(default_factory=list)
+    # Dongu ici pytest geri bildirimi (SMART EXIT adayi iken) ve gorevi
+    # erken bitiren sebep (ayni dosya/icerik dongusu, kalici eksik modul).
+    pytest_key: tuple = ()
+    pytest_error: str = ""
+    same_write_key: str = ""
+    same_write_count: int = 0
+    stop_reason: str = ""
 
 
 @dataclass
@@ -250,23 +257,33 @@ _GUI_MODULES = frozenset({
 _IMPORT_CHECK_TIMEOUT = 15
 _MNF_STREAK_LIMIT = 3
 _IMPORT_MARKER = "@@JARVIS_IMPORT_CHECK@@"
+# argv[2]: [[etiket, modul, ad|None], ...]. ad None ise modul import edilir;
+# degilse "from modul import ad" denetlenir (giris betigi calistirilmadan).
 _IMPORT_SCRIPT = r"""
 import importlib, json, sys
 sys.path.insert(0, sys.argv[1])
 found = []
-for mod in sys.argv[2:]:
+for label, mod, attr in json.loads(sys.argv[2]):
     try:
-        importlib.import_module(mod)
+        m = importlib.import_module(mod)
+        if attr and not hasattr(m, attr):
+            try:
+                importlib.import_module(mod + "." + attr)
+            except ModuleNotFoundError:
+                raise ImportError(f"cannot import name {attr!r} from {mod!r}") from None
     except ModuleNotFoundError as e:
-        found.append([mod, "ModuleNotFoundError", e.name or "", str(e)])
+        found.append([label, "ModuleNotFoundError", e.name or "", str(e)])
     except ImportError as e:
-        found.append([mod, "ImportError", "", str(e)])
+        found.append([label, "ImportError", "", str(e)])
     except BaseException:
         # Calisma zamani hatalari (pencere acilamadi, input() EOF...) import
         # denetiminin konusu degil; onlari run adimi ve testler yakalar.
         pass
-print("@@JARVIS_IMPORT_CHECK@@" + json.dumps(found))
+# Modul satir sonu olmadan prompt basmis olabilir: isaret yeni satirdan.
+sys.stdout.write("\n@@JARVIS_IMPORT_CHECK@@" + json.dumps(found) + "\n")
+sys.stdout.flush()
 """
+_ENTRY_SCRIPT_NAMES = frozenset({"main.py", "cli.py", "app.py", "__main__.py"})
 
 
 @functools.lru_cache(maxsize=1)
@@ -393,15 +410,91 @@ def _module_name(fn: str) -> str | None:
     return ".".join(parts)
 
 
+def _has_main_guard(tree: ast.Module) -> bool:
+    for node in tree.body:
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Compare):
+            names = [node.test.left, *node.test.comparators]
+            if any(isinstance(n, ast.Name) and n.id == "__name__" for n in names):
+                return True
+    return False
+
+
+def _toplevel_blocks(tree: ast.Module) -> bool:
+    """Ust duzeyde (def/class disinda) input() ya da `while True` var mi."""
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.While) and isinstance(node.test, ast.Constant) and node.test.value:
+                return True
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "input"):
+                return True
+    return False
+
+
+def _is_entry_script(fn: str, source: str) -> bool:
+    """Giris betigi: import edilince program calisir. Bunlar import EDILMEZ."""
+    if Path(fn).name in _ENTRY_SCRIPT_NAMES:
+        return True
+    try:
+        tree = ast.parse(source or "")
+    except SyntaxError:
+        return False
+    return not _has_main_guard(tree) and _toplevel_blocks(tree)
+
+
+def _static_import_checks(fn: str, source: str) -> list[list]:
+    """Giris betiginin import ettigi her modul/ad icin denetim satiri."""
+    try:
+        tree = ast.parse(source or "")
+    except SyntaxError:
+        return []
+    guarded = _guarded_import_nodes(tree)
+    package = [p for p in Path(fn).parent.parts if p not in ("", ".")]
+    checks: list[list] = []
+    for node in ast.walk(tree):
+        if id(node) in guarded:
+            continue
+        if isinstance(node, ast.Import):
+            checks.extend([fn, alias.name, None] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = package[: len(package) - (node.level - 1)] if node.level > 1 else package
+                mod = ".".join([*base, node.module] if node.module else base)
+            else:
+                mod = node.module or ""
+            if not mod:
+                continue
+            checks.extend([fn, mod, alias.name] for alias in node.names if alias.name != "*")
+    return checks
+
+
 def _import_problems(files: dict, root: Path, timeout: int = _IMPORT_CHECK_TIMEOUT) -> tuple[list[str], list[str]]:
     """Projedeki modulleri ayri bir surecte GERCEKTEN import eder (ekran yok,
-    stdin yok, zaman asimli). Donus: (sorun metinleri, bulunamayan moduller)."""
-    mods = list(dict.fromkeys(m for m in map(_module_name, files) if m))
-    if not mods:
+    stdin yok, zaman asimli). Giris betikleri (main.py, cli.py, app.py ya da
+    __main__ korumasiz ust duzey input()/while True) calistirilmaz; yalnizca
+    import ettikleri modul ve adlar denetlenir.
+    Donus: (sorun metinleri, bulunamayan moduller)."""
+    checks: list[list] = []
+    for fn in files:
+        mod = _module_name(fn)
+        if not mod:
+            continue
+        source = files.get(fn) or ""
+        if not source:
+            fp = _contained_path(root, fn)
+            if fp is not None and fp.is_file():
+                source = fp.read_text(encoding="utf-8", errors="replace")
+        if _is_entry_script(fn, source):
+            checks.extend(_static_import_checks(fn, source))
+        else:
+            checks.append([fn, mod, None])
+    if not checks:
         return [], []
     try:
         r = subprocess.run(
-            [sys.executable, "-c", _IMPORT_SCRIPT, str(root), *mods],
+            [sys.executable, "-c", _IMPORT_SCRIPT, str(root), json.dumps(checks)],
             cwd=str(root), capture_output=True, text=True, encoding="utf-8",
             errors="replace", stdin=subprocess.DEVNULL, timeout=timeout,
             env=_headless_env(),
@@ -411,17 +504,65 @@ def _import_problems(files: dict, root: Path, timeout: int = _IMPORT_CHECK_TIMEO
                 "(üst düzey kod __main__ korumasına alınmalı)"], []
     except Exception as e:
         return [f"import denemesi yapılamadı: {type(e).__name__}"], []
-    line = next((ln for ln in reversed((r.stdout or "").splitlines()) if ln.startswith(_IMPORT_MARKER)), None)
-    if line is None:
-        tail = (r.stderr or r.stdout or "").strip()[-300:]
-        return [f"import denemesi sonuç vermedi (exit {r.returncode}): {tail}"], []
+    out = r.stdout or ""
+    at = out.rfind(_IMPORT_MARKER)
+    if at < 0:
+        # Modul sureci kendisi bitirdiyse (os._exit, sys.exit) isaret hic
+        # basilmaz. Bu bir import hatasi kaniti degildir: SMART EXIT'i
+        # engelleyen sahte sorun uretme, yalnizca log'a yaz.
+        tail = (r.stderr or out).strip()[-300:]
+        logger.warning(f"[Coder] import denetimi sonuç vermedi (exit {r.returncode}): {tail}")
+        return [], []
+    try:
+        found = json.loads(out[at + len(_IMPORT_MARKER):].splitlines()[0])
+    except (json.JSONDecodeError, IndexError):
+        logger.warning("[Coder] import denetimi çıktısı ayrıştırılamadı")
+        return [], []
     problems: list[str] = []
     missing: list[str] = []
-    for mod, kind, name, msg in json.loads(line[len(_IMPORT_MARKER):]):
-        problems.append(f"{mod.replace('.', '/')}.py import edilemedi: {kind}: {msg}"[:400])
+    for label, kind, name, msg in found:
+        problems.append(f"{label} import edilemedi: {kind}: {msg}"[:400])
         if kind == "ModuleNotFoundError" and name and name not in missing:
             missing.append(name)
     return problems, missing
+
+
+_PYTEST_TIMEOUT = 60
+_SAME_WRITE_LIMIT = 3
+
+
+def _is_test_file(fn: str) -> bool:
+    stem = Path(fn).stem.lower()
+    return fn.endswith(".py") and (stem.startswith("test_") or stem.endswith("_test"))
+
+
+def _run_project_pytest(root: Path, timeout: int = _PYTEST_TIMEOUT) -> str:
+    """Proje testlerini ekransiz, stdin kapali calistirir. Bos donus = gecti
+    (ya da toplanacak test yok); degilse modele verilecek hata metni."""
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider"],
+            cwd=str(root), capture_output=True, text=True, encoding="utf-8",
+            errors="replace", stdin=subprocess.DEVNULL, timeout=timeout, env=_headless_env(),
+        )
+    except subprocess.TimeoutExpired:
+        return f"PYTEST ZAMAN AŞIMI ({timeout}s): testler bitmiyor (sonsuz döngü / input() bekleyen test?)"
+    except Exception as e:
+        return f"PYTEST çalıştırılamadı: {type(e).__name__}"
+    if r.returncode in (0, 5):  # 5: toplanacak test yok
+        return ""
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    return ("PYTEST BAŞARISIZ — testler geçmiyor; çıktıyı oku ve KODU (ya da hatalı testi) "
+            f"düzelt:\n{out[-600:]}")
+
+
+_EOF_RE = re.compile(r"^EOFError\b", re.MULTILINE)
+
+
+def _interactive_eof(stderr: str | None) -> bool:
+    """Traceback'in son satiri EOFError: stdin kapaliyken input() cagrildi."""
+    lines = [ln for ln in (stderr or "").strip().splitlines() if ln.strip()]
+    return bool(lines) and bool(_EOF_RE.match(lines[-1]))
 
 
 def _verify_project(task, run_pytest=True):
@@ -483,21 +624,21 @@ def _verify_project(task, run_pytest=True):
     # dogrudan pencereyi acar: yalnizca ast + gercek import denetimi yeterli.
     if _uses_gui(task.files_written):
         return (len(problems) == 0, problems)
+    # stdin kapali + ekransiz: etkilesimli program input()'ta EOFError ile
+    # biter; bu bir hata degil, "kullanicidan girdi bekliyor" demektir.
+    _quiet = dict(cwd=str(task.project_path), capture_output=True, text=True,
+                  stdin=subprocess.DEVNULL, env=_headless_env())
     for _cn in ("cli.py", "main.py"):
         if (task.project_path / _cn).is_file():
             try:
-                _ct = subprocess.run(
-                    [sys.executable, _cn, "--help"],
-                    cwd=str(task.project_path), capture_output=True,
-                    text=True, timeout=15)
-                if _ct.returncode != 0:
+                _ct = subprocess.run([sys.executable, _cn, "--help"], timeout=15, **_quiet)
+                if _ct.returncode != 0 and not _interactive_eof(_ct.stderr):
                     try:
                         _imp = subprocess.run(
                             [sys.executable, "-c",
                              f"import {Path(_cn).stem}; print('IMPORT_OK')"],
-                            cwd=str(task.project_path),
-                            capture_output=True, text=True, timeout=10)
-                        if "IMPORT_OK" not in _imp.stdout:
+                            timeout=10, **_quiet)
+                        if "IMPORT_OK" not in _imp.stdout and not _interactive_eof(_imp.stderr):
                             problems.append(f"{_cn} hem --help hem import basarisiz (exit {_ct.returncode}): {(_ct.stderr or _ct.stdout or '')[-150:]}")
                     except Exception:
                         problems.append(f"{_cn} calismiyor (exit {_ct.returncode})")
@@ -974,12 +1115,20 @@ class AgenticCoder:
                 # Ayni ModuleNotFoundError modele 3 tur gosterildi, duzelmedi:
                 # kalan turlar kota yakmasin.
                 task.missing_modules = list(task.import_missing)
-                task.final_response = (
+                task.stop_reason = task.final_response = (
                     f"EKSIK MODUL: {', '.join(task.missing_modules)} — aynı ModuleNotFoundError "
                     f"{_MNF_STREAK_LIMIT} tur üst üste düzelmedi, görev durduruldu."
                 )
                 self._ui_progress(f"  ❌ {task.final_response}")
                 break
+
+            # ── pytest geri bildirimi: SMART EXIT adayi + test dosyasi varsa ──
+            if self._smart_exit_candidate(task) and any(map(_is_test_file, task.files_written)):
+                await asyncio.to_thread(self._sync_pytest, task)
+            else:
+                task.pytest_error, task.pytest_key = "", ()
+            if task.pytest_error:
+                last_error = task.pytest_error
 
             task.iterations = i + 1
             self._ui_progress(f"  ⚙️ Iterasyon {task.iterations}/{self._max}")
@@ -1045,27 +1194,8 @@ class AgenticCoder:
             if not hasattr(task, '_zero_progress'):
                 task._zero_progress = 0
 
-            # ═══ SMART EXIT: tum dosyalar yazildi + compile temiz → accept ═══
-            _enforce = set()
-            _enforce.add('README.md')
-            _has_test = any('test' in f.lower() for f in task.files_written)
-            _planned = [f for f in task.expected_files if f not in task.auto_expected]
-            if not _has_test and len(_planned) >= 3:
-                _enforce.add('tests/__init__.py')
-            _all_required = set(task.expected_files) | _enforce
-            _all_clean = (_all_required.issubset(set(task.files_written.keys()))
-                          and not task.import_problems)
-            if _all_clean:
-                for _fn, _fc in task.files_written.items():
-                    # Sadece .py derlenir; README.md'yi derlemek SMART EXIT'i
-                    # hic tetiklenmez yapiyordu (25 iterasyonun hepsi harcaniyordu).
-                    if not _fn.endswith(".py"):
-                        continue
-                    try:
-                        compile(_fc, _fn, "exec")
-                    except SyntaxError:
-                        _all_clean = False
-                        break
+            # ═══ SMART EXIT: tum dosyalar + compile + import + pytest temiz → accept ═══
+            _all_clean = self._smart_exit_candidate(task) and not task.pytest_error
             if _all_clean and task.iterations >= 2:
                 task.final_response = f"Tum dosyalar yazildi ve temiz: {sorted(task.files_written.keys())}"
                 steps.append(CodingStep(step_num=i+1, thought="auto-accept: all files valid", action="accept", detail="SMART_EXIT", success=True))
@@ -1094,6 +1224,25 @@ class AgenticCoder:
             if action in ("write", "fix"):
                 filename = args.get("filename") or target_filename or f"main.{_lang_ext(task.language)}"
                 content = args.get("content", "")
+
+                # Ayni dosya ayni icerikle art arda yaziliyorsa model dongude:
+                # kalan turlari (kotayi) yakmadan sebebiyle birlikte bitir.
+                _wk = f"{filename}\0{hash(content)}"
+                if _wk == task.same_write_key:
+                    task.same_write_count += 1
+                else:
+                    task.same_write_key, task.same_write_count = _wk, 1
+                if task.same_write_count >= _SAME_WRITE_LIMIT:
+                    _reason = (last_error or task.pytest_error
+                               or (task.import_problems[0] if task.import_problems else "")
+                               or "son hata kaydı yok")
+                    task.stop_reason = (f"döngü: {filename} aynı içerikle tekrar yazılıyor, "
+                                        f"sebep: {_reason[:400]}")
+                    step.detail = f"🔁 DÖNGÜ ({_SAME_WRITE_LIMIT}x aynı içerik): {filename}"
+                    step.success = False
+                    steps.append(step)
+                    self._ui_progress(f"  ❌ {task.stop_reason}")
+                    break
 
                 # Same file write tracking + force rotate
                 if filename == task.last_written_file:
@@ -1263,7 +1412,7 @@ class AgenticCoder:
 
         # FINAL QUALITY GATE — accepted HERE only
         _ok, _vp = await asyncio.to_thread(_verify_project, task, run_pytest=True)
-        task.accepted = _ok and not task.missing_modules
+        task.accepted = _ok and not task.stop_reason
         if not task.missing_modules:
             await asyncio.to_thread(self._sync_imports, task)
             task.missing_modules = list(dict.fromkeys(
@@ -1272,9 +1421,9 @@ class AgenticCoder:
         if not task.accepted:
             task.errors.extend(_vp[:5])
             _cause = f"LLM'e ulaşılamadı ({llm_error}) — " if llm_error else ""
-            _mnf = f"{task.final_response} " if task.final_response.startswith("EKSIK MODUL") else ""
+            _stop = f"{task.stop_reason} " if task.stop_reason else ""
             task.final_response = (
-                f"{_mnf}{_cause}DOGRULAMA BASARISIZ ({len(_vp)} sorun): "
+                f"{_stop}{_cause}DOGRULAMA BASARISIZ ({len(_vp)} sorun): "
                 + "; ".join(_vp[:5])
             )
         elif not task.final_response:
@@ -1318,6 +1467,38 @@ class AgenticCoder:
             task.mnf_streak += 1
         else:
             task.mnf_streak = 1 if task.import_missing else 0
+
+    @staticmethod
+    def _smart_exit_candidate(task: CodingTask) -> bool:
+        """Tum gerekli dosyalar yazildi, .py'ler derleniyor, import temiz."""
+        _enforce = {'README.md'}
+        _has_test = any('test' in f.lower() for f in task.files_written)
+        _planned = [f for f in task.expected_files if f not in task.auto_expected]
+        if not _has_test and len(_planned) >= 3:
+            _enforce.add('tests/__init__.py')
+        if not (set(task.expected_files) | _enforce).issubset(task.files_written):
+            return False
+        if task.import_problems:
+            return False
+        for _fn, _fc in task.files_written.items():
+            # Sadece .py derlenir; README.md'yi derlemek SMART EXIT'i
+            # hic tetiklenmez yapiyordu (25 iterasyonun hepsi harcaniyordu).
+            if not _fn.endswith(".py"):
+                continue
+            try:
+                compile(_fc, _fn, "exec")
+            except SyntaxError:
+                return False
+        return True
+
+    @staticmethod
+    def _sync_pytest(task: CodingTask) -> None:
+        """Dosyalar degistiyse proje testlerini yeniden calistirir."""
+        key = tuple(sorted((k, hash(v)) for k, v in task.files_written.items()))
+        if key == task.pytest_key:
+            return
+        task.pytest_key = key
+        task.pytest_error = _run_project_pytest(task.project_path)
 
     # ── Prompt Builder ─────────────────────────────────────────
 
