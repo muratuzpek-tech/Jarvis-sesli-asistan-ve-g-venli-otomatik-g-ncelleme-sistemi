@@ -27,6 +27,17 @@ nvidia-smi
 docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
 ```
 
+Ollama image’ı yaklaşık birkaç GB yer açar; indirme öncesi disk durumunu kontrol edin:
+
+```bash
+df -h
+docker system df
+docker image prune -f
+docker builder prune -af
+```
+
+`/var/lib/docker` veya `/var/lib/containerd` bulunduğu disk üzerinde en az 15–20 GB boş alan bırakın. `no space left on device` görülürse model çekmeye devam etmeyin; önce eski image, build cache ve container’ları temizleyin.
+
 İlk modelleri indirin:
 
 ```bash
@@ -54,7 +65,25 @@ docker compose -f docker-compose.autonomous.yml run --rm --env-file .env.autonom
   "Görevi çöz"
 ```
 
-Görev sonunda `.jarvis-jobs` altında `job.log`, `report.json`, `final.patch` ve başlangıç commit’i saklanır. Başarılı görev `ready_for_review` durumunda durur; **otomatik commit, merge ve push yapılmaz**. Siz `final.patch` dosyasını inceledikten sonra elle uygulayabilirsiniz. Başarısız görev de ana dalı değiştirmez.
+Görev sonunda kalıcı `jarvis-jobs` volume’unda `job.log`, `report.json`, `final.patch` ve başlangıç commit’i saklanır. Başarılı görev `ready_for_review` durumunda durur; **otomatik commit, merge ve push yapılmaz**. Patch’i bulmak için `docker volume inspect` ile volume yolunu veya `docker compose ... run` çıktısındaki `JOB=` kimliğini kullanın. Örneğin gerçek dosya yolunu bulmak için:
+
+```bash
+docker compose -f docker-compose.autonomous.yml run --rm jarvis-agent \
+  "Görevi çöz; commit yapma, yalnızca patch ve rapor üret"
+
+docker volume ls | grep jarvis
+find /var/lib/docker/volumes -path '*jarvis*' -name final.patch -print
+```
+
+`<görev-id>` bir yer tutucudur; kabukta köşeli işaretlerle yazılmaz. Başarısız disk/image kurulumu nedeniyle görev hiç başlamadıysa zaten `final.patch` oluşmaz. Patch’i bulduktan sonra önce kopyalayıp inceleyin, sonra elle uygulayın:
+
+```bash
+cp /gercek/yol/final.patch /tmp/jarvis-review.patch
+git apply --check /tmp/jarvis-review.patch
+git apply /tmp/jarvis-review.patch
+git diff --check
+git diff
+```
 
 ## Full otomasyon bağlantısı
 

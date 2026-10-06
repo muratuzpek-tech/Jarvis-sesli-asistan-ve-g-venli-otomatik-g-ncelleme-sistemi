@@ -24,6 +24,7 @@ services:
       JARVIS_MAX_MINUTES: ${JARVIS_MAX_MINUTES:-60}
       JARVIS_VERIFY_COMMANDS: ${JARVIS_VERIFY_COMMANDS:-python -m pytest;ruff check .}
       JARVIS_REPO: /repo
+      JARVIS_JOBS_ROOT: /workhome/jobs
     volumes:
       # Worktree metadata and the final fast-forward merge require Git write access.
       # The supervisor still refuses dirty trees and never edits outside its worktree.
