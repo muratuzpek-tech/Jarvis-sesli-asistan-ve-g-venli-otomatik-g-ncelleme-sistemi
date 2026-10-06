@@ -56,9 +56,9 @@ def _log_player(player: Any, message: str) -> None:
             logger.debug("Failed to log to player: %s", exc)
 
 
-def _connect() -> sqlite3.Connection:
+def _connect(timeout: float = 20.0) -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), timeout=20.0)
+    conn = sqlite3.connect(str(DB_PATH), timeout=timeout)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
@@ -201,7 +201,7 @@ def _clock(iso: str | None) -> str:
         return ""
 
 
-def _job_line(r: sqlite3.Row) -> str:
+def _job_line(r: dict[str, Any]) -> str:
     status = r["status"]
     icon = _STATUS_ICONS.get(status, "•")
     desc = (r["description"] or "")[:60]
@@ -217,27 +217,44 @@ def _summary_lines(result: str | None) -> list[str]:
     return [line for line in (result or "").splitlines() if line.startswith(keep)]
 
 
+_JOB_COLUMNS = "id, description, status, result, started_at, finished_at"
+
+
+def list_jobs(job_id: str = "", limit: int = 10, timeout: float | None = 2.0) -> list[dict[str, Any]]:
+    """Gorevleri (en yeni once) duz sozluk listesi olarak dondurur; job_id
+    verilirse yalnizca o gorev. timeout: _lock ve sqlite icin bekleme suresi
+    (saniye); None = eskisi gibi sinirsiz kilit + 20 sn sqlite. Kilit zamaninda
+    alinamazsa sqlite3.OperationalError firlatir (pano Jarvis'i bekletmesin)."""
+    acquired = _lock.acquire() if timeout is None else _lock.acquire(timeout=timeout)
+    if not acquired:
+        raise sqlite3.OperationalError("pano kilidi meşgul")
+    try:
+        conn = _connect(20.0 if timeout is None else timeout)
+        try:
+            conn.row_factory = sqlite3.Row
+            if job_id:
+                rows = conn.execute(f"SELECT {_JOB_COLUMNS} FROM jobs WHERE id = ?", (job_id,)).fetchall()  # nosec B608: sabit sutun listesi.
+            else:
+                rows = conn.execute(
+                    f"SELECT {_JOB_COLUMNS} FROM jobs ORDER BY started_at DESC LIMIT ?",  # nosec B608: sabit sutun listesi.
+                    (max(0, int(limit)),),
+                ).fetchall()
+        finally:
+            conn.close()
+    finally:
+        _lock.release()
+    return [dict(r) for r in rows]
+
+
 def check_agent_board(parameters: dict[str, Any] | None = None, player: Any = None) -> str:
     """Tum gorevlerin (bekliyor/basladi/bitti/basarisiz) ozetini dondurur;
     job_id verilirse o gorevin ayrintili sonucunu."""
     job_id = str((parameters or {}).get("job_id", "") or "").strip()
-    columns = "id, description, status, result, started_at, finished_at"
-    with _lock:
-        try:
-            conn = _connect()
-            try:
-                conn.row_factory = sqlite3.Row
-                if job_id:
-                    rows = conn.execute(f"SELECT {columns} FROM jobs WHERE id = ?", (job_id,)).fetchall()  # nosec B608: sabit sutun listesi.
-                else:
-                    rows = conn.execute(
-                        f"SELECT {columns} FROM jobs ORDER BY started_at DESC LIMIT 10"  # nosec B608: sabit sutun listesi.
-                    ).fetchall()
-            finally:
-                conn.close()
-        except sqlite3.Error as e:
-            logger.error("Failed to query agent board: %s", e)
-            return f"Pano veritabanı okunamadı: {e}"
+    try:
+        rows = list_jobs(job_id=job_id, timeout=None)
+    except sqlite3.Error as e:
+        logger.error("Failed to query agent board: %s", e)
+        return f"Pano veritabanı okunamadı: {e}"
 
     if job_id:
         if not rows:

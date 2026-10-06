@@ -36,8 +36,12 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from collections.abc import Callable
 
@@ -161,6 +165,124 @@ def _gemini_available() -> bool:
     return _time.monotonic() >= _gemini_disabled_until
 
 
+# ── Pano icin canli durum (salt okunur) ───────────────────────
+# solve() tur basinda ve eylem sonunda DEGISMEZ bir ozet yayimlar; dis
+# thread'ler (pano) yalnizca live_status() ile kilit altinda KOPYA okur.
+# Canli CodingTask asla disari verilmez. Ozette dosya icerigi, ham model
+# ciktisi, prompt ya da ret alintisi yoktur; metinler pano maskesinden gecer.
+_LIVE_LOCK = threading.Lock()
+_LIVE: OrderedDict[str, MappingProxyType] = OrderedDict()
+_LIVE_MAX_RUNS = 10
+_LIVE_MAX_EVENTS = 20
+_LIVE_MAX_FILES = 50
+_last_model: tuple[str, str] | None = None     # (saglayici, model adi)
+_KNOWN_ACTIONS = frozenset({"write", "fix", "accept", "run", "inspect", "error"})
+
+
+def _set_last_model(provider: str, name: str) -> None:
+    global _last_model
+    with _LIVE_LOCK:
+        _last_model = (provider, name)
+
+
+def last_model() -> dict | None:
+    """Varsayilan model zincirinin (Gemini -> Ollama) son kullandigi model."""
+    with _LIVE_LOCK:
+        lm = _last_model
+    return {"provider": lm[0], "name": lm[1]} if lm else None
+
+
+def _live_clean(text: Any, limit: int) -> str:
+    """Panonun maskesi (anahtar, onay kodu, ev yolu...) KESMEDEN ONCE.
+    Pano modulu yuklenemiyorsa hicbir metin yayimlanmaz."""
+    try:
+        from jarvis.agent_panel_state import clean_text
+    except Exception:
+        return ""
+    return clean_text(text, limit)
+
+
+def _event_text(step: CodingStep) -> str:
+    """Adimin panoya giden kisa hali. Ham alanlar (program ciktisi, model
+    yaniti, LLM hata metni, ret sebebi -dosyadan satir alintilayabilir-,
+    modelin uydurdugu eylem adi) DUSURULUR; yalnizca sabit kategoriler ve
+    dosya adlari kalir."""
+    action = step.action if step.action in _KNOWN_ACTIONS else "?"
+    detail = step.detail or ""
+    if action == "run":
+        body = "çalıştırıldı"
+    elif action == "error":
+        body = "LLM hatası"
+    elif detail.startswith("REDDEDİLDİ (") and ")" in detail:
+        body = detail[:detail.index(")") + 1]
+    elif detail.startswith("REDDEDİLDİ"):
+        body = "REDDEDİLDİ"
+    elif detail.startswith("✅ ACCEPT"):
+        body = "✅ ACCEPT"
+    elif detail.startswith("Bilinmeyen action"):
+        body = "bilinmeyen eylem"
+    else:
+        body = detail
+    return f"#{step.step_num} {action}: {body} ({'OK' if step.success else 'HATA'})"
+
+
+def _live_snapshot(task: CodingTask, steps: list[CodingStep], status: str,
+                   model: dict | None, max_iterations: int = 0) -> MappingProxyType:
+    """CodingTask'tan degismez ozet (yalnizca str/int/tuple/proxy)."""
+    files = tuple(
+        MappingProxyType({"name": _live_clean(name, 120), "size": len(content.encode("utf-8", "replace"))})
+        for name, content in list(task.files_written.items())[:_LIVE_MAX_FILES]
+    )
+    rejects = MappingProxyType({
+        "reject": task.reject_total,
+        "eval": sum(task.eval_rejects.values()),
+        "lock": task.lock_total,
+        "method": len(task.method_gaps),       # su an eksik metot sayisi
+        "ruff": len(task.ruff_problems),       # ruff hatasi kalan dosya sayisi
+    })
+    model = model or {"provider": "bilinmiyor", "name": ""}
+    reason = task.stop_reason.split(":", 1)[0] if task.stop_reason else ""
+    return MappingProxyType({
+        "task_id": task.run_id,
+        "project": _live_clean(task.project_path.name, 60),
+        "description": _live_clean(task.description, 80),
+        "status": status,
+        "iteration": task.iterations,
+        "max_iterations": max_iterations,
+        "files": files,
+        "rejects": rejects,
+        "model": MappingProxyType({"provider": str(model.get("provider", "")),
+                                   "name": _live_clean(model.get("name", ""), 60)}),
+        "events": tuple(_live_clean(_event_text(s), 120) for s in steps[-_LIVE_MAX_EVENTS:]),
+        "reason": _live_clean(reason, 60),
+    })
+
+
+def _live_publish(snapshot: MappingProxyType) -> None:
+    with _LIVE_LOCK:
+        _LIVE[snapshot["task_id"]] = snapshot
+        _LIVE.move_to_end(snapshot["task_id"])
+        while len(_LIVE) > _LIVE_MAX_RUNS:
+            # once biten en eski kosu; hepsi calisiyorsa en eski
+            victim = next((k for k, s in _LIVE.items() if s["status"] != "çalışıyor"), None)
+            _LIVE.pop(victim if victim is not None else next(iter(_LIVE)))
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, (MappingProxyType, dict)):
+        return {k: _thaw(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_thaw(v) for v in value]
+    return value
+
+
+def live_status() -> list[dict]:
+    """Kayitli kosularin (en eski once) duz sozluk KOPYALARI."""
+    with _LIVE_LOCK:
+        snaps = list(_LIVE.values())
+    return [_thaw(s) for s in snaps]
+
+
 # ── Sabitler ──────────────────────────────────────────────────
 MAX_ITERATIONS = 25
 _MAX_OUTPUT_CHARS = 2000
@@ -222,6 +344,9 @@ class CodingTask:
     method_gaps: list = field(default_factory=list)
     method_sig: frozenset = frozenset()
     method_streak: int = 0
+    # Pano: kosu kimligi ve toplam ret sayisi (reject_count yalnizca seri).
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    reject_total: int = 0
     lock_file: str = ""
     lock_streak: int = 0
     lock_total: int = 0
@@ -1414,8 +1539,10 @@ class AgenticCoder:
             max_iterations: Maksimum döngü sayısı
         """
         self._model_fn = model_fn or self._default_model
+        self._uses_default_model = model_fn is None
         self._ui = ui
         self._max = max_iterations
+        self._live_ref: tuple[CodingTask, list[CodingStep]] | None = None
 
     @staticmethod
     def _default_model(prompt: str) -> str:
@@ -1447,6 +1574,7 @@ class AgenticCoder:
                             automatic_function_calling=_gtypes.AutomaticFunctionCallingConfig(disable=True),
                         ),
                     )
+                    _set_last_model("gemini", _GEMINI_CODER_MODEL)
                     return resp.text or ""
                 finally:
                     # CRITICAL FIX: Client async resource leak prevention
@@ -1481,6 +1609,7 @@ class AgenticCoder:
                     f"[Coder] Ollama format=json hatası ({str(json_err)[:200]}) → kısıtsız tekrar"
                 )
                 resp = ollama.chat(**_ollama_kwargs)
+            _set_last_model("ollama", _ollama_kwargs["model"])
             return resp.get("message", {}).get("content", "")
         except Exception as e:
             logger.warning(f"[Coder] Ollama da yok ({type(e).__name__}: {str(e)[:200]})")
@@ -1510,6 +1639,41 @@ class AgenticCoder:
         Returns:
             str: Final özet + yapılan işlerin listesi
         """
+        # Son durum (bitti/başarısız) her çıkış yolunda — istisna ve iptal
+        # dahil — panoya yazılır; pano hatası sonucu ASLA değiştirmez.
+        self._live_ref = None
+        finished = False
+        try:
+            result = await self._solve(description, language, project_path, target_filename)
+            finished = True
+            return result
+        finally:
+            ref = self._live_ref
+            ok = finished and ref is not None and ref[0].accepted
+            self._publish_live("bitti" if ok else "başarısız")
+
+    def _live_model(self) -> dict:
+        if not self._uses_default_model:
+            return {"provider": "özel", "name": ""}
+        return last_model() or {"provider": "bilinmiyor", "name": ""}
+
+    def _publish_live(self, status: str = "çalışıyor") -> None:
+        """Panoya degismez ozet yayimlar. Hata asla disari sizmaz."""
+        try:
+            if self._live_ref is None:
+                return
+            task, steps = self._live_ref
+            _live_publish(_live_snapshot(task, steps, status, self._live_model(), self._max))
+        except Exception as e:
+            logger.debug(f"[Coder] pano durumu yayımlanamadı: {type(e).__name__}")
+
+    async def _solve(
+        self,
+        description: str,
+        language: str,
+        project_path: str | None,
+        target_filename: str | None,
+    ) -> str:
         # Extract project_path from description if not explicitly passed
         if not project_path:
             import re as _rp
@@ -1574,6 +1738,8 @@ class AgenticCoder:
         steps: list[CodingStep] = []
         last_run_output = ""
         last_error = ""
+        self._live_ref = (task, steps)
+        self._publish_live()
 
         description = str(description)  # HIGH FIX: type coercion
         self._ui_progress(f"🔨 Agentic coding başlıyor: {description[:60]}")
@@ -1594,6 +1760,7 @@ class AgenticCoder:
         # asyncio.to_thread ile ayri thread'e aliniyor; aksi halde kodlama
         # boyunca mikrofon/hoparlor/websocket tamamen donuyordu.
         for i in range(self._max):
+            self._publish_live()      # onceki eylemin sonu (to_thread isi yok)
             # ── Import denetimi (LLM'siz): eksik yerel modul + gercek import ──
             await asyncio.to_thread(self._sync_imports, task)
             if task.mnf_streak > _MNF_STREAK_LIMIT:
@@ -1645,6 +1812,7 @@ class AgenticCoder:
                 last_error = task.pytest_error
 
             task.iterations = i + 1
+            self._publish_live()      # tur basi
             self._ui_progress(f"  ⚙️ Iterasyon {task.iterations}/{self._max}")
 
             # ── LLM'e sorma ────────────────────────────────────
@@ -2030,6 +2198,7 @@ class AgenticCoder:
         except OSError as e:
             logger.debug(f"[Coder] reddedilen içerik kaydedilemedi: {type(e).__name__}")
         key = (filename, category)
+        task.reject_total += 1
         task.reject_count = task.reject_count + 1 if key == task.reject_key else 1
         task.reject_key = key
         if task.reject_count < _REJECT_LIMIT:
