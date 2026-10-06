@@ -131,18 +131,19 @@ async def execute(job: Job, description: str, language: str) -> int:
         ok, checks = verify(job, log)
         if ok:
             git(job.repo, "-C", str(job.worktree), "diff", "--check", timeout=60)
-            git(job.repo, "-C", str(job.worktree), "add", "-A", timeout=60)
-            staged = run(["git", "diff", "--cached", "--name-only"], job.worktree, timeout=60)
-            changed = [line for line in staged.stdout.splitlines() if line.strip()]
+            diff = run(["git", "diff", "--binary", job.base_branch], job.worktree, timeout=60)
+            if diff.returncode:
+                raise RuntimeError(f"diff üretilemedi:\n{diff.stderr}")
+            (job.job_dir / "final.patch").write_text(diff.stdout, encoding="utf-8")
+            changed_result = run(["git", "diff", "--name-only", job.base_branch], job.worktree, timeout=60)
+            changed = [line for line in changed_result.stdout.splitlines() if line.strip()]
             if any(name.startswith(".env") or name.startswith("id_rsa") for name in changed):
-                raise RuntimeError("Güvenlik: gizli dosya değişikliği tespit edildi; commit iptal edildi.")
+                raise RuntimeError("Güvenlik: gizli dosya değişikliği tespit edildi; patch reddedildi.")
             if not changed:
-                raise RuntimeError("Doğrulama başarılı ancak değişiklik yok; commit yapılmadı.")
-            git(job.repo, "-C", str(job.worktree), "commit", "-m", f"jarvis: verified autonomous fix ({job.job_dir.name})", timeout=120)
-            # Fast-forward merge is deterministic and cannot overwrite concurrent work.
-            git(job.repo, "merge", "--ff-only", job.branch, timeout=120)
-            make_report(job, result, checks, "committed")
-            write_log(log, "COMMITTED", git(job.repo, "rev-parse", "HEAD"))
+                raise RuntimeError("Doğrulama başarılı ancak değişiklik yok; inceleme patch’i üretilmedi.")
+            # Deliberately do not commit, merge, push, or modify the protected branch.
+            make_report(job, result, checks, "ready_for_review")
+            write_log(log, "READY_FOR_REVIEW", f"{len(changed)} dosya; patch: {job.job_dir / 'final.patch'}")
             return 0
         write_log(log, f"RETRY {attempts}", "Verification failed; agent receives the next iteration context.")
     make_report(job, result, checks, "failed")

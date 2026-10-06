@@ -1,6 +1,6 @@
 # Jarvis Tam Otomatik Kodlama Hattı
 
-Bu kurulumda Jarvis görevleri **RTX 3060 bulunan Ubuntu sunucuda Docker içinde** yürütür. Ollama GPU’ya ayrılmış servis olarak çalışır; Jarvis ajanı ayrı container’da çalışır. Ajan, hedef Git deposunu salt-okunur olarak görür, geçici bir Git worktree içinde özgürce kod yazar ve test eder. Ana dal yalnızca tüm kalite komutları başarılı olduktan sonra fast-forward merge ile güncellenir.
+Bu kurulumda Jarvis görevleri **RTX 3060 bulunan Ubuntu sunucuda Docker içinde** yürütür. Ollama GPU’ya ayrılmış servis olarak çalışır; Jarvis ajanı ayrı container’da çalışır. Ajan, hedef Git deposunu geçici bir Git worktree içinde özgürce kod yazar ve test eder. Ana dal hiçbir koşulda otomatik güncellenmez; başarılı sonuç yalnızca inceleme patch’i olarak hazırlanır.
 
 ## Mimari
 
@@ -13,7 +13,7 @@ jarvis-agent container ----HTTP----> ollama container ----NVIDIA----> RTX 3060
         +-- geçici worktree: /workhome/jobs/<id>/workspace
         +-- pytest + ruff kalite kapıları
         +-- report.json + job.log
-        +-- başarılıysa commit ve fast-forward merge
+        +-- başarılıysa final.patch + report.json (commit/merge yok)
 ```
 
 Ana depo kirliyse görev başlatılmaz. Her görev başlangıç commit’ini kaydeder. Hata veya süre aşımında worktree silinir ve ana dal değişmeden kalır. Varsayılan sınırlar beş deneme, 60 dakika, 4096 context’tir. `JARVIS_MAX_ATTEMPTS` ve `JARVIS_MAX_MINUTES` ile değiştirilebilir.
@@ -54,11 +54,11 @@ docker compose -f docker-compose.autonomous.yml run --rm --env-file .env.autonom
   "Görevi çöz"
 ```
 
-Görev sonunda `.jarvis-jobs` altında `job.log`, `report.json` ve başlangıç commit’i saklanır. Başarılı görev ana dala `jarvis: verified autonomous fix (...)` mesajıyla commit eder. Başarısız görev ana dalı değiştirmez.
+Görev sonunda `.jarvis-jobs` altında `job.log`, `report.json`, `final.patch` ve başlangıç commit’i saklanır. Başarılı görev `ready_for_review` durumunda durur; **otomatik commit, merge ve push yapılmaz**. Siz `final.patch` dosyasını inceledikten sonra elle uygulayabilirsiniz. Başarısız görev de ana dalı değiştirmez.
 
 ## Full otomasyon bağlantısı
 
-Mevcut Jarvis arka plan görev sistemi, bu komutu bir zamanlayıcı/worker üzerinden çağırabilir. Üretim ortamında `jarvis-agent` container’ına Docker socket verilmez; ajan yalnızca kendi container’ında test çalıştırır. Böylece Jarvis kod yazmada serbesttir fakat host Docker’ını veya gizli dosyaları yönetemez. GitHub push gerekiyorsa ayrı bir dış teslim adımı olarak ve korumalı token scope’larıyla eklenmelidir; bu kurulum otomatik olarak uzak depoya push yapmaz.
+Mevcut Jarvis arka plan görev sistemi, bu komutu bir zamanlayıcı/worker üzerinden çağırabilir. Üretim ortamında `jarvis-agent` container’ına Docker socket verilmez; ajan yalnızca kendi container’ında test çalıştırır. Böylece Jarvis kod yazmada serbesttir fakat host Docker’ını veya gizli dosyaları yönetemez. GitHub push veya commit gerekiyorsa ayrı bir insan onayı adımı olarak yapılmalıdır; bu kurulum otomatik olarak yerel veya uzak depoya commit/merge/push yapmaz.
 
 ## Bilinçli sınırlar
 
