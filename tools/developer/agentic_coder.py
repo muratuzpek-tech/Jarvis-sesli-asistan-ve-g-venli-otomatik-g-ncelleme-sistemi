@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -192,6 +193,14 @@ class CodingTask:
     status: str = "running"
     accepted: bool = False
     final_response: str = ""
+    # Import denetimi: yerel import'tan plana eklenen dosyalar, son gercek
+    # import denemesinin sorunlari ve ayni ModuleNotFoundError serisi.
+    auto_expected: list[str] = field(default_factory=list)
+    import_problems: list[str] = field(default_factory=list)
+    import_missing: list[str] = field(default_factory=list)
+    import_check_key: tuple = ()
+    mnf_streak: int = 0
+    missing_modules: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -225,6 +234,194 @@ def _fn_role_hints(filename: str, task) -> str:
             return 'Entry point — imports and wires other modules together.'
         return 'Business logic/utility functions as described in the task.'
     return 'As described in the task.'
+
+
+# ── Import denetimi ───────────────────────────────────────────
+# Canli hata: plan [main.py, README.md] iken model main.py'de
+# "from calculator import Calculator" yaziyordu; calculator.py planda
+# olmadigi icin hic yazilmiyor, SMART EXIT yalnizca compile() ile "temiz"
+# diyordu. Yerel import'lar ast ile cikarilip plana eklenir; ayrica her turda
+# gercek import denemesi yapilir (pencere acmadan, zaman asimli).
+
+_GUI_MODULES = frozenset({
+    "tkinter", "customtkinter", "ttkbootstrap", "PyQt5", "PyQt6", "PySide2", "PySide6",
+    "wx", "kivy", "pygame", "pyglet", "arcade", "dearpygui", "flet", "toga",
+})
+_IMPORT_CHECK_TIMEOUT = 15
+_MNF_STREAK_LIMIT = 3
+_IMPORT_MARKER = "@@JARVIS_IMPORT_CHECK@@"
+_IMPORT_SCRIPT = r"""
+import importlib, json, sys
+sys.path.insert(0, sys.argv[1])
+found = []
+for mod in sys.argv[2:]:
+    try:
+        importlib.import_module(mod)
+    except ModuleNotFoundError as e:
+        found.append([mod, "ModuleNotFoundError", e.name or "", str(e)])
+    except ImportError as e:
+        found.append([mod, "ImportError", "", str(e)])
+    except BaseException:
+        # Calisma zamani hatalari (pencere acilamadi, input() EOF...) import
+        # denetiminin konusu degil; onlari run adimi ve testler yakalar.
+        pass
+print("@@JARVIS_IMPORT_CHECK@@" + json.dumps(found))
+"""
+
+
+@functools.lru_cache(maxsize=1)
+def _known_top_level_modules() -> frozenset[str]:
+    names = set(sys.stdlib_module_names) | set(sys.builtin_module_names)
+    try:
+        from importlib.metadata import packages_distributions
+        names |= set(packages_distributions())
+    except Exception:
+        pass
+    return frozenset(names)
+
+
+def _guarded_import_nodes(tree: ast.AST) -> set[int]:
+    """try: import x / except ImportError: ... icindeki import'lar opsiyoneldir."""
+    guarded: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        catches = set()
+        for h in node.handlers:
+            t = h.type
+            elts = t.elts if isinstance(t, ast.Tuple) else [t]
+            catches |= {getattr(e, "id", None) for e in elts}
+            if t is None:
+                catches.add("ImportError")
+        if catches & {"ImportError", "ModuleNotFoundError", "Exception", "BaseException"}:
+            for stmt in node.body:
+                guarded |= {id(n) for n in ast.walk(stmt)}
+    return guarded
+
+
+def _imported_modules(filename: str, source: str) -> list[str]:
+    """Dosyanin import ettigi moduller (mutlak, noktali ad). Goreli import'lar
+    dosyanin paketine gore cozulur."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    guarded = _guarded_import_nodes(tree)
+    package = [p for p in Path(filename).parent.parts if p not in ("", ".")]
+    out: list[str] = []
+    for node in ast.walk(tree):
+        if id(node) in guarded:
+            continue
+        if isinstance(node, ast.Import):
+            out.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = package[: len(package) - (node.level - 1)] if node.level > 1 else package
+                if node.module:
+                    out.append(".".join([*base, node.module]))
+                else:
+                    out.extend(".".join([*base, alias.name]) for alias in node.names)
+            elif node.module:
+                out.append(node.module)
+    return out
+
+
+def _module_exists(root: Path, files: dict, dotted: str) -> bool:
+    rel = dotted.replace(".", "/")
+    for cand in (f"{rel}.py", f"{rel}/__init__.py"):
+        if cand in files or (root / cand).is_file():
+            return True
+    return (root / rel).is_dir()
+
+
+def _missing_local_modules(files: dict, root: Path) -> list[str]:
+    """Yazilan .py dosyalarinin import ettigi; projede, stdlib'de ve kurulu
+    paketlerde olmayan moduller -> yazilmasi gereken dosya adlari."""
+    known = _known_top_level_modules()
+    missing: list[str] = []
+    for fn, src in files.items():
+        if not fn.endswith(".py"):
+            continue
+        for dotted in _imported_modules(fn, src):
+            parts = dotted.split(".")
+            if not all(p.isidentifier() for p in parts):
+                continue
+            if _module_exists(root, files, parts[0]):
+                # Yerel paket var: ilk eksik alt modul yazilmali (pkg/sub.py).
+                sub = next((".".join(parts[:d]) for d in range(2, len(parts) + 1)
+                            if not _module_exists(root, files, ".".join(parts[:d]))), None)
+                if sub is None:
+                    continue
+                name = sub.replace(".", "/") + ".py"
+            elif parts[0] in known:
+                continue
+            else:
+                name = dotted.replace(".", "/") + ".py"
+            if name not in missing:
+                missing.append(name)
+    return missing
+
+
+def _uses_gui(files: dict) -> bool:
+    for fn, src in files.items():
+        if fn.endswith(".py") and any(m.split(".")[0] in _GUI_MODULES for m in _imported_modules(fn, src)):
+            return True
+    return False
+
+
+def _headless_env() -> dict:
+    env = dict(os.environ)
+    for key in ("DISPLAY", "WAYLAND_DISPLAY"):
+        env.pop(key, None)
+    env.update({"QT_QPA_PLATFORM": "offscreen", "MPLBACKEND": "Agg",
+                "SDL_VIDEODRIVER": "dummy", "SDL_AUDIODRIVER": "dummy",
+                "PYTHONDONTWRITEBYTECODE": "1"})
+    return env
+
+
+def _module_name(fn: str) -> str | None:
+    p = Path(fn)
+    if p.suffix != ".py":
+        return None
+    stem = p.stem
+    if stem == "conftest" or stem.startswith("test_") or stem.endswith("_test"):
+        return None
+    parts = list(p.parent.parts) + ([] if stem == "__init__" else [stem])
+    parts = [x for x in parts if x not in ("", ".")]
+    if not parts or not all(x.isidentifier() for x in parts):
+        return None
+    return ".".join(parts)
+
+
+def _import_problems(files: dict, root: Path, timeout: int = _IMPORT_CHECK_TIMEOUT) -> tuple[list[str], list[str]]:
+    """Projedeki modulleri ayri bir surecte GERCEKTEN import eder (ekran yok,
+    stdin yok, zaman asimli). Donus: (sorun metinleri, bulunamayan moduller)."""
+    mods = list(dict.fromkeys(m for m in map(_module_name, files) if m))
+    if not mods:
+        return [], []
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", _IMPORT_SCRIPT, str(root), *mods],
+            cwd=str(root), capture_output=True, text=True, encoding="utf-8",
+            errors="replace", stdin=subprocess.DEVNULL, timeout=timeout,
+            env=_headless_env(),
+        )
+    except subprocess.TimeoutExpired:
+        return [f"import denemesi zaman aşımı ({timeout}s): modül yüklenirken program bekliyor "
+                "(üst düzey kod __main__ korumasına alınmalı)"], []
+    except Exception as e:
+        return [f"import denemesi yapılamadı: {type(e).__name__}"], []
+    line = next((ln for ln in reversed((r.stdout or "").splitlines()) if ln.startswith(_IMPORT_MARKER)), None)
+    if line is None:
+        tail = (r.stderr or r.stdout or "").strip()[-300:]
+        return [f"import denemesi sonuç vermedi (exit {r.returncode}): {tail}"], []
+    problems: list[str] = []
+    missing: list[str] = []
+    for mod, kind, name, msg in json.loads(line[len(_IMPORT_MARKER):]):
+        problems.append(f"{mod.replace('.', '/')}.py import edilemedi: {kind}: {msg}"[:400])
+        if kind == "ModuleNotFoundError" and name and name not in missing:
+            missing.append(name)
+    return problems, missing
 
 
 def _verify_project(task, run_pytest=True):
@@ -278,6 +475,14 @@ def _verify_project(task, run_pytest=True):
                 problems.append(f"pytest FAILED: {(_pt.stdout or '')[-200:]}")
         except Exception as _pe:
             problems.append(f"pytest hatasi: {_pe}")
+    for _mf in _missing_local_modules(task.files_written, task.project_path):
+        problems.append(f"Eksik modül dosyası: {_mf} (import ediliyor ama yazılmadı)")
+    _imp_problems, _ = _import_problems(task.files_written, task.project_path)
+    problems.extend(_imp_problems)
+    # GUI (tkinter/PyQt...) projesinde "main.py --help" argumani tanimaz,
+    # dogrudan pencereyi acar: yalnizca ast + gercek import denetimi yeterli.
+    if _uses_gui(task.files_written):
+        return (len(problems) == 0, problems)
     for _cn in ("cli.py", "main.py"):
         if (task.project_path / _cn).is_file():
             try:
@@ -763,11 +968,32 @@ class AgenticCoder:
         # asyncio.to_thread ile ayri thread'e aliniyor; aksi halde kodlama
         # boyunca mikrofon/hoparlor/websocket tamamen donuyordu.
         for i in range(self._max):
+            # ── Import denetimi (LLM'siz): eksik yerel modul + gercek import ──
+            await asyncio.to_thread(self._sync_imports, task)
+            if task.mnf_streak > _MNF_STREAK_LIMIT:
+                # Ayni ModuleNotFoundError modele 3 tur gosterildi, duzelmedi:
+                # kalan turlar kota yakmasin.
+                task.missing_modules = list(task.import_missing)
+                task.final_response = (
+                    f"EKSIK MODUL: {', '.join(task.missing_modules)} — aynı ModuleNotFoundError "
+                    f"{_MNF_STREAK_LIMIT} tur üst üste düzelmedi, görev durduruldu."
+                )
+                self._ui_progress(f"  ❌ {task.final_response}")
+                break
+
             task.iterations = i + 1
             self._ui_progress(f"  ⚙️ Iterasyon {task.iterations}/{self._max}")
 
             # ── LLM'e sorma ────────────────────────────────────
             prompt = self._build_prompt(task, steps, last_run_output, last_error, target_filename)
+            _auto_missing = [f for f in task.auto_expected if f not in task.files_written]
+            if _auto_missing:
+                prompt += "\n\n═══ EKSİK MODÜL DOSYASI (import ediliyor ama YOK) ═══\n"
+                for _am in _auto_missing:
+                    prompt += f"  → {_am} eksik, yaz! (import eden dosya bu modülü bekliyor)\n"
+            if task.import_problems:
+                prompt += "\n═══ IMPORT DENEMESİ BAŞARISIZ (düzelt) ═══\n"
+                prompt += "\n".join(f"  {p}" for p in task.import_problems[:5]) + "\n"
             _missing = [f for f in task.expected_files if f not in task.files_written]
             if _missing:
                 prompt += "\n\n═══ KALAN DOSYALAR (HENÜZ YAZILMADI — HEMEN ŞİMDİ YAZ) ═══\n"
@@ -823,10 +1049,12 @@ class AgenticCoder:
             _enforce = set()
             _enforce.add('README.md')
             _has_test = any('test' in f.lower() for f in task.files_written)
-            if not _has_test and len(task.expected_files) >= 3:
+            _planned = [f for f in task.expected_files if f not in task.auto_expected]
+            if not _has_test and len(_planned) >= 3:
                 _enforce.add('tests/__init__.py')
             _all_required = set(task.expected_files) | _enforce
-            _all_clean = _all_required.issubset(set(task.files_written.keys()))
+            _all_clean = (_all_required.issubset(set(task.files_written.keys()))
+                          and not task.import_problems)
             if _all_clean:
                 for _fn, _fc in task.files_written.items():
                     # Sadece .py derlenir; README.md'yi derlemek SMART EXIT'i
@@ -1030,16 +1258,23 @@ class AgenticCoder:
                 steps.append(step)
 
         if llm_error and not task.files_written:
-            return f"❌ {llm_error} — {task.iterations}. iterasyonda durduruldu, hiçbir dosya yazılmadı."
+            return (f"❌ {llm_error} — {task.iterations}. iterasyonda durduruldu, hiçbir dosya yazılmadı.\n"
+                    + self._result_block(task))
 
         # FINAL QUALITY GATE — accepted HERE only
         _ok, _vp = await asyncio.to_thread(_verify_project, task, run_pytest=True)
-        task.accepted = _ok
+        task.accepted = _ok and not task.missing_modules
+        if not task.missing_modules:
+            await asyncio.to_thread(self._sync_imports, task)
+            task.missing_modules = list(dict.fromkeys(
+                task.import_missing
+                + [f[:-3].replace("/", ".") for f in task.auto_expected if f not in task.files_written]))
         if not task.accepted:
             task.errors.extend(_vp[:5])
             _cause = f"LLM'e ulaşılamadı ({llm_error}) — " if llm_error else ""
+            _mnf = f"{task.final_response} " if task.final_response.startswith("EKSIK MODUL") else ""
             task.final_response = (
-                f"{_cause}DOGRULAMA BASARISIZ ({len(_vp)} sorun): "
+                f"{_mnf}{_cause}DOGRULAMA BASARISIZ ({len(_vp)} sorun): "
                 + "; ".join(_vp[:5])
             )
         elif not task.final_response:
@@ -1055,6 +1290,34 @@ class AgenticCoder:
         except Exception:
             pass
         return summary
+
+    # ── Import senkronu ────────────────────────────────────────
+
+    @staticmethod
+    def _sync_imports(task: CodingTask) -> None:
+        """Yerel import'lardan eksik dosyalari plana ekler (artik import
+        edilmeyenleri cikarir) ve dosyalar degistiyse gercek import denemesini
+        yeniler. Ayni ModuleNotFoundError seti her turda mnf_streak'i artirir."""
+        needed = _missing_local_modules(task.files_written, task.project_path)
+        for name in [f for f in task.auto_expected if f not in needed and f not in task.files_written]:
+            task.auto_expected.remove(name)
+            if name in task.expected_files:
+                task.expected_files.remove(name)
+        for name in needed:
+            if name not in task.expected_files:
+                task.expected_files.append(name)
+                task.auto_expected.append(name)
+
+        key = tuple(sorted((k, hash(v)) for k, v in task.files_written.items() if k.endswith(".py")))
+        previous = list(task.import_missing)
+        if key != task.import_check_key:
+            task.import_check_key = key
+            task.import_problems, task.import_missing = (
+                _import_problems(task.files_written, task.project_path) if key else ([], []))
+        if task.import_missing and task.import_missing == previous:
+            task.mnf_streak += 1
+        else:
+            task.mnf_streak = 1 if task.import_missing else 0
 
     # ── Prompt Builder ─────────────────────────────────────────
 
@@ -1141,6 +1404,19 @@ class AgenticCoder:
                 return f
         return None
 
+    @staticmethod
+    def _result_block(task: CodingTask) -> str:
+        """Sonucun basindaki sabit blok: durum, proje klasoru, eksik modul.
+        main.py arka plan sonucunu 3000 karakterde kestigi icin en ustte durur."""
+        lines = [
+            "--- SONUÇ ---",
+            f"Durum: {'BAŞARILI' if task.accepted else 'BAŞARISIZ'}",
+            f"Proje klasörü: {task.project_path}",
+        ]
+        if task.missing_modules:
+            lines.append(f"Eksik modül: {', '.join(task.missing_modules)}")
+        return "\n".join(lines)
+
     def _build_summary(self, task: CodingTask, steps: list[CodingStep]) -> str:
         _entry = self._entry_file(task)
         _run_line = (
@@ -1148,6 +1424,8 @@ class AgenticCoder:
             if _entry else "▶️ Çalıştır: (çalıştırılabilir giriş dosyası yok)"
         )
         lines = [
+            self._result_block(task),
+            "",
             f"🔧 AGENTIC CODING — {task.description}",
             f"📂 Konum: {task.project_path}",
             f"📊 Durum: {'tamamlandi' if task.accepted else 'hatali'}",
