@@ -90,6 +90,22 @@ class _Stop(Exception):
     """Bekci: dongu durur, mevcut gorev isaretlenmez."""
 
 
+class _InfraError(_Stop):
+    """Coder degisiklik yapmadan coktu: gorevin hakki yanmaz, state'e yazilmaz."""
+
+    def __init__(self, detail: str):
+        super().__init__("altyapı hatası: coder çöktü")
+        self.detail = detail
+
+
+class CoderCrash(Exception):
+    """Coder alt sureci != 0 cikis + traceback ile bitti. Argumani coder logu."""
+
+    @property
+    def log(self) -> str:
+        return str(self.args[0]) if self.args else ""
+
+
 # ── Yardimcilar ───────────────────────────────────────────────
 
 def _git(cwd: Path, *args: str, check: bool = True, text: bool = True) -> str:
@@ -109,6 +125,10 @@ def _safe_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 def _tail(text: str, limit: int) -> str:
     return text if len(text) <= limit else "…" + text[-limit:]
+
+
+def _tail_lines(text: str, n: int) -> str:
+    return "\n".join(text.rstrip().splitlines()[-n:])
 
 
 def _task_id(text: str) -> str:
@@ -217,6 +237,13 @@ def init_sandbox(repo: Path, sandbox: Path, *, make_venv: bool = True,
                                   cwd=sandbox, env=_safe_env(), stdin=subprocess.DEVNULL)
             if proc.returncode != 0:
                 log("⚠️ bağımlılık kurulumu başarısız; .venv eksik olabilir")
+    if (sandbox / "pyproject.toml").exists():
+        # src/ duzeni icin; basarisizsa dogrulama yine PYTHONPATH=<sandbox>/src ile calisir
+        proc = subprocess.run([str(sandbox / ".venv" / "bin" / "pip"), "install", "-q",
+                               "-e", ".", "--no-deps"],
+                              cwd=sandbox, env=_safe_env(), stdin=subprocess.DEVNULL)
+        if proc.returncode != 0:
+            log("⚠️ pip install -e . --no-deps başarısız; PYTHONPATH=src ile devam edilecek")
 
 
 # ── Yapilandirma ──────────────────────────────────────────────
@@ -427,7 +454,19 @@ def restore(sb: Path, snap: Snapshot, ch: Changes | None = None) -> None:
 
 # ── Dogrulama + coder ─────────────────────────────────────────
 
-def _run_env(cfg: Config) -> dict[str, str]:
+def _coder_home(cfg: Config) -> Path:
+    """AgenticCoder proje yolunun $HOME altinda olmasini sart kosar (denetim
+    degistirilmez). HOME = sandbox'in ust dizini; o gercek HOME ya da atasiysa
+    (~/jarvis-sandbox) HOME = sandbox'in kendisi: gercek HOME'a yazilmaz."""
+    sb = cfg.sandbox.expanduser().resolve()
+    real = Path(os.environ.get("HOME") or "/").expanduser().resolve()
+    parent = sb.parent
+    if parent == real or parent in real.parents:
+        return sb
+    return parent
+
+
+def _run_env(cfg: Config, *, coder: bool = False) -> dict[str, str]:
     venv_bin = cfg.sandbox / ".venv" / "bin"
     path = os.environ.get("PATH", "")
     if venv_bin.is_dir():
@@ -436,7 +475,13 @@ def _run_env(cfg: Config) -> dict[str, str]:
     home = cfg.self_dir / "home"          # gercek HOME'a (~/.config, ~/MuratJARVIS) yazilmasin
     for d in (jh, home):
         d.mkdir(parents=True, exist_ok=True)
-    return _safe_env({"PATH": path, "JARVIS_HOME": str(jh), "HOME": str(home),
+    return _safe_env({"PATH": path, "JARVIS_HOME": str(jh),
+                      "HOME": str(_coder_home(cfg) if coder else home),
+                      # src/ duzeni; miras PYTHONPATH (ana depo) sizmasin
+                      "PYTHONPATH": str(cfg.sandbox / "src"),
+                      # on kontrolun pyc'si, ayni saniyede ayni boyutta yeniden yazilan
+                      # dosyayi gizlemesin (pyc gecerliligi mtime saniyesi + boyut)
+                      "PYTHONDONTWRITEBYTECODE": "1",
                       "XDG_CONFIG_HOME": str(home / ".config"),
                       "XDG_CACHE_HOME": str(home / ".cache"),
                       "XDG_DATA_HOME": str(home / ".local" / "share"),
@@ -485,8 +530,11 @@ def make_subprocess_coder(cfg: Config) -> Coder:
     def coder(description: str, workdir: Path, timeout: float) -> str:
         code, out = _run_group([sys.executable, str(Path(__file__).resolve()), "_code",
                                 "--workdir", str(workdir)],
-                               workdir, _run_env(cfg), timeout, stdin=description)
-        return f"[coder çıkış {code}]\n{out}"
+                               workdir, _run_env(cfg, coder=True), timeout, stdin=description)
+        log = f"[coder çıkış {code}]\n{out}"
+        if code not in (0, None) and "Traceback (most recent call last)" in out:
+            raise CoderCrash(log)
+        return log
     return coder
 
 
@@ -579,6 +627,15 @@ class _Runner:
                 self.hooks.sleep(OLLAMA_WAIT)
         return f"Ollama erişilemedi ({OLLAMA_TRIES} deneme)"
 
+    def preflight(self) -> tuple[bool, str]:
+        """Gorev almadan once dogrulamayi bir kez calistir (sandbox temiz birakilir)."""
+        snap = snapshot(self.sb)
+        try:
+            ok, out = verify(self.cfg, self.cfg.task_minutes * 60)
+        finally:
+            restore(self.sb, snap)
+        return ok, _tail_lines(out, 40)
+
     def process(self, task: Task, history: list[str] | None = None, round_no: int = 1) -> dict:
         """Gorevi bir tur isler. `history` (son hata ciktilari) yerinde guncellenir."""
         history = [] if history is None else history
@@ -602,8 +659,15 @@ class _Runner:
                 if attempt > 1 and self.total_left() <= 0:
                     raise _Stop(f"süre sınırı doldu ({self.cfg.max_hours:g} saat)")
                 res["attempts"] = attempt
-                log = self.hooks.coder(_description(task, history), self.sb,
-                                       min(task_left, self.total_left()))
+                try:
+                    log = self.hooks.coder(_description(task, history), self.sb,
+                                           min(task_left, self.total_left()))
+                except CoderCrash as crash:
+                    (job / f"deneme{attempt}_coder.log").write_text(crash.log, encoding="utf-8")
+                    ch = collect_changes(self.sb, snap)
+                    if ch.empty:
+                        raise _InfraError(_tail_lines(crash.log, 20)) from crash
+                    raise
                 (job / f"deneme{attempt}_coder.log").write_text(str(log), encoding="utf-8")
                 ch = collect_changes(self.sb, snap)
                 self._save_diff(job, attempt, snap, ch)
@@ -671,7 +735,7 @@ def _mark(res: dict) -> str:
 
 
 def _write_report(cfg: Config, runner: _Runner, results: list[dict], stop: str,
-                  warnings: list[str]) -> Path:
+                  warnings: list[str], detail: str = "") -> Path:
     reports = cfg.self_dir / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     path = reports / f"{runner.stamp}.md"
@@ -680,6 +744,8 @@ def _write_report(cfg: Config, runner: _Runner, results: list[dict], stop: str,
              f"- Sandbox: `{cfg.sandbox}` (dal `{BRANCH}`)",
              f"- Doğrulama: `{cfg.verify}`",
              f"- Durma nedeni: {stop or 'backlog bitti (tüm görevler [x] ya da tur sınırında)'}", ""]
+    if detail:
+        lines += ["## Altyapı hatası ayrıntısı", "", "```", detail.rstrip(), "```", ""]
     if warnings:
         lines += ["## Uyarılar", "", *[f"- ⚠️ {w}" for w in warnings], ""]
     lines += ["## Görevler", ""]
@@ -732,7 +798,7 @@ def run_loop(cfg: Config, backlog: Path, hooks: Hooks, *, forever: bool = False)
     olan gorevler tekrar denenmez. forever=True: basarisizlar sonraki turlarda
     yeniden denenir (gorev basi MAX_ROUNDS); backlog her tur basinda yeniden
     okunur. Donus: exit_code, stop_reason, report (Path | None), results."""
-    out = {"exit_code": 0, "stop_reason": "", "report": None, "results": []}
+    out = {"exit_code": 0, "stop_reason": "", "detail": "", "report": None, "results": []}
     try:
         lock = acquire_lock(cfg.self_dir / "lock")
         lock.__enter__()
@@ -756,6 +822,8 @@ def run_loop(cfg: Config, backlog: Path, hooks: Hooks, *, forever: bool = False)
         state_path = cfg.sandbox / "state.json"
         state = _load_state(state_path)
         stop = ""
+        preflight_done = False
+        infra = 0                                    # ardisik altyapi hatasi
         while not stop:
             tasks = parse_backlog(backlog.read_text(encoding="utf-8"))
             pending = [t for t in tasks if _eligible(t, state, limit)]
@@ -767,23 +835,42 @@ def run_loop(cfg: Config, backlog: Path, hooks: Hooks, *, forever: bool = False)
                 if stop:
                     out["exit_code"] = code
                     break
-                before = state["tasks"].get(task.id)
-                entry = {**(before or {"text": task.text}), "rounds": _rounds(before) + 1,
-                         "mark": "[~] (sürüyor)"}
-                entry["history"] = list(entry.get("history", []))
-                state["tasks"][task.id] = entry
-                _save_state(state_path, state)       # surec olurse bu tur sayilir
-                try:
-                    res = runner.process(task, entry["history"], entry["rounds"])
-                except _Stop as s:
-                    # gorevin kusuru degil: turu iade et
-                    if before is None:
-                        del state["tasks"][task.id]
-                    else:
-                        state["tasks"][task.id] = before
-                    _save_state(state_path, state)
-                    stop = str(s)
+                if not preflight_done:
+                    preflight_done = True
+                    ok, detail = runner.preflight()
+                    if not ok:
+                        stop, out["exit_code"], out["detail"] = "altyapı hatası: sandbox baştan kırmızı", 4, detail
+                        break
+                res = None
+                while res is None:
+                    before = state["tasks"].get(task.id)
+                    entry = {**(before or {"text": task.text}), "rounds": _rounds(before) + 1,
+                             "mark": "[~] (sürüyor)"}
+                    entry["history"] = list(entry.get("history", []))
+                    state["tasks"][task.id] = entry
+                    _save_state(state_path, state)       # surec olurse bu tur sayilir
+                    try:
+                        res = runner.process(task, entry["history"], entry["rounds"])
+                    except _Stop as s:
+                        # gorevin kusuru degil: turu iade et, state'e yazma
+                        if before is None:
+                            del state["tasks"][task.id]
+                        else:
+                            state["tasks"][task.id] = before
+                        _save_state(state_path, state)
+                        if not isinstance(s, _InfraError):
+                            stop = str(s)
+                            break
+                        infra += 1
+                        out["detail"] = s.detail
+                        warnings.append(f"altyapı hatası (coder çöktü, değişiklik yok; görev sayılmadı): "
+                                        f"{task.text[:60]}")
+                        if infra >= 2:
+                            stop, out["exit_code"] = f"altyapı hatası: coder art arda {infra} kez çöktü", 5
+                            break
+                if stop:
                     break
+                infra = 0
                 results.append(res)
                 entry.update({k: res[k] for k in ("text", "status", "reason", "attempts",
                                                   "files", "commit", "seconds")})
@@ -800,7 +887,8 @@ def run_loop(cfg: Config, backlog: Path, hooks: Hooks, *, forever: bool = False)
         out.update(exit_code=1, stop_reason=f"beklenmeyen hata: {type(e).__name__}: {e}")
     finally:
         with contextlib.suppress(Exception):
-            out["report"] = _write_report(cfg, runner, results, out["stop_reason"], warnings)
+            out["report"] = _write_report(cfg, runner, results, out["stop_reason"], warnings,
+                                          out["detail"])
         lock.__exit__(None, None, None)
     return out
 
@@ -901,6 +989,7 @@ def main(argv: list[str] | None = None) -> int:
     ps = sub.add_parser("install-service", help=f"~/.config/systemd/user/{SERVICE_NAME} yaz")
     ps.add_argument("--backlog", type=Path, required=True)
     sub.add_parser("uninstall-service", help="servis dosyasını sil")
+    sub.add_parser("reset-state", help="sandbox state.json'ı sil (git'e dokunmaz)")
     pc = sub.add_parser("_code", help=argparse.SUPPRESS)
     pc.add_argument("--workdir", required=True)
     args = p.parse_args(argv)
@@ -928,6 +1017,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Durdurmak: touch {self_dir / 'STOP'}  (görev bitince çıkar)")
         print(f"Günlük: journalctl --user -u {SERVICE_NAME} -f")
         return 0
+    if args.cmd == "reset-state":
+        state = sandbox / "state.json"
+        if state.exists():
+            state.unlink()
+            print(f"Silindi: {state}")
+        else:
+            print(f"State yoktu: {state}")
+        return 0
     if args.cmd == "uninstall-service":
         removed = uninstall_service()
         for path in removed:
@@ -947,6 +1044,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{_mark(r):40.40}  tur {r['round']}  {r['text'][:70]}")
     if res["stop_reason"]:
         print(f"Durdu: {res['stop_reason']}", file=sys.stderr if res["exit_code"] else sys.stdout)
+    if res["detail"]:
+        print(res["detail"], file=sys.stderr)
     if res["report"]:
         print(f"Rapor: {res['report']}")
     return res["exit_code"]

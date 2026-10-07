@@ -526,7 +526,8 @@ def test_verify_and_coder_env_redirect_home(sd, env, sandbox, monkeypatch):
     monkeypatch.setattr(sd, "_run_group",
                         lambda argv, cwd, env, timeout, stdin=None: (seen.update(env), (0, ""))[1])
     sd.make_subprocess_coder(cfg)("görev", sandbox, 10)
-    assert seen["HOME"] == str(fake_home)
+    # coder: HOME sandbox'i kapsar (AgenticCoder $HOME denetimi), gercek HOME degil
+    assert seen["HOME"] == str(sandbox.resolve())
     assert all(seen[k].startswith(str(fake_home))
                for k in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"))
 
@@ -585,7 +586,8 @@ def test_forever_retries_failed_task_with_last_two_failures(sd, env, sandbox):
 
 
 def test_forever_stops_after_three_rounds_with_truncated_history(sd, env, sandbox):
-    noisy = f"{sys.executable} -c \"print('Z' * 20000); raise SystemExit(1)\""
+    # yalnizca coder'in degisikliginden sonra kirmizi (onkontrol yesil gecsin)
+    noisy = (f"{sys.executable} -c \"exit(print('Z' * 20000) or 'mul' in open('calc.py').read())\"")
     calls: list[str] = []
 
     def coder(description, workdir, timeout):
@@ -772,3 +774,186 @@ def test_run_forever_with_stdin_closed(sd, env, sandbox):
     (task,) = json.loads((sandbox / "state.json").read_text())["tasks"].values()
     assert task["mark"] == "[x]"
     assert (sandbox / "calc.py").read_text() == MUL and is_clean(sandbox)
+
+
+# ── 13) altyapi: PYTHONPATH, coder HOME, init -e ──
+
+def _capture_coder_env(sd, cfg, monkeypatch) -> dict:
+    seen: dict = {}
+    monkeypatch.setattr(sd, "_run_group",
+                        lambda argv, cwd, env, timeout, stdin=None: (seen.update(env), (0, ""))[1])
+    sd.make_subprocess_coder(cfg)("görev", cfg.sandbox, 10)
+    return seen
+
+
+def test_run_env_pythonpath_points_to_sandbox_src(sd, env, sandbox, monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/ana/depo/src")          # ana depo kodu sizmasin
+    cfg = make_cfg(sd, env)
+    assert sd._run_env(cfg)["PYTHONPATH"] == str(sandbox / "src")
+    # sandbox'a .pyc yazilmaz: ayni saniyede ayni boyutta yeniden yazilan dosya bayat pyc'den okunmasin
+    assert sd._run_env(cfg)["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert _capture_coder_env(sd, cfg, monkeypatch)["PYTHONPATH"] == str(sandbox / "src")
+
+    # src/ duzeni: paket kurulmadan dogrulamada import edilebilir (mevcut sandbox, yeniden init yok)
+    (sandbox / "src" / "paket").mkdir(parents=True)
+    (sandbox / "src" / "paket" / "__init__.py").write_text("X = 1\n")
+    git(sandbox, "add", "-A")
+    git(sandbox, "commit", "-q", "-m", "src")
+    ok, out = sd.verify(make_cfg(sd, env, verify=f"{sys.executable} -c \"import paket\""), 60)
+    assert ok, out
+
+
+def test_coder_home_contains_sandbox_outside_real_home(sd, env, monkeypatch):
+    data = env["tmp"] / "data" / "jarvis-self"
+    sb = data / "sandbox"
+    sd.init_sandbox(env["repo"], sb, make_venv=False)
+    cfg = sd.Config(repo=env["repo"], sandbox=sb, self_dir=env["self"], verify=VERIFY)
+    seen = _capture_coder_env(sd, cfg, monkeypatch)
+    home = Path(seen["HOME"])
+    assert home == data.resolve()
+    assert home != env["home"].resolve() and home not in env["home"].resolve().parents
+    assert all(seen[k].startswith(str(env["self"] / "home"))
+               for k in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"))
+    # AgenticCoder'in denetimi (degistirilmeden) bu ortamda gecer; HOME'a yazma gercek HOME'a gitmez
+    before = sorted(p.name for p in env["home"].iterdir())
+    probe = ("from pathlib import Path\n"
+             f"p = Path({str(sb)!r}).resolve()\n"
+             "h = Path.home().resolve()\n"
+             "assert h in p.parents or p == h, (p, h)\n"
+             "(Path.home() / 'yazildi.txt').write_text('x')\n")
+    out = subprocess.run([sys.executable, "-c", probe], env=seen, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert (data / "yazildi.txt").exists()
+    assert sorted(p.name for p in env["home"].iterdir()) == before
+
+
+def test_init_tries_editable_install_and_only_warns(sd, env, monkeypatch):
+    real_run = subprocess.run
+    calls: list[list[str]] = []
+
+    def fake_run(argv, *a, **kw):
+        if argv[0] == "git":
+            return real_run(argv, *a, **kw)
+        calls.append([str(x) for x in argv])
+        return subprocess.CompletedProcess(argv, 1 if "-e" in argv else 0, "", "")
+
+    (env["repo"] / "pyproject.toml").write_text("[project]\nname = 'mini'\nversion = '0'\n")
+    git(env["repo"], "add", "pyproject.toml")
+    git(env["repo"], "commit", "-q", "-m", "pyproject")
+    monkeypatch.setattr(sd, "_venv_python", lambda: sys.executable)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    logs: list[str] = []
+    sd.init_sandbox(env["repo"], env["sandbox"], make_venv=True, log=logs.append)
+    editable = [c for c in calls if "-e" in c]
+    assert len(editable) == 1 and "install" in editable[0] and editable[0][-3:] == ["-e", ".", "--no-deps"]
+    assert any("⚠️" in m and "-e" in m for m in logs), logs
+    assert (env["sandbox"] / ".git").is_dir()                     # hata degil, sandbox duruyor
+
+
+# ── 14) on kontrol + coder cokmesi ──
+
+def test_red_baseline_processes_no_tasks(sd, env, sandbox):
+    red = (f"{sys.executable} -c \"exit(print(chr(10).join('satir%d' % i for i in range(100))) or 1)\"")
+    calls: list = []
+    res = sd.run_loop(make_cfg(sd, env, verify=red), write_backlog(env, "- [ ] a", "- [ ] b"),
+                      make_hooks(sd, lambda d, w, t: calls.append(d) or "x"), forever=True)
+    assert calls == [] and res["results"] == []
+    assert res["exit_code"] == 4
+    assert res["stop_reason"] == "altyapı hatası: sandbox baştan kırmızı"
+    detail = res["detail"].splitlines()
+    assert len(detail) <= 40 and "satir99" in detail[-1] and "satir0" not in res["detail"]
+    text = res["report"].read_text()
+    assert "sandbox baştan kırmızı" in text and "satir99" in text
+    assert not (sandbox / "state.json").exists() or json.loads(
+        (sandbox / "state.json").read_text())["tasks"] == {}
+    assert is_clean(sandbox)
+
+
+def test_preflight_leaves_sandbox_clean(sd, env, sandbox):
+    cfg = make_cfg(sd, env, verify=f"{sys.executable} -c \"open('iz','w')\"")
+    seen: list[bool] = []
+    res = sd.run_loop(cfg, write_backlog(env, "- [ ] a"),
+                      make_hooks(sd, lambda d, w, t: seen.append((w / "iz").exists()) or "x"))
+    assert res["exit_code"] == 0 and seen == [False]   # on kontrolun izi coder'a kalmadi
+
+
+CRASH_LOG = ("[coder çıkış 1]\nTraceback (most recent call last):\n  File \"x\", line 1\n"
+             "ValueError: GÜVENLİK: proje yolu $HOME dışında: /data/jarvis-self/sandbox\n")
+
+
+def test_coder_crash_twice_stops_loop_without_state(sd, env, sandbox):
+    calls: list = []
+
+    def coder(description, workdir, timeout):
+        calls.append(description)
+        raise sd.CoderCrash(CRASH_LOG)
+
+    res = sd.run_loop(make_cfg(sd, env), write_backlog(env, "- [ ] a", "- [ ] b"),
+                      make_hooks(sd, coder), forever=True)
+    assert len(calls) == 2
+    assert res["exit_code"] == 5 and "altyapı" in res["stop_reason"]
+    assert "GÜVENLİK" in res["detail"] and "GÜVENLİK" in res["report"].read_text()
+    assert res["results"] == []
+    state = json.loads((sandbox / "state.json").read_text())
+    assert state["tasks"] == {}
+    assert is_clean(sandbox)
+
+
+def test_single_coder_crash_does_not_burn_attempt(sd, env, sandbox):
+    calls: list = []
+
+    def coder(description, workdir, timeout):
+        calls.append(description)
+        if len(calls) == 1:
+            raise sd.CoderCrash(CRASH_LOG)
+        (workdir / "calc.py").write_text(MUL)
+        return "ok"
+
+    res = sd.run_loop(make_cfg(sd, env, max_attempts=1), write_backlog(env, "- [ ] a"),
+                      make_hooks(sd, coder))
+    assert res["exit_code"] == 0
+    (r,) = res["results"]
+    assert r["status"] == "ok" and r["attempts"] == 1 and r["round"] == 1
+    assert "altyapı" in res["report"].read_text()                   # uyari olarak raporda
+
+
+def test_coder_crash_with_changes_is_normal_failure(sd, env, sandbox):
+    def coder(description, workdir, timeout):
+        (workdir / "calc.py").write_text(BROKEN)
+        raise sd.CoderCrash(CRASH_LOG)
+
+    res = sd.run_loop(make_cfg(sd, env, max_attempts=1), write_backlog(env, "- [ ] a"),
+                      make_hooks(sd, coder))
+    assert res["exit_code"] == 0
+    assert res["results"][0]["status"] == "başarısız"
+    assert is_clean(sandbox)
+
+
+def test_subprocess_coder_raises_crash_only_on_traceback(sd, env, sandbox, monkeypatch):
+    cfg = make_cfg(sd, env)
+    outputs = iter([(1, "Traceback (most recent call last):\nValueError: x\n"),
+                    (1, "model vazgeçti\n"), (0, "Traceback (most recent call last): log\n"),
+                    (None, "[ZAMAN AŞIMI]")])
+    monkeypatch.setattr(sd, "_run_group", lambda *a, **kw: next(outputs))
+    coder = sd.make_subprocess_coder(cfg)
+    with pytest.raises(sd.CoderCrash, match="ValueError"):
+        coder("g", sandbox, 10)
+    assert "vazgeçti" in coder("g", sandbox, 10)
+    assert "log" in coder("g", sandbox, 10)
+    assert "ZAMAN" in coder("g", sandbox, 10)
+
+
+# ── 15) reset-state ──
+
+def test_reset_state_removes_only_state_json(sd, env, sandbox, monkeypatch):
+    sd.run_loop(make_cfg(sd, env), write_backlog(env, "- [ ] a"), make_hooks(sd, lambda d, w, t: "x"))
+    assert (sandbox / "state.json").exists()
+    head = git(sandbox, "rev-parse", "HEAD")
+    reports = sorted((env["self"] / "reports").iterdir())
+    monkeypatch.setenv("JARVIS_SANDBOX", str(sandbox))
+    monkeypatch.setenv("JARVIS_SELF_DIR", str(env["self"]))
+    assert sd.main(["reset-state"]) == 0
+    assert not (sandbox / "state.json").exists()
+    assert git(sandbox, "rev-parse", "HEAD") == head and is_clean(sandbox)
+    assert sorted((env["self"] / "reports").iterdir()) == reports
+    assert sd.main(["reset-state"]) == 0                           # yoksa da hata degil

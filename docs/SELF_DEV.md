@@ -31,7 +31,15 @@ python scripts/self_dev.py run --forever --backlog prompts.md  # turlar
   alınır. Varsayılan süre sınırı yoktur (`--max-hours` ile verilebilir).
 - Durum `~/jarvis-sandbox/state.json`'dadır; süreç ölürse kaldığı yerden devam
   eder (yarıda kalan görevin turu sayılmış olur).
-- Doğrulama ve coder `HOME`'u `~/.jarvis-self/home`'dur; gerçek HOME'a yazmaz.
+- Ön kontrol: ilk görevden önce doğrulama sandbox'ta bir kez çalışır; kırmızıysa
+  hiç görev işlenmez ("sandbox baştan kırmızı", çıkış 4, raporda son 40 satır).
+- Coder değişiklik yapmadan traceback ile çökerse bu altyapı hatasıdır: görevin
+  hakkı yanmaz, state'e yazılmaz; art arda 2 kez olursa döngü durur (çıkış 5).
+- Ortam: `PYTHONPATH=<sandbox>/src` (src/ düzeni; `init` ayrıca
+  `pip install -e . --no-deps` dener), `PYTHONDONTWRITEBYTECODE=1`. Doğrulamanın
+  `HOME`'u `~/.jarvis-self/home`; coder'ın `HOME`'u sandbox'ın üst dizini (o
+  gerçek HOME ise sandbox'ın kendisi), çünkü AgenticCoder proje yolunun $HOME
+  altında olmasını şart koşar. `XDG_*` her zaman `~/.jarvis-self/home` altında.
 - `JARVIS_SELF_DEV_YIELD=1`: Jarvis çalışırken yeni görev başlatmaz, bekler.
 
 ### Arka plan servisi (systemd kullanıcı birimi, root gerekmez)
@@ -56,6 +64,12 @@ rm ~/.jarvis-self/STOP        # yeniden çalıştırmadan önce
 ```
 
 Aynı anda tek örnek çalışır (`~/.jarvis-self/lock`).
+
+Eski başarısız kayıtları sıfırlamak (yalnızca sandbox `state.json`'ı siler,
+git'e dokunmaz): `python scripts/self_dev.py reset-state`
+
+Çıkış kodları: 0 normal/STOP, 1 hata, 2 Ollama yok, 3 kilit dolu,
+4 sandbox baştan kırmızı, 5 coder art arda çöktü.
 
 ## Rapor
 
