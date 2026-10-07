@@ -30,7 +30,7 @@ _PYTHON_SAFE = {("--version",), ("-V",)}
 # bayraklari. Bunlardan biri varsa komut onay koduna duser.
 _FIND_WRITE_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir",
                        "-fprint", "-fprint0", "-fprintf", "-fls"}
-_RG_EXEC_FLAGS = {"--pre"}
+_RG_EXEC_FLAGS = {"--pre", "--hostname-bin"}
 _GIT_WRITE_FLAGS = {"--output"}
 # `git branch` sadece listeleme bayraklariyla salt-okunur; konumsal arguman
 # dal olusturur, -d/-D/-m/-c siler/tasir/kopyalar.
@@ -83,7 +83,11 @@ def _is_readonly(argv: list[str]) -> bool:
     # Yol denetimleri GENISLETILMIS yol uzerinden yapilir; terminal_tool ve
     # security_gate (terminal etkisi) ayni sonucu alsin diye burada da.
     argv = _expand_home_tokens(argv)
-    program = Path(argv[0]).name.lower()
+    # "./ls" ya da "/tmp/x/git" calisma klasorundeki/keyfi bir ikiliyi
+    # calistirir; salt-okunur liste yalnizca PATH'teki ciplak adlar icindir.
+    if "/" in argv[0] or "\\" in argv[0] or Path(argv[0]).name != argv[0]:
+        return False
+    program = argv[0].lower()
     args = argv[1:]
     home = Path.home().resolve()
     _ro_prog = program in _READONLY_PROGRAMS
@@ -270,6 +274,10 @@ def terminal_tool(
         # Python scriptleri muhtemelen input() ile menu sunuyor
         stdin_data = "0\n0\n0\n0\n0\n"
 
+    if Path(argv[0]).name.lower() in ("git", "git.exe"):
+        # Depo yapilandirmasindaki core.fsmonitor keyfi program calistirabilir;
+        # salt-okunur "git status" bile bunu tetiklerdi.
+        argv = [argv[0], "-c", "core.fsmonitor=false", *argv[1:]]
     try:
         proc = subprocess.run(
             argv,

@@ -43,7 +43,7 @@ def stub_build(monkeypatch, tmp_path):
 
 def _confirmed_run(params: dict) -> str:
     code = da.dev_agent(dict(params)).split("confirm_code='")[1].split("'")[0]
-    da.note_user_turn(time.monotonic() + 5)
+    da.note_user_turn("evet", now=time.monotonic() + 5)
     return da.dev_agent({**params, "confirm_code": code})
 
 
@@ -94,7 +94,7 @@ def _wait_for_board(job_id: str, statuses: tuple[str, ...]) -> str:
 
 def _start(params: dict) -> str:
     code = board.start_parallel_task(dict(params)).split("confirm_code='")[1].split("'")[0]
-    da.note_user_turn(time.monotonic() + 5)
+    da.note_user_turn("evet", now=time.monotonic() + 5)
     started = board.start_parallel_task({**params, "confirm_code": code})
     return started.split("kimlik: ")[1].split(")")[0]
 

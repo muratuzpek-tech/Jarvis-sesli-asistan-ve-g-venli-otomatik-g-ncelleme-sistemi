@@ -734,7 +734,17 @@ def _process_archive(path: Path, action: str, params: dict, speak=None) -> str:
         dest = Path(params.get("destination", str(path.parent / path.stem)))
         dest.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.unpack_archive(path, dest)
+            import tarfile
+            if tarfile.is_tarfile(path):
+                # filter="data": hedef disina yazan ("../x", mutlak yol, link)
+                # tar uyeleri reddedilir. Filtreyi desteklemeyen Python'da acma.
+                if not hasattr(tarfile, "data_filter"):
+                    return "Extract refused: this Python cannot safely filter tar members."
+                shutil.unpack_archive(path, dest, filter="data")
+            else:
+                # filter yalnizca tar icindir; zip acicisi onu kabul etmez.
+                # zipfile "../" ve mutlak yollu uyeleri hedef icine indirger.
+                shutil.unpack_archive(path, dest)
             return f"Extracted to: {dest}"
         except Exception as e:
             return f"Extract failed: {e}"

@@ -13,6 +13,7 @@ import time
 import typing
 from pathlib import Path
 
+from jarvis.core.user_confirmation import is_confirmation, is_rejection
 
 
 def _find_existing_project(project_name: str) -> Path | None:
@@ -52,37 +53,60 @@ _task_to_code: dict[str, str] = {}  # desc[:80]|lang|project → code
 # ONAY KAPISI, MODELE GUVENMEZ (2026-09-28, Windows canli testi): Gemini
 # "Onaylıyor musunuz?" dedikten sonra kullanicinin cevabini beklemeden ayni
 # turda confirm_code ile ikinci cagriyi yapti ve proje basladi. Artik main.py
-# her kullanici mesajinda/konusmasinda note_user_turn() cagirir; confirm_code
-# ancak kod VERILDIKTEN SONRA gercek bir kullanici turu geldiyse kabul edilir.
-# None = izleme yok (testler/CLI gibi arayuzsuz kullanim) → eski davranis.
+# her kullanici mesajinda/konusmasinda note_user_turn(text) cagirir;
+# confirm_code ancak kod VERILDIKTEN SONRA gelen SON kullanici turu acik bir
+# onaysa ("evet", "evet devam et"; jarvis.core.user_confirmation) kabul
+# edilir. Alakasiz bir cumle ("ok simdi hava durumuna bak") onay degildir.
+# None = hic kullanici turu izlenmedi → RED (fail-closed).
 _last_user_turn_at: float | None = None
+_last_user_turn_text: str | None = None
 # Kullanicinin ISTEK cumlesinin gec gelen ses-yazi parcalari "onay" sayilmasin.
 USER_TURN_GRACE_S = 1.5
+# Onaylanmayan kod bu sureden sonra duser; yeniden onizleme gerekir.
+PENDING_TTL_S = 300.0
 
 
-def note_user_turn(now: float | None = None) -> None:
-    """Kullanicidan gercek bir girdi (ses veya yazi) geldigini kaydeder."""
-    global _last_user_turn_at
+def note_user_turn(text: str | None = None, now: float | None = None) -> None:
+    """Kullanicidan gercek bir girdi (ses veya yazi) geldigini ve METNINI
+    kaydeder. Ret iceren tur ("hayır", "iptal") bekleyen tum kodlari iptal
+    eder."""
+    global _last_user_turn_at, _last_user_turn_text
     _last_user_turn_at = time.monotonic() if now is None else now
+    _last_user_turn_text = text
+    if text and is_rejection(text):
+        if _pending_dev_agent:
+            print("[DevAgent] ⛔ kullanıcı reddetti — bekleyen onay kodları iptal edildi.")
+        _pending_dev_agent.clear()
+        _task_to_code.clear()
+
+
+def _drop_expired_codes(now: float | None = None) -> None:
+    now = time.monotonic() if now is None else now
+    for code, pending in list(_pending_dev_agent.items()):
+        if now - pending.get("issued_at", 0.0) > PENDING_TTL_S:
+            _pending_dev_agent.pop(code, None)
 
 
 def _user_confirmed_after(issued_at: float) -> bool:
-    if _last_user_turn_at is None:
-        return True
+    if _last_user_turn_at is None or not _last_user_turn_text:
+        return False
+    if not is_confirmation(_last_user_turn_text):
+        return False
     return _last_user_turn_at >= issued_at + USER_TURN_GRACE_S
 
 
 def confirmation_problem(confirm_code: str) -> str | None:
     """confirm_code kullanilabilir mi? Sorun varsa kullaniciya/modele donecek
     mesaj, yoksa None. (agent_board da is baslatmadan once bunu kullanir.)"""
+    _drop_expired_codes()
     pending = _pending_dev_agent.get((confirm_code or "").strip())
     if pending is None:
         return "Onay kodu geçersiz veya süresi dolmuş. Aynı description ile yeniden çağır — sistem aynı görev için aynı kodu döndürecek."
     if not _user_confirmed_after(pending.get("issued_at", 0.0)):
-        print("[DevAgent] ⛔ confirm_code kullanıcı cevap vermeden kullanıldı — reddedildi.")
+        print("[DevAgent] ⛔ confirm_code için kullanıcının son turu açık bir onay değil — reddedildi.")
         return (
-            "ONAY HENÜZ ALINMADI — proje BAŞLATILMADI. Onay kodu verildikten sonra kullanıcıdan "
-            "hiç cevap gelmedi. Kullanıcıya ne yapılacağını anlat ve SUS; kullanıcı açıkça "
+            "ONAY HENÜZ ALINMADI — proje BAŞLATILMADI. Onay kodu verildikten sonra kullanıcının "
+            "son cevabı açık bir onay değildi. Kullanıcıya ne yapılacağını anlat ve SUS; kullanıcı açıkça "
             "'evet/onaylıyorum' dedikten SONRA aynı confirm_code ile tekrar çağır."
         )
     return None
@@ -3923,6 +3947,7 @@ def dev_agent(
     if not confirm_code:
         _task_key = f"{(p.get('description',''))[:80]}|{p.get('language','')}|{p.get('project_name','')}"
 
+        _drop_expired_codes()
         _existing_code = _task_to_code.get(_task_key)
 
         if _existing_code and _existing_code in _pending_dev_agent:

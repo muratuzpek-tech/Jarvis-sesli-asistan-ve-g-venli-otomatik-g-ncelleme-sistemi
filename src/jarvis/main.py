@@ -85,6 +85,7 @@ from jarvis.actions.browser_control import browser_control
 from jarvis.actions.file_controller import file_controller
 from jarvis.actions.code_helper import code_helper
 from jarvis.actions.dev_agent import dev_agent, note_user_turn
+from jarvis.core import user_confirmation as _user_confirmation
 from jarvis.core.approval_service import approval_service
 from jarvis.actions.web_search import web_search as web_search_action
 from jarvis.actions.computer_control import computer_control
@@ -1103,49 +1104,20 @@ class JarvisLive:
     _confirmation_lock = threading.RLock()
     _approvals_init_lock = threading.Lock()
 
-    # Kullanicinin acik onay ifadeleri (noktalama temizlenmis, kucuk harf).
-    _CONFIRMATION_WORDS = frozenset({
-        "onaylıyorum", "onayliyorum", "evet onaylıyorum", "evet onayliyorum",
-        "evet yap", "tamam onayla",
-        "tamam yap", "devam et", "approve", "approve it", "yes do it",
-    })
     # Verilen onay bu kadar saniye gecerli; sonra yeniden sorulur.
     _CONFIRMATION_TTL_S = float(_gate.FOREGROUND_TTL_S)
 
+    # Onay/ret kurali tek kaynaktan (jarvis.core.user_confirmation): cumlenin
+    # TUM kelimeleri onay kelimesi olmali; "Tamam ama once ne yapacagini
+    # soyle" onay degildir. dev_agent confirm_code kapisi da ayni kurali
+    # kullanir.
     @staticmethod
     def _normalize_confirmation(text: str) -> str:
-        cleaned = re.sub(r"[^\w\s]", " ", str(text or "").casefold())
-        return " ".join(cleaned.split())
-
-    # Cevap bu kelimelerden biriyle BASLIYORSA onay sayilir ("Evet.",
-    # "Evet devam edebilirsiniz", "evt onaylıyorum"). Canli testte birebir
-    # eslesme yetersiz kaldi: kullanici dogal olarak "Evet" diyor.
-    _AFFIRMATIVE_FIRST_WORDS = frozenset({
-        "evet", "evt", "tamam", "olur", "onay", "onaylıyorum", "onayliyorum",
-        "onayla", "devam", "yes", "approve", "ok", "okey",
-    })
-    # Cevabin herhangi bir yerinde bunlar varsa ASLA onay sayilmaz.
-    _NEGATIVE_WORDS = frozenset({
-        "hayır", "hayir", "iptal", "dur", "durdur", "vazgeç", "vazgec",
-        "yapma", "etme", "başlatma", "baslatma", "bekle", "istemiyorum",
-        "değil", "degil", "no", "cancel", "stop", "deny",
-    })
+        return _user_confirmation.normalize(text)
 
     @classmethod
     def _is_confirmation(cls, text: str) -> bool:
-        norm = cls._normalize_confirmation(text)
-        if not norm:
-            return False
-        tokens = norm.split()
-        if any(tok in cls._NEGATIVE_WORDS for tok in tokens):
-            return False
-        if norm in cls._CONFIRMATION_WORDS:
-            return True
-        if tokens[0] in cls._AFFIRMATIVE_FIRST_WORDS:
-            return True
-        # Canli ASR kelimeyi parcalara bolebiliyor ("onaylı yorum").
-        compact = norm.replace(" ", "")
-        return compact in {w.replace(" ", "") for w in cls._CONFIRMATION_WORDS}
+        return _user_confirmation.is_confirmation(text)
 
     # ── Onay deposu (security_gate.MultiApprovalStore, plan Adim 3.3) ──
     # Tek bekleyen-islem yuvasi yerine cok-istekli depo: her istek kendi
@@ -1370,8 +1342,7 @@ class JarvisLive:
 
     @classmethod
     def _is_rejection(cls, text: str) -> bool:
-        tokens = cls._normalize_confirmation(text).split()
-        return any(tok in cls._NEGATIVE_WORDS for tok in tokens)
+        return _user_confirmation.is_rejection(text)
 
     def _handle_brain_team_reply(self, text: str) -> bool:
         """Kullanicinin GERCEK turu (yazili komut ya da tamamlanan sesli tur)
@@ -1901,7 +1872,7 @@ class JarvisLive:
         aninda isaretlenir; _on_text_command ic yonlendirmelerde (ses → dosya
         router'i, tur sonunda) da cagrildigi icin isaret burada konur — aksi halde
         istegin kendisi gecikmeli olarak "onay" sayilabilirdi."""
-        note_user_turn()  # dev_agent onay kapisi: gercek kullanici girdisi
+        note_user_turn(text)  # dev_agent onay kapisi: gercek kullanici girdisi + metni
         approval_service.mark_user_turn()
         self._on_text_command(text)
 
@@ -3115,7 +3086,8 @@ class JarvisLive:
                                     pass
 
                                 self._last_user_speech = time.monotonic()
-                                note_user_turn()  # dev_agent onay kapisi: gercek kullanici girdisi
+                                # dev_agent onay kapisi: turun o ana kadarki TAM metni
+                                note_user_turn(" ".join(in_buf))
                                 approval_service.mark_user_turn()
 
                                 # Sesli onay: eskiden sadece yazili komut onay

@@ -952,6 +952,20 @@ def _save_memory_live(params: Mapping) -> str:
     return APPROVE if instruction_markers(text) else ALLOW
 
 
+def _settings_action(params: Mapping) -> str:
+    return str(params.get("action", "")).lower().strip().replace(" ", "_").replace("-", "_")
+
+
+def _settings_live_policy(params: Mapping) -> str:
+    """Yalnızca güvenli ses/parlaklık eylemleri ve kendi onay akışı olan
+    restart/shutdown/lock onaysız geçer; type_text + enter bir terminale komut
+    yazabilir, boş eylem LLM ile tahmin edilir -> onay."""
+    from jarvis.actions.computer_settings import _DANGEROUS_ACTIONS
+    from jarvis.actions.tools_kopru import _SAFE_SETTINGS_ACTIONS
+    action = _settings_action(params)
+    return ALLOW if action in _SAFE_SETTINGS_ACTIONS or action in _DANGEROUS_ACTIONS else APPROVE
+
+
 # Sesli yol (MODEL_LIVE) politikası. Tabloda olmayan araç: READ -> ALLOW,
 # geri kalan her şey -> APPROVE (fail-closed). Tablodaki ALLOW'lar BUGÜNKÜ
 # davranışı korur ve gerekçesi yazılıdır.
@@ -964,7 +978,9 @@ _LIVE_POLICY: dict[str, tuple[Callable[[Mapping], str], str]] = {
     "youtube_video": (lambda p: APPROVE if _truthy(p.get("save", False)) else ALLOW,
                       "save=true dosya yazar; oynatma/özet bugünkü gibi serbest"),
     # Kendi onay akışı olanlar (main.py dalı onay deposundan tüketir):
-    "computer_settings": (lambda p: ALLOW, "restart/shutdown/lock kendi onay akışında"),
+    "computer_settings": (_settings_live_policy,
+                          "ses/parlaklık onaysız; restart/shutdown/lock kendi onay akışında; "
+                          "type_text/press_key/open_run/paste ve diğerleri onay"),
     "game_updater": (lambda p: ALLOW, "shutdown_when_done kendi onay akışında"),
     "shutdown_jarvis": (lambda p: ALLOW, "kendi onay akışında"),
     "start_parallel_task": (lambda p: ALLOW, "dev_agent kod akışı (bulgu B, Adım 6)"),
@@ -982,8 +998,7 @@ _LIVE_POLICY: dict[str, tuple[Callable[[Mapping], str], str]] = {
 
 def _settings_loop_policy(params: Mapping) -> str:
     from jarvis.actions.tools_kopru import _SAFE_SETTINGS_ACTIONS
-    action = str(params.get("action", "")).lower().strip().replace(" ", "_").replace("-", "_")
-    return ALLOW if action in _SAFE_SETTINGS_ACTIONS else APPROVE
+    return ALLOW if _settings_action(params) in _SAFE_SETTINGS_ACTIONS else APPROVE
 
 
 # Arka plan görev döngüsü (AGENT_LOOP) politikası. Tabloda olmayan araç:
