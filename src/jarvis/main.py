@@ -466,6 +466,7 @@ TOOL_DECLARATIONS = [
             "properties": {
                 "command": {"type": "STRING", "description": "Command and arguments, without shell pipes or redirects"},
                 "cwd": {"type": "STRING", "description": "Working directory inside the user's home directory"},
+                "input": {"type": "STRING", "description": "Optional text sent to the command's standard input"},
             },
             "required": ["command"]
         }
@@ -503,7 +504,8 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "city": {"type": "STRING", "description": "City name"}
+                "city": {"type": "STRING", "description": "City name"},
+                "time": {"type": "STRING", "description": "When: today (default), tomorrow, etc."}
             },
             "required": ["city"]
         }
@@ -607,7 +609,10 @@ TOOL_DECLARATIONS = [
                     "volume_up/volume_down for relative 'louder/quieter' requests."
                 )},
                 "description": {"type": "STRING", "description": "Natural language description of what to do"},
-                "value":       {"type": "STRING", "description": "Optional value: volume level 0-100 for volume_set, text to type, etc."}
+                "value":       {"type": "STRING", "description": "Optional value: volume level 0-100 for volume_set, text to type, etc."},
+                "text":        {"type": "STRING", "description": "Text for type_text (alternative to value)"},
+                "key":         {"type": "STRING", "description": "Key name for press_key (alternative to value)"},
+                "press_enter": {"type": "BOOLEAN", "description": "Press Enter after type_text (default: false)"}
             },
             "required": []
         }
@@ -635,8 +640,8 @@ TOOL_DECLARATIONS = [
                 "amount":      {"type": "INTEGER", "description": "Scroll amount in pixels (default: 500)"},
                 "key":         {"type": "STRING", "description": "Key name for press action (e.g. Enter, Escape, F5)"},
                 "path":        {"type": "STRING", "description": "Save path for screenshot"},
-                "incognito":   {"type": "BOOLEAN", "description": "Open in private/incognito mode"},
                 "clear_first": {"type": "BOOLEAN", "description": "Clear field before typing (default: true)"},
+                "target":      {"type": "STRING", "description": "Browser to switch to for switch (alternative to browser)"},
             },
             "required": ["action"]
         }
@@ -655,6 +660,10 @@ TOOL_DECLARATIONS = [
                 "name":         {"type": "STRING", "description": "File name to search for"},
                 "extension":    {"type": "STRING", "description": "File extension to search (e.g. .pdf)"},
                 "count":        {"type": "INTEGER", "description": "Number of results for largest"},
+                "append":       {"type": "BOOLEAN", "description": "For write: append instead of overwrite (default: false)"},
+                "old_text":     {"type": "STRING", "description": "For find_replace: text to replace"},
+                "new_text":     {"type": "STRING", "description": "For find_replace: replacement text"},
+                "max_results":  {"type": "INTEGER", "description": "For find: maximum results (default 20, max 50)"},
             },
             "required": ["action"]
         }
@@ -714,6 +723,7 @@ TOOL_DECLARATIONS = [
                 "url":    {"type": "STRING", "description": "Image URL for wallpaper_url"},
                 "mode":   {"type": "STRING", "description": "by_type or by_date for organize"},
                 "task":   {"type": "STRING", "description": "Natural language desktop task"},
+                "description": {"type": "STRING", "description": "Alternative to task for the task action"},
             },
             "required": ["action"]
         }
@@ -934,6 +944,10 @@ TOOL_DECLARATIONS = [
                 "field":       {"type": "STRING",  "description": "Field for user_data: name|email|city"},
                 "clear_first": {"type": "BOOLEAN", "description": "Clear field before typing (default: true)"},
                 "path":        {"type": "STRING",  "description": "Save path for screenshot"},
+                "x1":          {"type": "INTEGER", "description": "Drag start X"},
+                "y1":          {"type": "INTEGER", "description": "Drag start Y"},
+                "x2":          {"type": "INTEGER", "description": "Drag end X"},
+                "y2":          {"type": "INTEGER", "description": "Drag end Y"},
             },
             "required": ["action"]
         }
@@ -2527,24 +2541,6 @@ class JarvisLive:
                                           response={"result": _decision.model_message})
         args = _gate.prepare(_decision, _grant)
 
-        if name == "code_search":
-            import subprocess as _sp
-            import shutil as _sh
-            _ag = _sh.which("agentgrep") or str(Path.home() / "agentgrep/target/release/agentgrep")
-            _mode = args.get("mode", "find")
-            _q = args.get("query", "")
-            _p = args.get("path", "") or args.get("file", "")
-            _cmd = [_ag, _mode, *_q.split()]
-            if _p:
-                _cmd += ["--path", _p]
-            try:
-                _res = _sp.run(_cmd, capture_output=True, text=True, timeout=15)
-                out = _res.stdout.strip() or _res.stderr.strip()[:500]
-                r = types.FunctionResponse(id=fc.id, name=name, response={"result": out[:3000]})
-            except Exception as _e:
-                r = types.FunctionResponse(id=fc.id, name=name, response={"result": f"code_search error: {_e}"})
-
-
         if name == "save_memory":
             category = args.get("category", "notes")
             key      = args.get("key", "")
@@ -2798,6 +2794,24 @@ class JarvisLive:
                 from jarvis.actions.system_scan import system_scan_and_repair
                 r = await loop.run_in_executor(None, system_scan_and_repair)
                 result = str(r)
+
+            elif name == "code_search":
+                # Eskiden zincirin disinda ayri bir `if` idi ve return etmedigi
+                # icin sonuc asagidaki "Unknown tool" dalinca eziliyordu.
+                import subprocess as _sp
+                import shutil as _sh
+                _ag = _sh.which("agentgrep") or str(Path.home() / "agentgrep/target/release/agentgrep")
+                _mode = args.get("mode", "find")
+                _q = args.get("query", "")
+                _p = args.get("path", "") or args.get("file", "")
+                _cmd = [_ag, _mode, *_q.split()]
+                if _p:
+                    _cmd += ["--path", _p]
+                try:
+                    _res = _sp.run(_cmd, capture_output=True, text=True, timeout=15)
+                    result = (_res.stdout.strip() or _res.stderr.strip()[:500])[:3000]
+                except Exception as _e:
+                    result = f"code_search error: {_e}"
 
             elif name == "shutdown_jarvis":
                 _shutdown_confirmed = self._approvals.consume(self._action_call("shutdown_jarvis"))

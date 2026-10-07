@@ -3,6 +3,7 @@ import sys
 import re
 import time
 import secrets
+import shlex
 from pathlib import Path
 from jarvis.core.audit_log import log_action
 from jarvis.core.backup_manager import safe_modify
@@ -482,6 +483,20 @@ Fixed code:"""
     return _clean_code(response.text)
 
 
+def _cli_args(raw) -> list[str]:
+    """TOOL_DECLARATIONS'ta 'args' STRING beyan edilir; model "a 'b c'" gibi
+    tek bir metin gönderir. Kabuk gibi bölünür (kabuk çalıştırılmaz); liste
+    gelirse elemanlar aynen kalır."""
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            return shlex.split(raw, posix=(sys.platform != "win32"))
+        except ValueError:          # kapanmamış tırnak
+            return raw.split()
+    return [str(a) for a in raw]
+
+
 def _run_file(path: Path, args: list, timeout: int) -> str:
     interpreters = {
         ".py":  [sys.executable],
@@ -873,7 +888,7 @@ def code_helper(
     output_path = p.get("output_path", "").strip()
     file_path   = p.get("file_path", "").strip()
     code        = p.get("code", "").strip()
-    args        = p.get("args", [])
+    args        = _cli_args(p.get("args"))
     timeout     = int(p.get("timeout", 30))
     confirm_code = str(p.get("confirm_code", "")).strip()
 

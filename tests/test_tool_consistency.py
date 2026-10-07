@@ -41,41 +41,18 @@ def _inv() -> dict:
 
 # ── Bilinen uyumsuzluklar (2026-10-07 envanteri) ──────────────────────────
 
-KNOWN_DISPATCH = {
-    "code_search": (
-        "main.py: `if name == \"code_search\"` kolu if/elif zincirinin dışında ve "
-        "return etmiyor; akış zincirin `else`ine düşüp sonucu 'Unknown tool: "
-        "code_search' ile eziyor"
-    ),
-}
+KNOWN_DISPATCH: dict[str, str] = {}
 
 KNOWN_PARAMS: dict[str, tuple[set[str], str]] = {
-    "terminal": ({"okunuyor ama beyan edilmemiş: input",
-                  "okunuyor ama beyan edilmemiş: stdin"},
-                 "terminal_tool stdin verisini input/stdin'den okur; beyanda yok"),
-    "weather_report": ({"okunuyor ama beyan edilmemiş: time"},
-                       "weather_action 'time' okur; beyanda yok"),
-    "computer_settings": ({"okunuyor ama beyan edilmemiş: key",
-                           "okunuyor ama beyan edilmemiş: press_enter",
-                           "okunuyor ama beyan edilmemiş: text"},
-                          "type_text/press_key eylemleri key/text/press_enter okur; beyanda yalnızca value"),
-    "browser_control": ({"beyan edilmiş ama okunmuyor: incognito",
-                         "okunuyor ama beyan edilmemiş: fields",
-                         "okunuyor ama beyan edilmemiş: target"},
-                        "incognito beyan edilmiş ama hiç okunmuyor; fill_form fields, target beyansız"),
-    "file_controller": ({"okunuyor ama beyan edilmemiş: append",
-                         "okunuyor ama beyan edilmemiş: max_results",
-                         "okunuyor ama beyan edilmemiş: new_text",
-                         "okunuyor ama beyan edilmemiş: old_text"},
-                        "append/max_results/old_text/new_text okunur; beyanda yok"),
-    "desktop_control": ({"okunuyor ama beyan edilmemiş: description"},
-                        "desktop_control 'description' okur; beyanda yok"),
+    "terminal": ({"okunuyor ama beyan edilmemiş: stdin"},
+                 "terminal_tool 'input' yoksa eski 'stdin' takma adına düşer; beyanda yalnızca input"),
+    "browser_control": ({"okunuyor ama beyan edilmemiş: fields"},
+                        "fill_form 'fields'i dict bekler; Gemini şeması özelliksiz OBJECT'i "
+                        "kabul etmediği için beyan edilmedi"),
     "code_helper": ({"okunuyor ama beyan edilmemiş: instruction",
                      "okunuyor ama beyan edilmemiş: project_name",
-                     "okunuyor ama beyan edilmemiş: query",
-                     "args: beyan STRING, işleyici list bekliyor"},
-                    "args STRING beyan edilmiş, code_helper liste bekler (interp + [path] + args "
-                    "-> TypeError, registry yokken); instruction/project_name/query beyansız"),
+                     "okunuyor ama beyan edilmemiş: query"},
+                    "edit 'instruction'a, agentic_code yönlendirmesi query/project_name'e düşer; beyansız"),
     "dev_agent": ({"okunuyor ama beyan edilmemiş: code",
                    "okunuyor ama beyan edilmemiş: query"},
                   "agentic_code yönlendirmesi code/query'ye düşer; beyanda yok"),
@@ -86,20 +63,11 @@ KNOWN_PARAMS: dict[str, tuple[set[str], str]] = {
                            "okunuyor ama beyan edilmemiş: search",
                            "okunuyor ama beyan edilmemiş: text"},
                           "takma ad anahtarları (id/index/search/text/content/file_path) beyansız"),
-    "computer_control": ({"okunuyor ama beyan edilmemiş: x1",
-                          "okunuyor ama beyan edilmemiş: x2",
-                          "okunuyor ama beyan edilmemiş: y1",
-                          "okunuyor ama beyan edilmemiş: y2"},
-                         "sürükleme x1/y1/x2/y2 okur; beyanda yok"),
 }
 
 KNOWN_EFFECTS: dict[str, str] = {}
 
-KNOWN_UNTESTED = {
-    name: "tests/ altında bu aracı anan test yok"
-    for name in ("screen_process", "close_camera", "recall_conversation",
-                 "game_updater", "flight_finder", "shutdown_jarvis")
-}
+KNOWN_UNTESTED: dict[str, str] = {}
 
 # READ olmayan etkide ALLOW veren (araç, argüman varyantı, kaynak) üçlüleri.
 # Hepsi security_gate._LIVE_POLICY'de gerekçesiyle yazılı (aracın kendi
