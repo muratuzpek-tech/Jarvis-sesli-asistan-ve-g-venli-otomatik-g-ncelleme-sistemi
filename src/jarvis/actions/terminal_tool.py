@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shlex
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -67,6 +68,20 @@ def _expand_home_tokens(argv: list[str]) -> list[str]:
     olan ve "~/" ile baslayan token'lar os.path.expanduser ile genisletilir;
     "~kullanici", "--opt=~/x" ve ortasinda "~" gecenler degistirilmez."""
     return [os.path.expanduser(t) if t == "~" or t.startswith("~/") else t for t in argv]
+
+
+def _resolve_python_command(argv: list[str]) -> list[str]:
+    """Use Jarvis's interpreter when a bare Python name is absent from PATH.
+
+    Desktop launches do not always inherit the user's activated virtualenv.
+    Falling back to the interpreter running Jarvis keeps ``python -m pytest``
+    deterministic without changing commands when a PATH Python exists.
+    """
+    if not argv or argv[0].lower() not in {"python", "python3"}:
+        return argv
+    if shutil.which(argv[0]):
+        return argv
+    return [sys.executable, *argv[1:]]
 
 
 def _escapes_home(token: str, home: Path) -> bool:
@@ -235,6 +250,7 @@ def terminal_tool(
     # Onizlemeden, onay ozetinden ve calistirmadan ONCE: kullanicinin gordugu
     # ve onayladigi komut, calisacak komutun aynisi olsun.
     argv = _expand_home_tokens(argv)
+    argv = _resolve_python_command(argv)
 
     try:
         cwd = _resolve_cwd(params.get("cwd"))
