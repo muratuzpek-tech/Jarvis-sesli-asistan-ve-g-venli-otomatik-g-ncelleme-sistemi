@@ -467,6 +467,10 @@ TOOL_DECLARATIONS = [
                 "command": {"type": "STRING", "description": "Command and arguments, without shell pipes or redirects"},
                 "cwd": {"type": "STRING", "description": "Working directory inside the user's home directory"},
                 "input": {"type": "STRING", "description": "Optional text sent to the command's standard input"},
+                "timeout": {
+                    "type": "INTEGER",
+                    "description": "Optional timeout in seconds (1-900); diagnostics default to 300 seconds",
+                },
             },
             "required": ["command"]
         }
