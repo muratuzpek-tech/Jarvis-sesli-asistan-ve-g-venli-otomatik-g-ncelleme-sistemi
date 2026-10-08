@@ -79,7 +79,7 @@ def test_write_turkish_layout_uses_clipboard_and_restores_it():
     backend(r, layout="tr").write("Şişli'de ığdır")
     copies = [stdin for a, stdin in r.calls if a == ["wl-copy"]]
     assert copies == ["Şişli'de ığdır".encode(), b"eski pano"]
-    assert ["key", "29:1", "47:1", "47:0", "29:0"] in r.ydotool()  # Ctrl+V
+    assert ["key", "29:1", "42:1", "47:1", "47:0", "42:0", "29:0"] in r.ydotool()  # Ctrl+Shift+V
     assert r.clipboard == b"eski pano"
 
 

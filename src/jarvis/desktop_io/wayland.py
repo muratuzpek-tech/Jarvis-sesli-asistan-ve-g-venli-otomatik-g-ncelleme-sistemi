@@ -109,7 +109,7 @@ class WaylandBackend:
         ydotool FİZİKSEL tuş kodu gönderir; Türkçe Q düzeninde 'i' tuşu 'ı'
         üretir, ş/ğ/ü gibi harfler hiç yazılamaz. Bu yüzden düzen 'us' değilse
         (veya metin ASCII dışı karakter içeriyorsa) metin panoya konup
-        Ctrl+V ile yapıştırılır; panodaki önceki içerik geri yüklenir.
+        Ctrl+Shift+V ile yapıştırılır; panodaki önceki içerik geri yüklenir.
         """
         text = str(text)
         if not text:
@@ -135,7 +135,7 @@ class WaylandBackend:
             if code != 0:
                 raise DesktopIOError(f"wl-copy başarısız: {out.decode(errors='replace')[:200]}")
             time.sleep(0.05)
-            self.hotkey("ctrl", "v")
+            self.hotkey("ctrl", "shift", "v")
             time.sleep(0.15)
             if had_previous:
                 self._run(["wl-copy"], previous)
@@ -144,7 +144,7 @@ class WaylandBackend:
             return
 
         # wl-copy deliberately stays alive while it owns the clipboard. Waiting
-        # with subprocess.run() deadlocks before Ctrl+V can be sent, so keep the
+        # with subprocess.run() deadlocks before Ctrl+Shift+V can be sent, so keep the
         # owner process alive only until the target application consumes the paste.
         env = dict(os.environ)
         process = subprocess.Popen(
@@ -163,7 +163,7 @@ class WaylandBackend:
             if process.poll() not in (None, 0):
                 error = process.stderr.read().decode(errors="replace") if process.stderr else ""
                 raise DesktopIOError(f"wl-copy başarısız: {error[:200]}")
-            self.hotkey("ctrl", "v")
+            self.hotkey("ctrl", "shift", "v")
             try:
                 process.wait(timeout=2)
             except subprocess.TimeoutExpired:
