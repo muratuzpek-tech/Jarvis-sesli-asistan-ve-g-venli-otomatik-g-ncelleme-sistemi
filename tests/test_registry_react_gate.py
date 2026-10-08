@@ -164,11 +164,37 @@ def test_e2_allowed_and_approved_runs_are_audited(jl):
 
 def test_e1_allowed_runs_are_audited_too(jl, monkeypatch):
     rec = []
-    monkeypatch.setattr(main_mod, "weather_action", lambda **k: rec.append(k) or "güneşli")
-    asyncio.run(jl._execute_tool(SimpleNamespace(name="weather_report", args={"city": "Ankara"}, id="1")))
+
+    from tools.registry import registry
+
+    entry = registry.get("weather_report")
+    assert entry is not None
+
+    async def fake_weather(args, ctx):
+        rec.append(dict(args))
+        return "güneşli"
+
+    monkeypatch.setattr(entry, "handler", fake_weather)
+    entry.is_async = True
+
+    asyncio.run(
+        jl._execute_tool(
+            SimpleNamespace(
+                name="weather_report",
+                args={"city": "Ankara"},
+                id="1",
+            )
+        )
+    )
+
     assert rec
-    assert any(r.get("tool") == "weather_report" and r["executed"] and not r["approved"]
-               for r in _audit())
+    assert rec[0] == {"city": "Ankara"}
+    assert any(
+        r.get("tool") == "weather_report"
+        and r["executed"]
+        and not r["approved"]
+        for r in _audit()
+    )
 
 
 # ── E3: ReAct ──
@@ -223,3 +249,70 @@ def test_e3_approval_needed_tool_does_not_run_and_shows_no_code(no_memory):
                  {"thought": "t", "tool": "_gate_dangerous", "args": {"cmd": "x"}})
     assert _calls["dangerous"] == []
     assert "confirm_code" not in out and "ONAY_KODU" not in out
+
+
+def test_e3_repeated_failed_tool_call_is_not_reexecuted(no_memory, monkeypatch):
+    from tools.agent import react_runtime as rt
+
+    calls = []
+
+    async def fake_execute(self, tool_name, args):
+        calls.append((tool_name, dict(args)))
+        raise RuntimeError("fake backend failure")
+
+    monkeypatch.setattr(rt.ReactAgent, "_gated_execute", fake_execute)
+
+    out = _react(
+        rt,
+        ToolContext(),
+        {
+            "thought": "ara",
+            "tool": "_gate_normal",
+            "args": {"q": "aynı"},
+        },
+        {
+            "thought": "tekrar dene",
+            "tool": "_gate_normal",
+            "args": {"q": "aynı"},
+        },
+    )
+
+    assert calls == [
+        ("_gate_normal", {"q": "aynı"}),
+    ]
+    assert "fake backend failure" in out
+
+
+def test_e3_failed_tool_different_args_can_run(no_memory, monkeypatch):
+    from tools.agent import react_runtime as rt
+
+    calls = []
+
+    async def fake_execute(self, tool_name, args):
+        calls.append((tool_name, dict(args)))
+        if args["q"] == "ilk":
+            raise RuntimeError("first backend failure")
+        return "ikinci başarılı"
+
+    monkeypatch.setattr(rt.ReactAgent, "_gated_execute", fake_execute)
+
+    out = _react(
+        rt,
+        ToolContext(),
+        {
+            "thought": "ilk arama",
+            "tool": "_gate_normal",
+            "args": {"q": "ilk"},
+        },
+        {
+            "thought": "farklı arama",
+            "tool": "_gate_normal",
+            "args": {"q": "ikinci"},
+        },
+    )
+
+    assert calls == [
+        ("_gate_normal", {"q": "ilk"}),
+        ("_gate_normal", {"q": "ikinci"}),
+    ]
+    assert "first backend failure" in out or "ikinci başarılı" in out

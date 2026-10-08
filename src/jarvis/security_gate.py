@@ -974,6 +974,7 @@ _LIVE_POLICY: dict[str, tuple[Callable[[Mapping], str], str]] = {
     "self_improve": (lambda p: TOOL_CODE, "self_improve önizlemesi + kod"),
     "code_helper": (lambda p: TOOL_CODE, "registry varsa agentic_code (kendi onayı); yoksa üzerine yazma önizlemesi"),
     "file_controller": (_file_controller_live, "okuma serbest; taşıma/toplu silme önizleme+kod; diğer değişiklikler onay"),
+    "reminder": (lambda p: APPROVE, "hatırlatıcı oluşturma/değiştirme onay ister"),
     "save_memory": (_save_memory_live, "yalnızca talimata benzeyen içerik onay ister"),
     "youtube_video": (lambda p: APPROVE if _truthy(p.get("save", False)) else ALLOW,
                       "save=true dosya yazar; oynatma/özet bugünkü gibi serbest"),
@@ -1076,6 +1077,8 @@ def authorize(tool: str, args: Mapping | None, source: Source) -> Decision:
                         f"BLOCKED: '{tool}' bu yoldan çağrılabilen bir araç değil; çağrılmadı.")
     registry_policy = (_registry_policy(tool)
                        if source in (Source.MODEL_LIVE, Source.REACT) else None)
+    # MODEL_LIVE icin arac-spesifik canli politika, registry'nin statik
+    # security seviyesinden daha ozeldir.
     if source is Source.MODEL_LIVE and tool in _LIVE_POLICY:
         policy_fn, reason = _LIVE_POLICY[tool]
         policy = policy_fn(call.params)

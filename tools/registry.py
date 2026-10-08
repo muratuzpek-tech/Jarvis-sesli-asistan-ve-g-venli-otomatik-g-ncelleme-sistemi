@@ -196,19 +196,33 @@ class ToolRegistry:
         if not entry.enabled:
             return f"Tool '{name}' is currently disabled."
 
-        # Güvenlik kontrolü
-        user_confirmed = bool(ctx and ctx.dangerous_confirmed)
-        verdict = security_manager.check(
-            name, args,
-            level=entry.security,
-            user_confirmed=user_confirmed,
+        # Güvenlik kontrolü.
+        #
+        # Jarvis MODEL_LIVE akışında security_gate.authorize() zaten gerçek
+        # kullanıcı turundan gelen tek güvenlik kararını vermiştir. Bu durumda
+        # Registry ikinci kez approval üretmemeli.
+        #
+        # Registry'nin doğrudan kullanımı ve ReAct akışı ise normal security
+        # kontrolünden geçmeye DEVAM EDER.
+        gate_authorized = bool(
+            ctx
+            and isinstance(ctx.extra, dict)
+            and ctx.extra.get("_security_gate_authorized") is True
         )
 
-        if verdict.requires_confirmation and not verdict.allowed:
-            return f"CONFIRMATION_REQUIRED:{name}:{verdict.confirm_prompt}"
+        if not gate_authorized:
+            user_confirmed = bool(ctx and ctx.dangerous_confirmed)
+            verdict = security_manager.check(
+                name, args,
+                level=entry.security,
+                user_confirmed=user_confirmed,
+            )
 
-        if not verdict.allowed:
-            return f"BLOCKED: {verdict.reason}"
+            if verdict.requires_confirmation and not verdict.allowed:
+                return f"CONFIRMATION_REQUIRED:{name}:{verdict.confirm_prompt}"
+
+            if not verdict.allowed:
+                return f"BLOCKED: {verdict.reason}"
 
         try:
             # Handler çağrısı

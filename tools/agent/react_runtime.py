@@ -217,6 +217,7 @@ class ReactAgent:
         result = ReActResult(goal=goal)
         system_prompt = _build_system_prompt()
         history: list[dict] = []
+        failed_calls: set[str] = set()
 
         memory_ctx = ""
         try:
@@ -283,6 +284,14 @@ class ReactAgent:
                 break
 
             step.tool = tool_name
+
+            call_fingerprint = json.dumps(
+                [tool_name, step.args],
+                sort_keys=True,
+                ensure_ascii=False,
+                default=str,
+            )
+
             history.append({
                 "turn": turn,
                 "thought": step.thought,
@@ -290,13 +299,26 @@ class ReactAgent:
                 "args": {k: str(v)[:60] for k, v in step.args.items()},
             })
 
-            try:
-                obs = await self._gated_execute(tool_name, step.args)
-                step.observation = obs[:500]
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                step.observation = f"TOOL ERROR: {type(e).__name__}: {str(e)[:150]}"
+            if call_fingerprint in failed_calls:
+                step.observation = (
+                    "Onceki ayni tool cagrisi basarisiz oldu; "
+                    "ayni cagri tekrar calistirilmadi."
+                )
+            else:
+                try:
+                    obs = await self._gated_execute(tool_name, step.args)
+                    step.observation = obs[:500]
+
+                    if step.observation.lower().startswith("tool error ("):
+                        failed_calls.add(call_fingerprint)
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    step.observation = (
+                        f"TOOL ERROR: {type(e).__name__}: {str(e)[:150]}"
+                    )
+                    failed_calls.add(call_fingerprint)
 
             step.elapsed_ms = int((time.monotonic() - step_start) * 1000)
             result.steps.append(step)

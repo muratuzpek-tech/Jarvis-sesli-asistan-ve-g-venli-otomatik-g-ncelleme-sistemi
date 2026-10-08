@@ -202,3 +202,16 @@ def pytest_sessionfinish(session, exitstatus):
     if changed:
         print(f"\nHATA: test paketi GERCEK denetim kayitlarini degistirdi: {changed}")
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+@pytest.fixture(autouse=True)
+def _terminal_rate_limit_isolated():
+    """Terminal rate-limit state'i testler arasında sızmasın."""
+    from jarvis.actions import terminal_tool as tt
+
+    with tt._rate_lock:
+        tt._TERMINAL_CALL_TIMES.clear()
+
+    yield
+
+    with tt._rate_lock:
+        tt._TERMINAL_CALL_TIMES.clear()

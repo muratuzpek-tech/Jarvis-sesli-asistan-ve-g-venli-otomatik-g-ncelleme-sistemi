@@ -103,9 +103,20 @@ def _is_readonly(argv: list[str]) -> bool:
     argv = _expand_home_tokens(argv)
     # "./ls" ya da "/tmp/x/git" calisma klasorundeki/keyfi bir ikiliyi
     # calistirir; salt-okunur liste yalnizca PATH'teki ciplak adlar icindir.
-    if "/" in argv[0] or "\\" in argv[0] or Path(argv[0]).name != argv[0]:
+    # Ancak _resolve_python_command(), PATH'te python bulunmadiginda Jarvis'in
+    # kendi interpreter'ini mutlak yol olarak ekler. Bu interpreter'i
+    # "python --version" gibi guvenli Python komutlarinda kabul et.
+    _jarvis_python = False
+    try:
+        _jarvis_python = Path(argv[0]).resolve() == Path(sys.executable).resolve()
+    except OSError:
+        pass
+    if (
+        not _jarvis_python
+        and ("/" in argv[0] or "\\" in argv[0] or Path(argv[0]).name != argv[0])
+    ):
         return False
-    program = argv[0].lower()
+    program = Path(argv[0]).name.lower() if _jarvis_python else argv[0].lower()
     args = argv[1:]
     home = Path.home().resolve()
     _ro_prog = program in _READONLY_PROGRAMS
