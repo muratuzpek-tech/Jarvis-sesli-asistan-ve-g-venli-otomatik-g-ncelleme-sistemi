@@ -2677,10 +2677,20 @@ class JarvisLive:
                     and self._approvals.consume(self._action_call(_computer_action))  # tek kullanimlik
                 ):
                     _computer_args["_user_confirmation_granted"] = True
-                r = await loop.run_in_executor(
-                    None,
-                    lambda: computer_settings(parameters=_computer_args, response=None, player=self.ui),
-                )
+                if _computer_action in {"type", "type_text", "write", "write_on_screen"}:
+                    # Both schemas historically exposed typing. Route their
+                    # execution through the Wayland-aware implementation so
+                    # clipboard paste and press_enter have one behavior.
+                    _computer_args["text"] = _computer_args.get("text") or _computer_args.get("value", "")
+                    r = await loop.run_in_executor(
+                        None,
+                        lambda: computer_control(parameters=_computer_args, player=self.ui),
+                    )
+                else:
+                    r = await loop.run_in_executor(
+                        None,
+                        lambda: computer_settings(parameters=_computer_args, response=None, player=self.ui),
+                    )
                 if _computer_action in {"restart", "shutdown", "lock_screen"} \
                         and str(r).startswith("CONFIRMATION_REQUIRED:"):
                     r = self._queue_action_approval(_computer_action) or r
