@@ -90,6 +90,7 @@ EXPECTED_NON_READ_ALLOW = {
     ("flight_finder", "risky", "MODEL_LIVE"),
     ("shutdown_jarvis", "{}", "MODEL_LIVE"),
     ("save_memory", "{}", "MODEL_LIVE"),
+    ("reminder", "{}", "REACT"),
 }
 
 

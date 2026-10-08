@@ -33,6 +33,12 @@ from tools.registry import registry, ToolContext, register
 from tools.security import security, SecurityLevel
 from tools.schemas import get_all_schemas, generate_declarations
 
+# Alt paketleri yukle ki @registry.register dekoratorleri calissin
+import tools.agent       # noqa: F401  → "react_agent" kayit
+import tools.developer   # noqa: F401  → "agentic_code" kayit
+import tools.media       # noqa: F401  → "spotify_control" kayit
+import tools.bridge_actions   # noqa: F401  → web_search, file_controller, etc.
+
 __all__ = [
     "registry", "register", "ToolContext",
     "security", "SecurityLevel",

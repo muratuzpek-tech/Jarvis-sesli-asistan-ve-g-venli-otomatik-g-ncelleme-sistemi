@@ -10,8 +10,10 @@ from __future__ import annotations
 import os
 import shlex
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from jarvis.core.approval_service import approval_service
@@ -20,7 +22,9 @@ import time
 from jarvis.core.audit_log import log_action
 
 _MAX_OUTPUT = 12000
-_TIMEOUT = 60
+_DEFAULT_TIMEOUT = 60
+_DIAGNOSTIC_TIMEOUT = 300
+_MAX_TIMEOUT = 900
 
 _READONLY_PROGRAMS = {"pwd", "ls", "cat", "head", "tail", "grep", "rg", "find", "which", "whoami", "uname", "df", "du"}
 _GIT_READONLY = {"status", "diff", "log", "show", "branch", "rev-parse"}
@@ -66,6 +70,20 @@ def _expand_home_tokens(argv: list[str]) -> list[str]:
     return [os.path.expanduser(t) if t == "~" or t.startswith("~/") else t for t in argv]
 
 
+def _resolve_python_command(argv: list[str]) -> list[str]:
+    """Use Jarvis's interpreter when a bare Python name is absent from PATH.
+
+    Desktop launches do not always inherit the user's activated virtualenv.
+    Falling back to the interpreter running Jarvis keeps ``python -m pytest``
+    deterministic without changing commands when a PATH Python exists.
+    """
+    if not argv or argv[0].lower() not in {"python", "python3"}:
+        return argv
+    if shutil.which(argv[0]):
+        return argv
+    return [sys.executable, *argv[1:]]
+
+
 def _escapes_home(token: str, home: Path) -> bool:
     """Mutlak ve ".." bileseni iceren bir yol ev dizininin disina mi cikiyor?
     (ör. genisletilmis "~/../etc/passwd")."""
@@ -85,9 +103,20 @@ def _is_readonly(argv: list[str]) -> bool:
     argv = _expand_home_tokens(argv)
     # "./ls" ya da "/tmp/x/git" calisma klasorundeki/keyfi bir ikiliyi
     # calistirir; salt-okunur liste yalnizca PATH'teki ciplak adlar icindir.
-    if "/" in argv[0] or "\\" in argv[0] or Path(argv[0]).name != argv[0]:
+    # Ancak _resolve_python_command(), PATH'te python bulunmadiginda Jarvis'in
+    # kendi interpreter'ini mutlak yol olarak ekler. Bu interpreter'i
+    # "python --version" gibi guvenli Python komutlarinda kabul et.
+    _jarvis_python = False
+    try:
+        _jarvis_python = Path(argv[0]).resolve() == Path(sys.executable).resolve()
+    except OSError:
+        pass
+    if (
+        not _jarvis_python
+        and ("/" in argv[0] or "\\" in argv[0] or Path(argv[0]).name != argv[0])
+    ):
         return False
-    program = argv[0].lower()
+    program = Path(argv[0]).name.lower() if _jarvis_python else argv[0].lower()
     args = argv[1:]
     home = Path.home().resolve()
     _ro_prog = program in _READONLY_PROGRAMS
@@ -129,7 +158,7 @@ def _is_readonly(argv: list[str]) -> bool:
     return False
 
 
-def _preview(argv: list[str], cwd: Path) -> str:
+def _preview(argv: list[str], cwd: Path, timeout: int) -> str:
     item = approval_service.request(
         "terminal",
         f"Komut: {_display_command(argv)} | Çalışma klasörü: {cwd}",
@@ -138,9 +167,42 @@ def _preview(argv: list[str], cwd: Path) -> str:
         "ONAY GEREKLİ (komut henüz çalıştırılmadı).\n"
         f"Komut: {_display_command(argv)}\n"
         f"Çalışma klasörü: {cwd}\n"
+        f"Timeout: {timeout} saniye\n"
         f"Onay kodu: {item.code}\n"
         "Kullanıcı bu işlemi açıkça onayladıktan sonra aynı komutu confirm_code ile tekrar çağır."
     )
+
+
+def _is_pytest_command(argv: list[str]) -> bool:
+    """Return whether argv invokes pytest through a Python module or script."""
+    names = {Path(str(token)).name.lower() for token in argv}
+    return "pytest" in names or any(name.startswith("pytest") for name in names)
+
+
+def _is_diagnostic_command(argv: list[str]) -> bool:
+    """Identify bounded, potentially longer read/diagnostic commands.
+
+    This is intentionally only a timeout policy decision; approval and command
+    safety remain governed by ``_is_readonly`` and the approval service.
+    """
+    if _is_pytest_command(argv):
+        return True
+    names = {Path(str(token)).name.lower() for token in argv}
+    return bool(names & {"ruff", "compileall", "diagnose_all.py"})
+
+
+def _command_timeout(parameters: dict, argv: list[str]) -> int:
+    """Resolve a bounded timeout, with a longer default for diagnostics."""
+    requested = parameters.get("timeout")
+    if requested is None:
+        return _DIAGNOSTIC_TIMEOUT if _is_diagnostic_command(argv) else _DEFAULT_TIMEOUT
+    try:
+        timeout = int(requested)
+    except (TypeError, ValueError):
+        raise ValueError("timeout saniye cinsinden bir tam sayı olmalı.") from None
+    if not 1 <= timeout <= _MAX_TIMEOUT:
+        raise ValueError(f"timeout 1 ile {_MAX_TIMEOUT} saniye arasında olmalı.")
+    return timeout
 
 
 _TERMINAL_RATE_LIMIT = 30        # max 30 komut / dakika
@@ -199,9 +261,15 @@ def terminal_tool(
     # Onizlemeden, onay ozetinden ve calistirmadan ONCE: kullanicinin gordugu
     # ve onayladigi komut, calisacak komutun aynisi olsun.
     argv = _expand_home_tokens(argv)
+    argv = _resolve_python_command(argv)
 
     try:
         cwd = _resolve_cwd(params.get("cwd"))
+    except ValueError as exc:
+        return str(exc)
+
+    try:
+        timeout_seconds = _command_timeout(params, argv)
     except ValueError as exc:
         return str(exc)
 
@@ -218,7 +286,7 @@ def terminal_tool(
                        detail=_display_command(argv)[:200],
                        risk="high", approval_required=True,
                        result="AWAITING_APPROVAL")
-            return _preview(argv, cwd)
+            return _preview(argv, cwd, timeout_seconds)
 
     # ===== INTERAKTIF -> XTERM AC =====
     _should_xterm = False
@@ -278,6 +346,14 @@ def terminal_tool(
         # Depo yapilandirmasindaki core.fsmonitor keyfi program calistirabilir;
         # salt-okunur "git status" bile bunu tetiklerdi.
         argv = [argv[0], "-c", "core.fsmonitor=false", *argv[1:]]
+    run_env = os.environ.copy()
+    # Project tests must never write the user's real audit/memory files.  Keep
+    # the temporary data directory alive for the child process only; an
+    # explicitly supplied JARVIS_HOME remains the caller's deliberate choice.
+    diagnostic_home = None
+    if _is_pytest_command(argv) and "JARVIS_HOME" not in run_env:
+        diagnostic_home = tempfile.TemporaryDirectory(prefix="jarvis-terminal-")
+        run_env["JARVIS_HOME"] = diagnostic_home.name
     try:
         proc = subprocess.run(
             argv,
@@ -287,8 +363,8 @@ def terminal_tool(
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=_TIMEOUT,
-            env=os.environ.copy(),
+            timeout=timeout_seconds,
+            env=run_env,
             input=stdin_data if stdin_data else None,
         )
     except subprocess.TimeoutExpired as exc:
@@ -297,7 +373,7 @@ def terminal_tool(
                 else (exc.stdout or b"").decode("utf-8", "replace")).strip()
         _err = ((exc.stderr or "") if isinstance(exc.stderr, str)
                 else (exc.stderr or b"").decode("utf-8", "replace")).strip()
-        parts = [f"KOMUT {_TIMEOUT} SN'DE ZAMAN ASIMINA UGRADI"]
+        parts = [f"KOMUT {timeout_seconds} SN'DE ZAMAN ASIMINA UGRADI"]
         parts.append("MUHTEMEL SEBEP: Program interaktif (input() bekliyor). "
                      "Input parametresi ile cevap gonderin: {\"command\": \"...\", \"input\": \"1\\n2\\n\"}")
         if _out:
@@ -309,6 +385,9 @@ def terminal_tool(
         return f"Komut bulunamadı: {argv[0]}"
     except OSError as exc:
         return f"Komut çalıştırılamadı: {type(exc).__name__}: {exc}"
+    finally:
+        if diagnostic_home is not None:
+            diagnostic_home.cleanup()
 
     stdout = (proc.stdout or "").strip()
     stderr = (proc.stderr or "").strip()

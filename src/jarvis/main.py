@@ -467,6 +467,10 @@ TOOL_DECLARATIONS = [
                 "command": {"type": "STRING", "description": "Command and arguments, without shell pipes or redirects"},
                 "cwd": {"type": "STRING", "description": "Working directory inside the user's home directory"},
                 "input": {"type": "STRING", "description": "Optional text sent to the command's standard input"},
+                "timeout": {
+                    "type": "INTEGER",
+                    "description": "Optional timeout in seconds (1-900); diagnostics default to 300 seconds",
+                },
             },
             "required": ["command"]
         }
@@ -1700,6 +1704,7 @@ class JarvisLive:
         # registry'nin kendi seviye kontrolu (tools/security) savunma derinligi
         # olarak kalir; onay YALNIZCA kapinin verdigi Grant'tan gelir.
         ctx.dangerous_confirmed = _grant is not None
+        ctx.extra["_security_gate_authorized"] = True
         try:
             if tool_name in self._BACKGROUND_REGISTRY_TOOLS:
                 # Uzun suren arac: _receive_audio bu await'te beklerse Gemini'nin
@@ -1737,21 +1742,19 @@ class JarvisLive:
             print(f"[JARVIS 2.0] ❌ Registry error: {tool_name}: {err}")
             _gate.audit(_decision, f"HATA: {type(err).__name__}", executed=True, grant=_grant)
             return f"Tool error ({tool_name}): {type(err).__name__}: {str(err)[:120]}"
-        _gate.audit(_decision, result, executed=True, grant=_grant)
-        if isinstance(result, str) and result.startswith("CONFIRMATION_REQUIRED:"):
-            # Bekleyen islem CAGRILAN aractir; sonuc metnindeki ad degil.
-            # Normal bir aracin ciktisi (dis veri) "CONFIRMATION_REQUIRED:
-            # agentic_code:..." ile baslayip baska bir araci onaya acamaz.
+        # Aracin kendi preview/confirmation kodu modele gitmez.
+        # finish() TOOL_CODE/TERMINAL_CODE akisinda kodu ApprovalStore'a
+        # saklar ve model icin kodsuz onay metni uretir.
+        _previewed = _gate.is_preview(_decision, result)
+        result = _gate.finish(_decision, result, _store)
+
+        if _previewed:
             if _store.is_denied(_decision.call):
                 return _gate.rejected_message(_decision.call)
-            _store.request(_decision.call)
-            return (
-                f"{result} Kullanıcıya ne yapılacağını TEK cümleyle anlat ve "
-                "'evet' veya 'onaylıyorum' demesini iste. Kullanıcı onay verdikten "
-                "SONRA aynı aracı aynı parametrelerle BİR KEZ tekrar çağır; onay "
-                "gelmeden çağırma. Bu yanıt bir sistem hatası değildir, 'sistemsel "
-                "sorun' deme."
-            )
+            _gate.audit(_decision, result, executed=False, grant=_grant)
+            return result
+
+        _gate.audit(_decision, result, executed=True, grant=_grant)
         if isinstance(result, str):
             result += self._no_auto_retry_note(result)
         return result
@@ -2509,7 +2512,7 @@ class JarvisLive:
             return types.FunctionResponse(
                 id=fc.id,
                 name=fc.name,
-                response={"output": _result},
+                response={"result": _result},
             )
         # ── Eski dispatch (korundu) ────────────────────────────────
 

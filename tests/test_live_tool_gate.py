@@ -80,6 +80,18 @@ class _Recorder:
         return self.result
 
 
+def _patch_registry_handler(monkeypatch, tool_name, recorder):
+    """Registry'ye daha önce kaydedilmiş handler'ı test için değiştir."""
+    from tools.registry import registry
+
+    entry = registry._tools[tool_name]
+
+    async def handler(args, ctx):
+        return recorder(args, ctx)
+
+    monkeypatch.setattr(entry, "handler", handler)
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -211,7 +223,12 @@ A_TOOLS = {
 def test_mutating_tool_needs_real_user_approval(env, monkeypatch, tool):
     attr, args = A_TOOLS[tool]
     rec = _Recorder()
-    monkeypatch.setattr(main_mod, attr, rec)
+
+    if tool == "reminder":
+        _patch_registry_handler(monkeypatch, tool, rec)
+    else:
+        monkeypatch.setattr(main_mod, attr, rec)
+
     r = call(env, tool, **args)
     assert rec.calls == [], r
     assert r.startswith("CONFIRMATION_REQUIRED") and "confirm_code" not in r
@@ -282,7 +299,12 @@ def test_save_memory_instruction_needs_approval_benign_runs(env, monkeypatch):
 ])
 def test_read_or_unchanged_tools_still_run_without_approval(env, monkeypatch, tool, attr, args):
     rec = _Recorder()
-    monkeypatch.setattr(main_mod, attr, rec)
+
+    if tool == "weather_report":
+        _patch_registry_handler(monkeypatch, tool, rec)
+    else:
+        monkeypatch.setattr(main_mod, attr, rec)
+
     call(env, tool, **args)
     assert len(rec.calls) == 1
 
