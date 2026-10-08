@@ -148,7 +148,7 @@ class WaylandBackend:
         # owner process alive only until the target application consumes the paste.
         env = dict(os.environ)
         process = subprocess.Popen(
-            ["wl-copy"],
+            ["wl-copy", "--paste-once"],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -164,7 +164,12 @@ class WaylandBackend:
                 error = process.stderr.read().decode(errors="replace") if process.stderr else ""
                 raise DesktopIOError(f"wl-copy başarısız: {error[:200]}")
             self.hotkey("ctrl", "v")
-            time.sleep(0.15)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                # Some applications do not issue a clipboard request until
+                # their event loop advances; keep a bounded fallback cleanup.
+                pass
         finally:
             if process.poll() is None:
                 process.terminate()
