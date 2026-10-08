@@ -5,6 +5,7 @@ import asyncio
 import concurrent.futures
 import os
 import platform
+import re
 import shutil
 import subprocess
 import threading
@@ -18,6 +19,31 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeout,
 )
 _OS = platform.system()   # "Windows" | "Darwin" | "Linux"
+
+
+def _downloads_dir() -> Path:
+    """Return and create the user's standard Downloads directory."""
+    configured = os.environ.get("XDG_DOWNLOAD_DIR", "").strip()
+    path = Path(configured).expanduser() if configured else Path.home() / "Downloads"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _safe_download_path(suggested_filename: str) -> Path:
+    """Create a collision-safe path strictly below Downloads."""
+    name = Path(suggested_filename or "download.bin").name
+    name = re.sub(r"[^A-Za-z0-9._()\[\] -]", "_", name).strip(" .")
+    if not name or name in {".", ".."}:
+        name = "download.bin"
+    directory = _downloads_dir().resolve()
+    candidate = directory / name
+    counter = 1
+    while candidate.exists():
+        stem = Path(name).stem
+        suffix = Path(name).suffix
+        candidate = directory / f"{stem} ({counter}){suffix}"
+        counter += 1
+    return candidate
 
 def _normalize_url(url: str) -> str:
     """
@@ -577,6 +603,26 @@ class _BrowserSession:
         except Exception as e:
             return f"Click error: {e}"
 
+    async def download(self, selector: str | None = None, text: str | None = None) -> str:
+        """Click a download control and save the resulting file safely."""
+        if not selector and not text:
+            return "Download requires selector or text."
+        page = await self._get_page()
+        try:
+            async with page.expect_download(timeout=30_000) as download_info:
+                if text:
+                    await page.get_by_text(text, exact=False).first.click(timeout=8_000)
+                else:
+                    await page.click(selector, timeout=8_000)
+            download = await download_info.value
+            target = _safe_download_path(download.suggested_filename)
+            await download.save_as(str(target))
+            return f"Downloaded: {target} ({target.stat().st_size} bytes)"
+        except PlaywrightTimeout:
+            return "Download timed out or the element did not trigger a download."
+        except Exception as e:
+            return f"Download error: {e}"
+
     async def type_text(self, selector: str | None = None, text: str = "",
                         clear_first: bool = True) -> str:
         page = await self._get_page()
@@ -841,6 +887,8 @@ def browser_control(
             result = sess.run(sess.search(params.get("query", ""), params.get("engine", "google")))
         elif action == "click":
             result = sess.run(sess.click(params.get("selector"), params.get("text")))
+        elif action == "download":
+            result = sess.run(sess.download(params.get("selector"), params.get("text")))
         elif action == "type":
             result = sess.run(sess.type_text(
                 params.get("selector"), params.get("text", ""), params.get("clear_first", True)))
