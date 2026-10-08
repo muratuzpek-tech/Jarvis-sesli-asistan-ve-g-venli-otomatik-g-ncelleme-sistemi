@@ -130,16 +130,49 @@ class WaylandBackend:
             raise DesktopIOError("wl-clipboard kurulu değil (sudo apt install wl-clipboard)")
         code, previous = self._run(["wl-paste", "--no-newline"], None)
         had_previous = code == 0
-        code, out = self._run(["wl-copy"], text.encode("utf-8"))
-        if code != 0:
-            raise DesktopIOError(f"wl-copy başarısız: {out.decode(errors='replace')[:200]}")
-        time.sleep(0.05)
-        self.hotkey("ctrl", "v")
-        time.sleep(0.15)  # uygulama panoyu okusun
-        if had_previous:
-            self._run(["wl-copy"], previous)
-        else:
-            self._run(["wl-copy", "--clear"], None)
+        if self._run is not _default_runner:
+            code, out = self._run(["wl-copy"], text.encode("utf-8"))
+            if code != 0:
+                raise DesktopIOError(f"wl-copy başarısız: {out.decode(errors='replace')[:200]}")
+            time.sleep(0.05)
+            self.hotkey("ctrl", "v")
+            time.sleep(0.15)
+            if had_previous:
+                self._run(["wl-copy"], previous)
+            else:
+                self._run(["wl-copy", "--clear"], None)
+            return
+
+        # wl-copy deliberately stays alive while it owns the clipboard. Waiting
+        # with subprocess.run() deadlocks before Ctrl+V can be sent, so keep the
+        # owner process alive only until the target application consumes the paste.
+        env = dict(os.environ)
+        process = subprocess.Popen(
+            ["wl-copy"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        try:
+            if process.stdin is None:
+                raise DesktopIOError("wl-copy stdin açılamadı")
+            process.stdin.write(text.encode("utf-8"))
+            process.stdin.close()
+            time.sleep(0.05)
+            if process.poll() not in (None, 0):
+                error = process.stderr.read().decode(errors="replace") if process.stderr else ""
+                raise DesktopIOError(f"wl-copy başarısız: {error[:200]}")
+            self.hotkey("ctrl", "v")
+            time.sleep(0.15)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1)
 
     # ── fare ─────────────────────────────────────────────────────────────
     def moveTo(self, x: float | None = None, y: float | None = None, duration: float = 0.0, **_: object) -> None:  # noqa: N802

@@ -420,7 +420,7 @@ def computer_control(
 
     try:
 
-        if action == "type":
+        if action in ("type", "type_text"):
             return _type(params.get("text", ""))
 
         if action == "smart_type":
