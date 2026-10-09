@@ -43,7 +43,15 @@ jobs:
       - name: Lint with ruff
         run: ruff check .
 
-      - name: Run tests
+      - name: Run full tests (Linux)
+        if: runner.os == 'Linux'
         run: pytest
         env:
           JARVIS_HOME: ${{ runner.temp }}/jarvis_ci_home
+
+      - name: Windows import and collection smoke
+        if: runner.os == 'Windows'
+        run: |
+          python -m compileall -q src/jarvis scripts
+          python -c "import runpy; ns=runpy.run_path('scripts/self_dev.py'); assert ns['fcntl'] is None; print('Windows import OK')"
+          python -m pytest --collect-only -q tests/test_self_dev.py
