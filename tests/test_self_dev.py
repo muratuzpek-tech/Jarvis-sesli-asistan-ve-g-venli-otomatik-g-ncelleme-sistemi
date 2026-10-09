@@ -6,7 +6,6 @@ deposu degil). HOME tmp_path altindadir; AgenticCoder yerine senaryolu sahte
 coder, Ollama/disk/saat/Jarvis-sureci kontrolleri yerine enjekte fonksiyonlar
 kullanilir. Gercek ag, gercek Ollama, gercek MuratJARVIS verisi yok.
 """
-import fcntl
 import importlib.util
 import json
 import os
@@ -457,6 +456,7 @@ def test_running_jarvis_is_reported_not_killed(sd, env, sandbox):
 # ── 6) kilit ──
 
 def test_second_instance_does_not_start(sd, env, sandbox):
+    fcntl = pytest.importorskip("fcntl", reason="fcntl.flock is POSIX-only")
     lock = env["self"] / "lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     calls: list = []
@@ -719,6 +719,7 @@ def _fake_systemctl(env) -> tuple[dict, Path]:
     return run_env, marker
 
 
+@pytest.mark.skipif(os.name == "nt", reason="systemd and POSIX preexec_fn are unavailable on Windows")
 def test_install_and_uninstall_service_only_write_unit_file(sd, env):
     run_env, marker = _fake_systemctl(env)
     backlog = write_backlog(env, "- [ ] a")
@@ -746,6 +747,7 @@ def test_install_and_uninstall_service_only_write_unit_file(sd, env):
     assert not marker.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="preexec_fn is POSIX-only")
 def test_run_forever_with_stdin_closed(sd, env, sandbox):
     driver = env["tmp"] / "surucu.py"
     driver.write_text(
