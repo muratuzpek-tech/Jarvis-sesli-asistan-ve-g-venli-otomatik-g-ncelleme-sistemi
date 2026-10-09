@@ -306,7 +306,13 @@ def test_only_the_gated_paths_import_the_gate():
     import ast
     root = Path(__file__).resolve().parents[1]
     users = []
-    for path in list((root / "src").rglob("*.py")) + list((root / "tools").rglob("*.py")):
+    for path in (
+        [
+            p for p in (root / "src").rglob("*.py")
+            if "jarvis_yedekler" not in p.relative_to(root).parts
+        ]
+        + list((root / "tools").rglob("*.py"))
+    ):
         if path.name == "security_gate.py":
             continue
         try:

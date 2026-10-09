@@ -199,3 +199,69 @@ def test_falls_back_to_pyautogui_and_raises_importerror_when_unusable(monkeypatc
     except Exception:
         pyautogui = None
     assert pyautogui is None and mod is not None
+
+def test_write_fails_if_clipboard_copy_fails():
+    r = FakeRunner(fail={"wl-copy"})
+    with pytest.raises(DesktopIOError, match="wl-copy başarısız"):
+        backend(r, layout="tr").write("Türkçe metin")
+
+
+def test_write_does_not_paste_if_clipboard_read_fails():
+    r = FakeRunner(fail={"wl-paste"})
+    with pytest.raises(DesktopIOError, match="(?i)panodaki içerik okunamadı"):
+        backend(r, layout="tr").write("Türkçe metin")
+    assert not r.ydotool()
+
+
+def test_real_wayland_path_restores_previous_clipboard(monkeypatch):
+    """Gerçek süreç yolu, yapıştırma sonrasında önceki metni geri yüklemeli."""
+    from types import SimpleNamespace
+    from jarvis.desktop_io import wayland
+
+    run_calls = []
+    pasted_data = []
+
+    class FakeStdin:
+        def write(self, data):
+            pasted_data.append(data)
+
+        def close(self):
+            pass
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = FakeStdin()
+            self.stderr = None
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+        def terminate(self):
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+    def fake_run(args, input=None, **kwargs):
+        args = list(args)
+        run_calls.append((args, input))
+        if args[0] == "wl-paste":
+            return SimpleNamespace(returncode=0, stdout=b"eski pano", stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(wayland.shutil, "which", lambda _: "/usr/bin/wl-copy")
+    monkeypatch.setattr(wayland.subprocess, "run", fake_run)
+    monkeypatch.setattr(wayland.subprocess, "Popen", lambda *a, **kw: FakeProcess())
+    monkeypatch.setattr(wayland.time, "sleep", lambda _: None)
+
+    b = WaylandBackend(layout="tr")
+    b.PAUSE = 0
+    b.write("Türkçe metin")
+
+    assert pasted_data == ["Türkçe metin".encode("utf-8")]
+    assert (["wl-copy"], b"eski pano") in run_calls

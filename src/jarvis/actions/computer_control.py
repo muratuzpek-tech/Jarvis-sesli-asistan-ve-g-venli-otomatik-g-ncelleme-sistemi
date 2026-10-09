@@ -17,7 +17,7 @@ from pathlib import Path
 from jarvis.paths import memory_dir
 
 try:
-    from jarvis.desktop_io import gui as pyautogui
+    from jarvis.desktop_io import backend_name, gui as pyautogui
     pyautogui.FAILSAFE = True
     pyautogui.PAUSE    = 0.05
     _PYAUTOGUI = True
@@ -170,6 +170,10 @@ def _smart_type(text: str, clear_first: bool = True) -> str:
         _clear_field()
         time.sleep(0.1)
 
+    if backend_name() == "wayland-ydotool":
+        pyautogui.typewrite(text, interval=0.04)
+        return f"Smart-typed (desktop backend): {text[:60]}{'…' if len(text) > 60 else ''}"
+
     if len(text) > 20 and _PYPERCLIP:
         pyperclip.copy(text)
         time.sleep(0.1)
@@ -232,13 +236,19 @@ def _clipboard_get() -> str:
 
 
 def _clipboard_paste(text: str) -> str:
+    _require_pyautogui()
+
+    if backend_name() == "wayland-ydotool":
+        pyautogui.typewrite(text, interval=0.0)
+        return f"Pasted (desktop backend): {text[:60]}{'…' if len(text) > 60 else ''}"
+
     if _PYPERCLIP:
         pyperclip.copy(text)
         time.sleep(0.1)
-        _require_pyautogui()
         paste_key = "command" if _get_os() == "mac" else "ctrl"
         pyautogui.hotkey(paste_key, "v")
         return f"Pasted: {text[:60]}{'…' if len(text) > 60 else ''}"
+
     return "pyperclip not available"
 
 

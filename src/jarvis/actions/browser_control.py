@@ -47,18 +47,27 @@ def _safe_download_path(suggested_filename: str) -> Path:
 
 def _normalize_url(url: str) -> str:
     """
-    Bare words like "instagram" → "https://instagram.com"
-    Domains like "instagram.com" → "https://instagram.com"
-    Full URLs pass through unchanged.
+    Normalize website addresses while preserving special URL schemes.
+    Bare words like "instagram" become "https://instagram.com".
     """
     url = url.strip()
     if not url:
         return "about:blank"
+
+    # Preserve browser-internal and non-HTTP schemes.
+    if re.match(
+        r"^(?:https?|ftp|file|data|blob|about|javascript):",
+        url,
+        re.IGNORECASE,
+    ):
+        return url
+
     if "://" in url:
         return url
-    # No dot at all → assume .com  (e.g. "instagram" → "instagram.com")
+
     if "." not in url:
-        url = url + ".com"
+        url += ".com"
+
     return "https://" + url
 
 
@@ -382,6 +391,7 @@ class _BrowserSession:
         self._loop:    asyncio.AbstractEventLoop | None = None
         self._thread:  threading.Thread | None          = None
         self._ready    = threading.Event()
+        self._startup_error: Exception | None = None
 
         self._pw:      Playwright     | None = None
         self._context: BrowserContext | None = None
@@ -389,21 +399,58 @@ class _BrowserSession:
 
     def start(self):
         if self._thread and self._thread.is_alive():
+            if not self._ready.wait(timeout=20):
+                raise TimeoutError(
+                    f"Browser session '{self.browser_name}' "
+                    "did not become ready within 20 seconds."
+                )
+            if self._startup_error is not None:
+                raise RuntimeError(
+                    f"Could not initialize browser session "
+                    f"'{self.browser_name}': {self._startup_error}"
+                ) from self._startup_error
             return
+
+        self._ready.clear()
+        self._startup_error = None
         self._thread = threading.Thread(
             target=self._run_loop,
             daemon=True,
             name=f"BrowserThread-{self.browser_name}",
         )
         self._thread.start()
-        self._ready.wait(timeout=20)
+
+        if not self._ready.wait(timeout=20):
+            raise TimeoutError(
+                f"Browser session '{self.browser_name}' "
+                "did not become ready within 20 seconds."
+            )
+
+        if self._startup_error is not None:
+            raise RuntimeError(
+                f"Could not initialize browser session "
+                f"'{self.browser_name}': {self._startup_error}"
+            ) from self._startup_error
 
     def _run_loop(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._async_init())
+
+        try:
+            self._loop.run_until_complete(self._async_init())
+        except Exception as exc:
+            self._startup_error = exc
+            print(
+                f"[Browser] ERROR: Could not initialize session "
+                f"'{self.browser_name}': {exc}"
+            )
+            self._loop.close()
+            self._ready.set()
+            return
+
         self._ready.set()
         self._loop.run_forever()
+
 
     async def _async_init(self):
         self._pw = await async_playwright().start()
@@ -450,28 +497,25 @@ class _BrowserSession:
         engine_obj  = getattr(self._pw, engine_name)
 
         if engine_name == "firefox":
-            profile = _firefox_profile_dir() or str(
-                Path.home() / ".jarvis_profiles" / "firefox"
-            )
+            # Jarvis otomasyonu normal Firefox profilinden izole çalışır.
+            # executable_path özellikle verilmez: Playwright'ın yönettiği
+            # ve "playwright install firefox" ile kurulan Firefox kullanılır.
+            profile = Path.home() / ".jarvis_profiles" / "firefox_jarvis"
+            profile.mkdir(parents=True, exist_ok=True)
+
             kwargs: dict = {
-                "headless":    False,
-                "slow_mo":     0,
-                "viewport":    None,
+                "headless": False,
+                "slow_mo": 0,
+                "viewport": None,
                 "no_viewport": True,
             }
-            if exe:
-                kwargs["executable_path"] = exe
-            try:
-                self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
-            except Exception as e:
-                print(f"[Browser] Firefox real profile failed ({e}), using JARVIS profile")
-                jarvis = str(Path.home() / ".jarvis_profiles" / "firefox_jarvis")
-                Path(jarvis).mkdir(parents=True, exist_ok=True)
-                self._context = await engine_obj.launch_persistent_context(jarvis, **kwargs)
 
-            await asyncio.sleep(0.5)  
+            self._context = await engine_obj.launch_persistent_context(
+                str(profile), **kwargs
+            )
+            await asyncio.sleep(0.5)
             self._page = await self._context.new_page()
-            print("[Browser] ✅ Firefox launched")
+            print(f"[Browser] ✅ Firefox launched with JARVIS profile: {profile}")
             return
 
         if engine_name == "webkit":
@@ -518,7 +562,7 @@ class _BrowserSession:
 
         try:
             self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
-            await asyncio.sleep(0.5) 
+            await asyncio.sleep(0.5)
             self._page = await self._context.new_page()
             print(f"[Browser] ✅ Launched [{label}] profile={profile}")
             return
@@ -663,6 +707,15 @@ class _BrowserSession:
     async def get_url(self) -> str:
         page = await self._get_page()
         return page.url
+
+    async def get_title(self) -> str:
+        """Return the title of the currently active page."""
+        page = await self._get_page()
+        try:
+            title = await page.title()
+            return title or "(Sayfa başlığı boş)"
+        except Exception as e:
+            return f"Could not get page title: {e}"
 
     async def fill_form(self, fields: dict) -> str:
         page    = await self._get_page()
@@ -904,6 +957,8 @@ def browser_control(
             result = sess.run(sess.get_text())
         elif action == "get_url":
             result = sess.run(sess.get_url())
+        elif action == "get_title":
+            result = sess.run(sess.get_title())
         elif action == "press":
             result = sess.run(sess.press(params.get("key", "Enter")))
         elif action == "new_tab":

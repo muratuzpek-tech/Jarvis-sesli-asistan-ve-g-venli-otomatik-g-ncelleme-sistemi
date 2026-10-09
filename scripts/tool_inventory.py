@@ -463,7 +463,16 @@ def build_inventory(with_policies: bool = True) -> list[ToolInfo]:
                 info.key_types.setdefault(k, set()).update(ts)
             info.used_keys |= _agentic_redirect_keys(main_tree, body)
             for mod, fn, idx in handlers:
-                info.handlers.append(f"{mod.rsplit('.', 1)[-1]}.{fn}")
+                handler_name = f"{mod.rsplit('.', 1)[-1]}.{fn}"
+                info.handlers.append(handler_name)
+
+                # computer_settings delegates only typing actions to
+                # computer_control. Do not merge the latter's complete
+                # parameter surface into the computer_settings schema:
+                # the delegated action is conditional and separately declared.
+                if info.name == "computer_settings" and handler_name == "computer_control.computer_control":
+                    continue
+
                 tree = module_trees.get(mod)
                 if tree is None:
                     tree = module_trees[mod] = _parse(_module_path(mod))
