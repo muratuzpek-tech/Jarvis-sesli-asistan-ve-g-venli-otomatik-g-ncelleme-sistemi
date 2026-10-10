@@ -6,29 +6,43 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from jarvis.core.secure_config import load_config
+from jarvis.paths import data_dir
+
 _CNW: dict = (
     {"creationflags": subprocess.CREATE_NO_WINDOW}
     if platform.system() == "Windows" else {}
 )
 
-def _base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
-
 
 def _get_os() -> str:
-    try:
-        cfg = json.loads(
-            (_base_dir() / "config" / "api_keys.json").read_text(encoding="utf-8")
-        )
-        return cfg.get("os_system", "windows").lower()
-    except Exception:
+    """Read the configured OS if present, otherwise use the actual runtime OS.
+
+    This keeps reminder scheduling aligned with the selected user-data boundary
+    instead of assuming a package-local config file exists under the source tree.
+    """
+    cfg = load_config()
+    raw = str(cfg.get("os_system", "")).strip().lower()
+    if raw in {"windows", "win"}:
         return "windows"
+    if raw in {"mac", "darwin"}:
+        return "mac"
+    if raw in {"linux", "linux2"}:
+        return "linux"
+
+    system = platform.system().lower()
+    if system == "darwin":
+        return "mac"
+    if system == "windows":
+        return "windows"
+    return "linux" if system.startswith("linux") else system
 
 
 def _scripts_dir() -> Path:
-    d = Path.home() / ".jarvis" / "reminders"
+    # Keep reminder artifacts in the user data directory, not in the source tree or
+    # the user's home directory. This matches the rest of the application,
+    # including JARVIS_HOME overrides.
+    d = data_dir() / "reminders"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -43,9 +57,10 @@ def _sanitise(text: str, max_len: int = 200) -> str:
             .strip()
     )[:max_len]
 
+
 def _write_notify_script(task_name: str, message: str, os_name: str) -> Path:
     script_path = _scripts_dir() / f"{task_name}.py"
-    msg_literal = json.dumps(message)  
+    msg_literal = json.dumps(message)
 
     if os_name == "windows":
         notify_block = f"""
@@ -140,8 +155,9 @@ except Exception:
     pass
 """
     script_path.write_text(script_body, encoding="utf-8")
-    script_path.chmod(0o600)   # owner read/write only
+    script_path.chmod(0o600)
     return script_path
+
 
 def _schedule_windows(target_dt: datetime, task_name: str,
                       script_path: Path, message: str) -> str:
@@ -194,7 +210,7 @@ def _schedule_windows(target_dt: datetime, task_name: str,
         script_path.unlink(missing_ok=True)
         err = (result.stderr or result.stdout).strip()
         print(f"[Reminder] ❌ schtasks: {err}")
-        return ""  
+        return ""
 
     return task_name
 
@@ -204,7 +220,7 @@ def _schedule_mac(target_dt: datetime, task_name: str,
     agents_dir = Path.home() / "Library" / "LaunchAgents"
     agents_dir.mkdir(parents=True, exist_ok=True)
 
-    label     = f"com.jarvis.reminder.{task_name}"
+    label = f"com.jarvis.reminder.{task_name}"
     plist_path = agents_dir / f"{label}.plist"
 
     plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -272,7 +288,7 @@ def _schedule_linux(target_dt: datetime, task_name: str,
     if shutil.which("at"):
         at_time = target_dt.strftime("%H:%M %Y-%m-%d")
         cmd_str = f"{sys.executable} {script_path}\n"
-        result  = subprocess.run(
+        result = subprocess.run(
             ["at", at_time],
             input=cmd_str, capture_output=True, text=True,
         )
@@ -284,6 +300,7 @@ def _schedule_linux(target_dt: datetime, task_name: str,
     print("[Reminder] ❌ Neither systemd-run nor at found on this Linux system.")
     return ""
 
+
 def reminder(
     parameters: dict,
     response=None,
@@ -293,7 +310,7 @@ def reminder(
 
     date_str = parameters.get("date", "").strip()
     time_str = parameters.get("time", "").strip()
-    message  = parameters.get("message", "Reminder").strip()
+    message = parameters.get("message", "Reminder").strip()
 
     if not date_str or not time_str:
         return "I need both a date and a time to set a reminder."
@@ -306,9 +323,9 @@ def reminder(
     if target_dt <= datetime.now():
         return "That time has already passed — I can't set a reminder in the past."
 
-    os_name    = _get_os()
-    safe_msg   = _sanitise(message)
-    task_name  = f"JARVISReminder_{target_dt.strftime('%Y%m%d_%H%M%S')}"
+    os_name = _get_os()
+    safe_msg = _sanitise(message)
+    task_name = f"JARVISReminder_{target_dt.strftime('%Y%m%d_%H%M%S')}"
 
     try:
         script_path = _write_notify_script(task_name, safe_msg, os_name)
@@ -335,3 +352,4 @@ def reminder(
 
     friendly_time = target_dt.strftime("%B %d at %I:%M %p")
     return f"Reminder set for {friendly_time}."
+

@@ -209,3 +209,18 @@ def test_model_live_never_denies_declared_tool():
 @pytest.mark.parametrize("name", _params(TOOL_NAMES, KNOWN_UNTESTED))
 def test_tool_is_mentioned_in_tests(name):
     assert _inv()[name].test_files, f"{name}: tests/ altında anan test yok"
+
+
+
+
+def test_computer_settings_conditional_handler_does_not_leak_params():
+    settings = _inv()["computer_settings"]
+    control = _inv()["computer_control"]
+
+    # Her iki araçta da işleyici kaydı korunmalı.
+    assert "computer_control.computer_control" in settings.handlers
+    assert "computer_control.computer_control" in control.handlers
+
+    # Koşullu yönlendirme, parametreleri yanlış araca aktarmamalı.
+    assert settings.param_problems() == []
+    assert control.param_problems() == []
