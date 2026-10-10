@@ -2054,7 +2054,7 @@ def _probe_web_app(run_command: str, project_dir: Path, file_codes: dict[str, st
     başlatılır, yerel adresi bulunana kadar denenir, sayfa indirilir, içinde tablo
     satırı aranır, sonra süreç ağacı öldürülür. (başarılı mı, açıklama)."""
     import tempfile
-    import urllib.request
+    import requests
     code = "\n".join(file_codes.values())
     ports = [int(p) for p in re.findall(r"port\s*=\s*(\d{2,5})", code)]
     ports += [5000, 8000, 8080]
@@ -2095,8 +2095,13 @@ def _probe_web_app(run_command: str, project_dir: Path, file_codes: dict[str, st
                 for port in dict.fromkeys([*map(int, printed), *ports]):
                     url = f"http://127.0.0.1:{port}/"
                     try:
-                        with urllib.request.urlopen(url, timeout=3) as resp:  # nosec B310: sabit yerel adres
-                            html = resp.read(500_000).decode("utf-8", "replace")
+                        parsed = requests.utils.urlparse(url)
+                        if parsed.scheme != "http" or parsed.hostname != "127.0.0.1":
+                            continue
+                        resp = requests.get(url, timeout=3, allow_redirects=False, stream=True)
+                        resp.raise_for_status()
+                        with resp:
+                            html = resp.raw.read(500_000).decode("utf-8", "replace")
                     except Exception:  # noqa: BLE001
                         continue
                     rows = len(re.findall(r"<tr[\s>]", html, re.I))

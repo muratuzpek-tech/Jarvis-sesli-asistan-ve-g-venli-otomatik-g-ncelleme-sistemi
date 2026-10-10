@@ -121,7 +121,8 @@ def profil_kaydet(cihaz: int | None) -> int:
     # 2026-09-30'da TV 0.64 alıp "siz" sayıldı).
     esik = round(float(min(0.80, max(0.45, kendi - 0.12))), 2)
     vg.VOICE_DIR.mkdir(parents=True, exist_ok=True)
-    os.chmod(vg.VOICE_DIR, 0o700)
+    # Ses profili biyometrik veridir; dizin yalnızca kullanıcıya açık olmalıdır.
+    os.chmod(vg.VOICE_DIR, 0o700)  # nosemgrep
     with open(vg.PROFILE_PATH, "wb") as fh:
         np.save(fh, profil.astype(np.float32))
     os.chmod(vg.PROFILE_PATH, 0o600)

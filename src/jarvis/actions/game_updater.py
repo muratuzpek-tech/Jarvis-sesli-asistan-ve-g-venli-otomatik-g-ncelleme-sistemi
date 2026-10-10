@@ -494,16 +494,19 @@ def _search_steam_appid(game_name: str) -> tuple[str | None, str | None]:
             return app_id, canonical
 
     try:
-        import urllib.request
-        import urllib.parse
-        query = urllib.parse.quote(game_name)
+        import requests
+        from urllib.parse import quote, urlsplit
+        query = quote(game_name)
         url   = f"https://store.steampowered.com/api/storesearch/?term={query}&l=english&cc=US"
-        parsed = urllib.parse.urlsplit(url)
+        parsed = urlsplit(url)
         if parsed.scheme != "https" or parsed.netloc.lower() != "store.steampowered.com":
             return None, None
-        req   = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=6) as resp:  # nosec B310: fixed HTTPS Steam host is validated above.
-            items = json.loads(resp.read().decode()).get("items", [])
+        resp = requests.get(
+            url, headers={"User-Agent": "Mozilla/5.0"}, timeout=6,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
         if items:
             best = items[0]
             print(f"[GameUpdater] 🌐 Store API: {best['name']} ({best['id']})")

@@ -15,7 +15,6 @@ import time
 import base64
 import hashlib
 import urllib.parse
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -94,15 +93,22 @@ def _download_update(url: str, expected_origin: str, limit: int = UPDATE_MAX_BYT
     origin = f"{parsed.scheme}://{parsed.netloc}".lower()
     if parsed.scheme != "https" or origin != expected_origin.lower():
         raise ValueError("Güncelleme yalnızca yapılandırılmış HTTPS kaynağından alınabilir.")
-    request = urllib.request.Request(url, headers={"User-Agent": "Jarvis-Signed-Updater/1.0"})
-    with urllib.request.urlopen(request, timeout=15) as response:  # nosec B310: HTTPS URL and exact configured origin are validated above.
-        size = response.headers.get("Content-Length")
-        if size and int(size) > limit:
-            raise ValueError("Güncelleme boyut sınırını aşıyor.")
-        content = response.read(limit + 1)
-    if len(content) > limit:
+    import requests
+    response = requests.get(
+        url, headers={"User-Agent": "Jarvis-Signed-Updater/1.0"},
+        timeout=15, allow_redirects=False, stream=True,
+    )
+    response.raise_for_status()
+    size = response.headers.get("Content-Length")
+    if size and int(size) > limit:
         raise ValueError("Güncelleme boyut sınırını aşıyor.")
-    return content
+    content = bytearray()
+    with response:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            content.extend(chunk)
+            if len(content) > limit:
+                raise ValueError("Güncelleme boyut sınırını aşıyor.")
+    return bytes(content)
 
 
 def _check_signed_self_update(force: bool = False) -> str:

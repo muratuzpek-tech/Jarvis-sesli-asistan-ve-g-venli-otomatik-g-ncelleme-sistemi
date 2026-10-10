@@ -227,15 +227,16 @@ for (var i = 0; i < allDesktops.length; i++) {{
 
 def set_wallpaper_from_url(url: str) -> str:
     try:
-        import urllib.parse
-        import urllib.request
+        import requests
         suffix = Path(url.split("?")[0]).suffix or ".jpg"
-        parsed = urllib.parse.urlsplit(url)
-        if parsed.scheme.lower() != "https":
+        parsed = requests.utils.urlparse(url)
+        if parsed.scheme.lower() != "https" or not parsed.hostname:
             return "Could not download wallpaper: only HTTPS URLs are allowed."
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp_path = Path(tmp.name)
-        with urllib.request.urlopen(url, timeout=30) as response, tmp_path.open("wb") as out:  # nosec B310: HTTPS-only URL is validated above.
+        response = requests.get(url, timeout=30, allow_redirects=False, stream=True)
+        response.raise_for_status()
+        with response, tmp_path.open("wb") as out:
             total = 0
             while chunk := response.read(1024 * 1024):
                 total += len(chunk)

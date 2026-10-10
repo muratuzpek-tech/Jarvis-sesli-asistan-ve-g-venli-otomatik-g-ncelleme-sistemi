@@ -65,11 +65,15 @@ def ensure_speaker_model(log=print) -> Path:
     """Ses izi modelini (26 MB) bir kez indirir ve SHA-256 ile doğrular."""
     if SPEAKER_MODEL_PATH.is_file() and _sha256(SPEAKER_MODEL_PATH) == SPEAKER_MODEL_SHA256:
         return SPEAKER_MODEL_PATH
-    import urllib.request
+    import requests
     VOICE_DIR.mkdir(parents=True, exist_ok=True)
     tmp = SPEAKER_MODEL_PATH.with_suffix(".indiriliyor")
     log("Ses tanıma modeli indiriliyor (26 MB, bir kez)…")
-    urllib.request.urlretrieve(SPEAKER_MODEL_URL, tmp)  # nosec B310: sabit https adresi + SHA-256 kontrolü
+    response = requests.get(SPEAKER_MODEL_URL, timeout=60, allow_redirects=False, stream=True)
+    response.raise_for_status()
+    with response, tmp.open("wb") as output:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            output.write(chunk)
     if _sha256(tmp) != SPEAKER_MODEL_SHA256:
         tmp.unlink(missing_ok=True)
         raise RuntimeError("indirilen ses modeli doğrulanamadı (SHA-256 uyuşmadı); kullanılmadı")
