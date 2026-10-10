@@ -5,10 +5,12 @@ import json
 import os
 import platform
 import random
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import psutil
@@ -20,7 +22,7 @@ else:
 
 from PyQt6.QtCore import (
     QPointF, QRectF, Qt,
-    QTimer, pyqtSignal,
+    QThread, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QDragEnterEvent, QDropEvent, QFont, QKeySequence, QLinearGradient, QPainter, QPen, QPixmap,
@@ -28,11 +30,17 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QSizePolicy, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 from jarvis.core.secure_config import get_gemini_api_key, load_config, save_config, api_keys_path
 from jarvis.paths import memory_dir, tasks_dir
+from jarvis.network_discovery import (
+    LocalIPv4Network, NetworkScopeError, ScanSnapshot,
+    active_local_networks, parse_scope, scan_lan, service_labels,
+    suggested_scope,
+)
 
 
 def _base_dir() -> Path:
@@ -1458,6 +1466,523 @@ class VoiceHudWidget(QWidget):
             p.drawLine(QPointF(x, mid - amp), QPointF(x, mid + amp))
 
 
+
+class SystemNetworkWidget(QWidget):
+    node_selected = pyqtSignal(str)
+
+    WIDTH = 1000
+    HEIGHT = 760
+    NODES = (
+        ("main", 500, 335, 54, "JARVIS", "core"),
+        ("ui", 130, 150, 38, "Arayüz", "core"),
+        ("voice", 105, 335, 40, "Ses + Live", "core"),
+        ("memory", 135, 520, 40, "Hafıza", "memory"),
+        ("history", 300, 625, 39, "Konuşma", "memory"),
+        ("storage", 335, 150, 40, "Yerel veri", "support"),
+        ("web", 820, 150, 42, "Web & arama", "actions"),
+        ("desktop", 880, 310, 42, "Masaüstü", "actions"),
+        ("files", 820, 475, 42, "Dosya & kod", "actions"),
+        ("tasks", 700, 565, 42, "Görevler", "actions"),
+        ("system", 505, 565, 42, "Sistem", "support"),
+        ("integrations", 930, 535, 42, "Bağlantılar", "actions"),
+        ("brain", 500, 440, 48, "Beyin takımı", "brain"),
+        ("brain_support", 350, 510, 30, "Takım altyapısı", "support"),
+        ("planner", 115, 690, 26, "Planner", "brain"),
+        ("research", 235, 690, 26, "Research", "brain"),
+        ("coder", 355, 690, 26, "Coder", "brain"),
+        ("security", 475, 690, 26, "Security", "brain"),
+        ("brain_memory", 595, 690, 26, "Memory AI", "brain"),
+        ("executor", 715, 690, 26, "Executor", "brain"),
+        ("auditor", 835, 690, 26, "Auditor", "brain"),
+    )
+    EDGES = (
+        ("main", "ui"), ("main", "voice"), ("main", "memory"), ("main", "history"),
+        ("main", "storage"), ("main", "web"), ("main", "desktop"), ("main", "files"),
+        ("main", "tasks"), ("main", "system"), ("main", "integrations"), ("main", "brain"),
+        ("ui", "storage"), ("memory", "storage"), ("tasks", "storage"),
+        ("brain", "brain_support"), ("brain", "planner"), ("brain", "research"),
+        ("brain", "coder"), ("brain", "security"), ("brain", "brain_memory"),
+        ("brain", "executor"), ("brain", "auditor"),
+    )
+    DETAILS = {
+        "main": ("src/jarvis/main.py", "Canlı sesli oturumun ve araç çağrılarının ana giriş noktası."),
+        "ui": ("src/jarvis/ui.py", "JarvisUI penceresi; konuşma, görev ve sistem sayfalarını oluşturur."),
+        "voice": ("src/jarvis/main.py · google.genai · sounddevice", "Gemini Live oturumu ve ses giriş/çıkış akışı."),
+        "memory": ("src/jarvis/memory/memory_manager.py · sanitizer.py", "Konuşma bağlamını okur ve kullanıcı hafızasını günceller."),
+        "history": ("src/jarvis/actions/conversation_log.py", "Gerçek kullanıcı ve Jarvis konuşma turlarını kaydeder ve geri çağırır."),
+        "storage": ("src/jarvis/paths.py · core/secure_config.py · memory/sanitizer.py", "Yerel veri yolları, güvenli kullanıcı ayarları ve hafıza temizliği."),
+        "web": ("src/jarvis/actions/browser_control.py · web_search.py · github_arama.py", "main.py içindeki araç yönlendiricisinin web ve arama modülleri."),
+        "desktop": ("src/jarvis/actions/open_app.py · desktop.py · computer_control.py · computer_settings.py · powershell_control.py", "Uygulama, masaüstü ve açıkça istenen komut işlemleri."),
+        "files": ("src/jarvis/actions/file_controller.py · file_processor.py · code_helper.py · dev_agent.py · self_improve.py", "Dosya ve geliştirme araçları; main.py tarafından yönlendirilir."),
+        "tasks": ("src/jarvis/actions/agent_board.py · agent_loop.py · automation.py · reminder.py", "Görev panosu, arka plan agent döngüsü, otomasyon ve hatırlatıcılar."),
+        "system": ("src/jarvis/actions/system_monitor.py · health_check.py · audio_devices.py · resilience.py · proactive.py · pattern_tracker.py", "Sistem sağlığı ve dayanıklılık araçları."),
+        "integrations": ("src/jarvis/actions/send_message.py · weather_report.py · flight_finder.py · youtube_video.py · game_updater.py · discovered_topydo.py · discovered_jc.py", "Mesaj, hava, uçuş, medya ve keşfedilmiş araç bağlantıları."),
+        "brain": ("src/jarvis/core/brain_orchestrator.py", "Canlı oturum açılınca gerçek arka plan görev döngüsü başlar; uzman beyinlerin durumları heartbeat ile izlenir."),
+        "brain_support": ("src/jarvis/core/message_bus.py · task_manager.py · watchdog.py · src/jarvis/actions/capability_resolver.py", "Beyin takımının içe aktardığı görev, mesaj ve izleme altyapısı."),
+        "planner": ("src/jarvis/brains/planner_ai.py", "Beyin takımında görev adımlarını planlar."),
+        "research": ("src/jarvis/brains/research_ai.py", "Beyin takımında araştırma adımlarını yürütür."),
+        "coder": ("src/jarvis/brains/coder_ai.py", "Beyin takımının kod üretme ve inceleme uzmanı."),
+        "security": ("src/jarvis/brains/security_ai.py", "Beyin takımında risk denetimine katılır."),
+        "brain_memory": ("src/jarvis/brains/memory_ai.py", "Beyin takımının görev hafızası uzmanı."),
+        "executor": ("src/jarvis/brains/executor_ai.py", "Beyin takımında yapılandırılmış eylemleri yürütür."),
+        "auditor": ("src/jarvis/brains/auditor_ai.py", "Beyin takımında sonuçları denetler."),
+    }
+    TOOL_GROUPS = {
+        "browser_control": "web", "web_search": "web", "github_arama": "web",
+        "screen_process": "desktop", "close_camera": "desktop",
+        "open_app": "desktop", "desktop_control": "desktop", "computer_control": "desktop",
+        "computer_settings": "desktop", "powershell_control": "desktop",
+        "file_controller": "files", "file_processor": "files", "code_helper": "files",
+        "dev_agent": "files", "self_improve": "files",
+        "task_manager": "tasks", "start_parallel_task": "tasks", "check_agent_board": "tasks",
+        "agent_loop": "tasks", "reminder": "tasks",
+        "health_check": "system", "system_status": "system", "system_scan_and_repair": "system",
+        "shutdown_jarvis": "main",
+        "send_message": "integrations", "weather_report": "integrations", "flight_finder": "integrations",
+        "youtube_video": "integrations", "game_updater": "integrations",
+        "discovered_topydo": "integrations", "discovered_jc": "integrations",
+        "save_memory": "memory", "forget_memory": "memory", "recall_conversation": "history",
+    }
+    STATUS_LABELS = {
+        "unknown": "Veri yok", "visible": "Hazır",
+        "ready": "Hazır", "idle": "Boşta",
+        "connecting": "Bağlanıyor", "connected": "Bağlı",
+        "disconnected": "Bağlantı yok", "auth_required": "Kimlik doğrulaması gerekli",
+        "running": "Çalışıyor", "returned": "Yanıt döndü",
+        "observed": "Gözlendi", "pending": "Beklemede",
+        "awaiting_approval": "Onay bekliyor", "waiting_approval": "Onay bekliyor",
+        "completed": "Tamamlandı", "done": "Tamamlandı",
+        "failed": "Başarısız", "cancelled": "İptal edildi", "error": "Hata",
+        "recovery_required": "Recovery gerekli", "stale": "Heartbeat stale",
+    }
+    GROUP_COLORS = {
+        "core": C.PRI, "memory": C.ACC2, "actions": C.ACC,
+        "brain": C.MUTED_C, "support": "#ffb44a",
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Let the stacked layout shrink this canvas to its real viewport.
+        # A larger child minimum than the stack height caused the lower node
+        # row to be painted underneath the fixed details/chat panels.
+        self.setMinimumHeight(0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMouseTracking(True)
+        self.selected_node = "main"
+        self._runtime = {"ui": ("visible", "Jarvis arayüzü açık")}
+        self._runtime_received_at: dict[str, float] = {}
+        self._task_records: list[dict] = []
+        self._task_records_observed = False
+        self._positions = {node[0]: (node[1], node[2], node[3]) for node in self.NODES}
+
+    def _transform(self):
+        width = max(1, self.width() - 12)
+        height = max(1, self.height() - 12)
+        scale = min(width / self.WIDTH, height / self.HEIGHT)
+        return scale, (self.width() - self.WIDTH * scale) / 2, (self.height() - self.HEIGHT * scale) / 2
+
+    def _node_at(self, point):
+        scale, ox, oy = self._transform()
+        x, y = (point.x() - ox) / scale, (point.y() - oy) / scale
+        for node in reversed(self.NODES):
+            node_id, nx, ny, radius = node[:4]
+            if math.hypot(x - nx, y - ny) <= radius + 8:
+                return node_id
+        return None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            node_id = self._node_at(event.position())
+            if node_id:
+                self.selected_node = node_id
+                self.node_selected.emit(node_id)
+                self.update()
+        super().mousePressEvent(event)
+
+    def update_runtime_status(self, component: str, status: str, detail: str = ""):
+        component = str(component)
+        state = str(status or "unknown").strip().lower()
+        self._runtime[component] = (state, str(detail or "")[:180])
+        self._runtime_received_at[component] = time.monotonic()
+        self.update()
+
+    def seconds_since_update(self, component: str) -> int | None:
+        received_at = self._runtime_received_at.get(str(component))
+        if received_at is None:
+            return None
+        return max(0, int(time.monotonic() - received_at))
+
+    def update_tool_status(self, tool_name: str, status: str):
+        group = self.TOOL_GROUPS.get(str(tool_name or ""))
+        if group:
+            self.update_runtime_status(group, status, str(tool_name))
+
+    @staticmethod
+    def _task_state(task: dict) -> str:
+        status = str(task.get("status", "") or "").strip().lower()
+        payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
+        recovery = task.get("_restart_recovery") or payload.get("_restart_recovery")
+        if isinstance(recovery, dict) and recovery.get("action") == "manual_review":
+            return "recovery_required"
+        if status in {"awaiting_approval", "waiting_approval"}:
+            return "awaiting_approval"
+        if status in {"done", "completed", "failed", "cancelled", "pending", "running"}:
+            return status
+        return "observed"
+
+    def update_task_records(self, tasks: list[dict]):
+        self._task_records = [item for item in tasks if isinstance(item, dict)]
+        self._task_records_observed = True
+        if not self._task_records:
+            self.update_runtime_status("tasks", "ready", "Kayıtlı aktif görev yok")
+            return
+        active = next((task for task in self._task_records if task.get("status") in
+                       {"pending", "running", "awaiting_approval", "waiting_approval"}), None)
+        recovery = next((task for task in self._task_records if self._task_state(task) == "recovery_required"), None)
+        latest = recovery or active or self._task_records[0]
+        goal = str(latest.get("goal", latest.get("name", latest.get("description", ""))))[:72]
+        self.update_runtime_status(
+            "tasks", self._task_state(latest),
+            f"{latest.get('id', '—')} · {goal}".strip(" ·"),
+        )
+
+    def task_panel_details(self) -> tuple[str, str, str]:
+        if not self._task_records_observed:
+            return "Veri yok", "Veri yok", "Veri yok"
+        recovery_task = next((task for task in self._task_records if self._task_state(task) == "recovery_required"), None)
+        active = next((task for task in self._task_records if task.get("status") in
+                       {"pending", "running", "awaiting_approval", "waiting_approval"}), None)
+        if recovery_task:
+            goal = str(recovery_task.get("goal", recovery_task.get("name", recovery_task.get("description", "Görev"))))[:90]
+            active_text = f"Recovery gerekli · {goal}"
+        elif active:
+            state = self.STATUS_LABELS.get(str(active.get("status", "")).lower(), "Beklemede")
+            goal = str(active.get("goal", active.get("name", active.get("description", "Görev"))))[:90]
+            active_text = f"{state} · {goal}"
+        else:
+            active_text = "Yok · kayıtlı görevlerde aktif adım gözlenmedi"
+
+        recovery_task = next((task for task in self._task_records if self._task_state(task) == "recovery_required"), None)
+        if recovery_task:
+            payload = recovery_task.get("payload") if isinstance(recovery_task.get("payload"), dict) else {}
+            recovery = recovery_task.get("_restart_recovery") or payload.get("_restart_recovery") or {}
+            recovery_text = str(recovery.get("reason") or recovery_task.get("id") or "İnceleme gerekli")[:110]
+        else:
+            recovery_text = "Kayıtlı görevlerde recovery işareti gözlenmedi"
+
+        agent_error = next(
+            (
+                (node, value[1])
+                for node in ("planner", "research", "coder", "security", "brain_memory", "executor", "auditor")
+                if (value := self._runtime.get(node, ("unknown", "")))[0] in {"error", "failed"}
+            ),
+            None,
+        )
+        failed = next((task for task in self._task_records if str(task.get("status", "")).lower() in {"failed", "error"}), None)
+        if agent_error:
+            node, detail = agent_error
+            error_text = detail or f"{node} son sağlık sinyalinde hata bildirdi"
+        elif failed:
+            error = failed.get("error") or failed.get("error_message") or failed.get("failure_reason")
+            error_text = str(error)[:110] if error else f"Görev başarısız kaydedildi · {failed.get('id', '—')}"
+        else:
+            error_text = "Kayıtlı görev hatası gözlenmedi"
+        return active_text, error_text, recovery_text
+
+    def status_for_node(self, node_id: str):
+        if node_id == "voice":
+            observed = [(key, self._runtime[key]) for key in ("session", "audio", "audio_output") if key in self._runtime]
+            if not observed:
+                return "unknown", ""
+            states = [state for _, (state, _) in observed]
+            state = "error" if "error" in states else ("auth_required" if "auth_required" in states else
+                    "connecting" if "connecting" in states else "disconnected" if all(s == "disconnected" for s in states) else
+                    "connected" if any(s == "connected" for s in states) else "unknown")
+            detail = " · ".join(f"{key}: {self.STATUS_LABELS.get(value[0], value[0])}" for key, value in observed)
+            details = [value[1] for _, value in observed if value[1]]
+            if details:
+                detail += " · " + " · ".join(details)
+            return state, detail
+        state, detail = self._runtime.get(node_id, ("unknown", ""))
+        if node_id in {"brain", "planner", "research", "coder", "security", "brain_memory", "executor", "auditor"} and state != "unknown":
+            age = self.seconds_since_update(node_id)
+            if age is not None and age >= 10:
+                return "stale", f"Son durum sinyali UI'ye {age} sn önce ulaştı"
+        return state, detail
+
+    def status_text(self, node_id: str) -> str:
+        state, detail = self.status_for_node(node_id)
+        label = self.STATUS_LABELS.get(state, "Veri yok")
+        return f"{label} · {detail}" if detail else label
+
+    def _status_color(self, node_id: str) -> QColor:
+        state, _ = self.status_for_node(node_id)
+        colors = {
+            "visible": C.GREEN, "ready": C.GREEN, "idle": C.GREEN,
+            "connected": C.PRI, "returned": C.GREEN, "completed": C.GREEN,
+            "running": C.PRI, "connecting": C.PRI, "pending": "#ffb44a",
+            "awaiting_approval": "#ffb44a", "waiting_approval": "#ffb44a",
+            "recovery_required": C.RED, "error": C.RED, "failed": C.RED,
+            "auth_required": C.RED, "disconnected": C.TEXT_DIM,
+            "stale": C.ACC2, "unknown": C.TEXT_DIM,
+        }
+        return QColor(colors.get(state, C.TEXT_DIM))
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        scale, ox, oy = self._transform()
+        painter.translate(ox, oy)
+        painter.scale(scale, scale)
+
+        grid_pen = QPen(QColor("#0b2537"), 0.7)
+        painter.setPen(grid_pen)
+        for x in range(20, self.WIDTH, 30):
+            painter.drawLine(QPointF(x, 0), QPointF(x, self.HEIGHT))
+        for y in range(20, self.HEIGHT, 30):
+            painter.drawLine(QPointF(0, y), QPointF(self.WIDTH, y))
+
+        positions = self._positions
+        for source, target in self.EDGES:
+            sx, sy, _ = positions[source]
+            tx, ty, _ = positions[target]
+            connected = self.selected_node in {source, target}
+            color = QColor(C.PRI if connected else "#2b5973")
+            color.setAlpha(235 if connected else 135)
+            pen = QPen(color, 2.2 if connected else 1.2)
+            if source == "main" and target == "brain":
+                pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.drawLine(QPointF(sx, sy), QPointF(tx, ty))
+
+        for node_id, x, y, radius, label, kind in self.NODES:
+            color = QColor(self.GROUP_COLORS[kind])
+            selected = node_id == self.selected_node
+            if selected:
+                halo = QColor(color)
+                halo.setAlpha(42)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(halo))
+                painter.drawEllipse(QPointF(x, y), radius + 12, radius + 12)
+            outer = QColor("#0a1b2b")
+            outer.setAlpha(245)
+            painter.setPen(QPen(color if selected else color.darker(145), 2.0 if selected else 1.3))
+            painter.setBrush(QBrush(outer))
+            painter.drawEllipse(QPointF(x, y), radius + 5, radius + 5)
+            core = QColor(C.PANEL2)
+            core.setAlpha(255)
+            painter.setPen(QPen(color, 2.0))
+            painter.setBrush(QBrush(core))
+            painter.drawEllipse(QPointF(x, y), radius - 3, radius - 3)
+
+            state_color = self._status_color(node_id)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(state_color))
+            painter.drawEllipse(QPointF(x + radius - 1, y - radius + 1), 4.5, 4.5)
+
+            if node_id == "main":
+                painter.setPen(QColor(C.WHITE))
+                painter.setFont(QFont("Segoe UI", 13, QFont.Weight.DemiBold))
+                painter.drawText(QRectF(x - 48, y - 12, 96, 22), Qt.AlignmentFlag.AlignCenter, "JARVIS")
+                painter.setPen(QColor(C.TEXT_DIM))
+                painter.setFont(QFont("Segoe UI", 9))
+                painter.drawText(QRectF(x - 48, y + 9, 96, 17), Qt.AlignmentFlag.AlignCenter, "main.py")
+            elif node_id in {"planner", "research", "coder", "security", "brain_memory", "executor", "auditor"}:
+                painter.setPen(QColor(C.TEXT))
+                painter.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+                painter.drawText(QRectF(x - 52, y + radius + 3, 104, 17), Qt.AlignmentFlag.AlignCenter, label)
+            else:
+                painter.setPen(QColor(C.TEXT))
+                painter.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+                painter.drawText(QRectF(x - 75, y + radius + 3, 150, 19), Qt.AlignmentFlag.AlignCenter, label)
+
+        painter.end()
+
+
+class LanNetworkMapWidget(QWidget):
+    """Live map of observations from one explicitly selected local IPv4 subnet."""
+
+    node_selected = pyqtSignal(str)
+    WIDTH = 1000
+    HEIGHT = 760
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(400)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMouseTracking(True)
+        self.snapshot: ScanSnapshot | None = None
+        self.local_address: str | None = None
+        self.selected_node: str | None = None
+
+    def set_local_address(self, address: str | None):
+        self.local_address = str(address) if address else None
+        self.update()
+
+    def set_snapshot(self, snapshot: ScanSnapshot | None):
+        self.snapshot = snapshot
+        observations = sorted(
+            snapshot.hosts if snapshot is not None else (),
+            key=lambda item: int(item.address),
+        )
+        self.selected_node = str(observations[0].address) if observations else None
+        self.update()
+
+    def _transform(self):
+        width = max(1, self.width() - 12)
+        height = max(1, self.height() - 12)
+        scale = min(width / self.WIDTH, height / self.HEIGHT)
+        return scale, (self.width() - self.WIDTH * scale) / 2, (self.height() - self.HEIGHT * scale) / 2
+
+    def _nodes(self):
+        snapshot = self.snapshot
+        if snapshot is None or not snapshot.hosts:
+            return []
+
+        observations = sorted(snapshot.hosts, key=lambda item: int(item.address))
+        if len(observations) <= 24:
+            groups = [observations]
+            radii = [235]
+        else:
+            capacities = (16, 24, 40, 56, 64, 54)
+            radii = (180, 220, 260, 300, 330, 355)
+            groups = []
+            offset = 0
+            for capacity in capacities:
+                if offset >= len(observations):
+                    break
+                groups.append(observations[offset:offset + capacity])
+                offset += capacity
+            if offset < len(observations):
+                groups.append(observations[offset:])
+                radii = (*radii, 385)
+
+        nodes = []
+        for group, radius in zip(groups, radii, strict=True):
+            count = len(group)
+            for index, observation in enumerate(group):
+                if len(observations) == 1:
+                    x, y = 500, 350
+                else:
+                    angle = -math.pi / 2 + (2 * math.pi * index / count)
+                    x = 500 + radius * math.cos(angle)
+                    y = 350 + radius * math.sin(angle)
+                color = "#72e3bb" if observation.open_ports else (
+                    "#61cce5" if "icmp" in observation.evidence else "#b89cff"
+                )
+                label = f".{str(observation.address).rsplit('.', 1)[-1]}"
+                nodes.append((str(observation.address), x, y, 13, label, color))
+        return nodes
+
+    def _empty_state_text(self):
+        if self.snapshot is None:
+            return "Henüz tarama yapılmadı; haritada yalnızca yanıt veren cihazlar görünür."
+        if self.snapshot.cancelled:
+            return "Tarama durduruldu; bu taramada yanıt veren cihaz bulunmadı."
+        return "Bu taramada yanıt veren cihaz bulunmadı."
+
+    def _node_at(self, point):
+        scale, ox, oy = self._transform()
+        x, y = (point.x() - ox) / scale, (point.y() - oy) / scale
+        for node in reversed(self._nodes()):
+            if math.hypot(x - node[1], y - node[2]) <= node[3] + 8:
+                return node[0]
+        return None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            node_id = self._node_at(event.position())
+            if node_id:
+                self.selected_node = node_id
+                self.node_selected.emit(node_id)
+                self.update()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        scale, ox, oy = self._transform()
+        painter.translate(ox, oy)
+        painter.scale(scale, scale)
+
+        painter.fillRect(0, 0, self.WIDTH, self.HEIGHT, QColor("#050b13"))
+        grid_pen = QPen(QColor("#0b2537"), 0.7)
+        painter.setPen(grid_pen)
+        for x in range(20, self.WIDTH, 30):
+            painter.drawLine(QPointF(x, 0), QPointF(x, self.HEIGHT))
+        for y in range(20, self.HEIGHT, 30):
+            painter.drawLine(QPointF(0, y), QPointF(self.WIDTH, y))
+
+        nodes = self._nodes()
+        if not nodes:
+            painter.setPen(QColor(C.TEXT_DIM))
+            painter.setFont(QFont("Segoe UI", 12))
+            painter.drawText(
+                QRectF(80, 320, 840, 50),
+                Qt.AlignmentFlag.AlignCenter,
+                self._empty_state_text(),
+            )
+            painter.end()
+            return
+
+        for node_id, x, y, radius, label, color_hex in nodes:
+            color = QColor(color_hex)
+            selected = node_id == self.selected_node
+            if selected:
+                halo = QColor(color)
+                halo.setAlpha(48)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(halo))
+                painter.drawEllipse(QPointF(x, y), radius + 13, radius + 13)
+
+            outer = QColor("#0a1b2b")
+            outer.setAlpha(245)
+            painter.setPen(QPen(color.darker(145), 1.5))
+            painter.setBrush(QBrush(outer))
+            painter.drawEllipse(QPointF(x, y), radius + 4, radius + 4)
+            painter.setPen(QPen(color, 1.7))
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(QPointF(x, y), max(4, radius - 3), max(4, radius - 3))
+
+            painter.setPen(QColor(C.WHITE if selected or radius > 15 else C.TEXT))
+            painter.setFont(QFont("Segoe UI", 9 if radius > 15 else 8, QFont.Weight.DemiBold))
+            text_width = 130 if radius > 15 else 48
+            painter.drawText(
+                QRectF(x - text_width / 2, y + radius + 5, text_width, 17),
+                Qt.AlignmentFlag.AlignCenter,
+                label,
+            )
+
+        painter.end()
+
+
+class LanScanWorker(QThread):
+    result_ready = pyqtSignal(object)
+    failed = pyqtSignal(str)
+    progress = pyqtSignal(int, int)
+
+    def __init__(self, cidr: str, networks: tuple[LocalIPv4Network, ...], parent=None):
+        super().__init__(parent)
+        self.cidr = cidr
+        self.networks = networks
+
+    def run(self):
+        try:
+            result = scan_lan(
+                self.cidr,
+                local_networks=self.networks,
+                cancelled=self.isInterruptionRequested,
+                progress=self._report_progress,
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc) or exc.__class__.__name__)
+        else:
+            self.result_ready.emit(result)
+
+    def _report_progress(self, completed: int, total: int):
+        if completed == total or completed % 8 == 0:
+            self.progress.emit(completed, total)
+
 class MainWindow(QMainWindow):
     _log_sig     = pyqtSignal(str)
     _state_sig   = pyqtSignal(str)
@@ -1471,24 +1996,40 @@ class MainWindow(QMainWindow):
     _cam_frame_sig  = pyqtSignal(bytes)  # live camera frame → HUD area
     _mic_dev_sig     = pyqtSignal(str)    # active microphone device name → left panel
     _speaker_dev_sig = pyqtSignal(str)    # active speaker/output device name → left panel
+    _network_status_sig = pyqtSignal(str, str, str)
 
-    def __init__(self, face_path: str):
+    def __init__(self, face_path: str, *, backend_enabled: bool = True):
         super().__init__()
         self._face_path = face_path
+        self._backend_enabled = bool(backend_enabled)
         self.setWindowTitle("J.A.R.V.I.S — MuratJarvis")
-        self.setMinimumSize(_MIN_W, _MIN_H)
-        self.resize(_DEFAULT_W, _DEFAULT_H)
-
-        screen = QApplication.primaryScreen().availableGeometry()
-        self.move(
-            (screen.width()  - _DEFAULT_W) // 2,
-            (screen.height() - _DEFAULT_H) // 2,
-        )
+        primary_screen = QApplication.primaryScreen()
+        available = primary_screen.availableGeometry() if primary_screen else None
+        available_w = available.width() if available else _DEFAULT_W
+        available_h = available.height() if available else _DEFAULT_H
+        window_w = min(_DEFAULT_W, available_w)
+        window_h = min(_DEFAULT_H, available_h)
+        self._left_panel_width = min(270, max(180, int(window_w * 0.19)))
+        self._right_panel_width = min(380, max(250, int(window_w * 0.27)))
+        self.setMinimumSize(min(_MIN_W, window_w), min(_MIN_H, window_h))
+        self.resize(window_w, window_h)
+        if available:
+            self.move(
+                available.x() + (available_w - window_w) // 2,
+                available.y() + (available_h - window_h) // 2,
+            )
 
         self.on_text_command   = None
         self.on_remote_clicked = None   # callable: () -> (url, key) | None
         self.on_interrupt      = None   # callable: () -> None — stop JARVIS mid-speech
         self._muted            = False
+        self._connection_state = "UNKNOWN"
+        self._mic_device_name: str | None = None
+        self._speaker_device_name: str | None = None
+        self._status_updated_at: dict[str, datetime | None] = {
+            "system": None, "gemini": None, "microphone": None, "speaker": None,
+        }
+        self._last_tool_context = ""
         self._current_file: str | None = None
         self._remote_overlay: RemoteKeyOverlay | None = None
 
@@ -1550,7 +2091,7 @@ class MainWindow(QMainWindow):
         self._settings_page_index = self._chat_stack.addWidget(self._settings_page)
         self._growth_page_index = self._chat_stack.addWidget(self._growth_page)
         cv.addWidget(self._chat_stack, stretch=1); self._task_flow = self._build_task_flow(); cv.addWidget(self._task_flow)
-        response = QFrame(); response.setObjectName("ResponseBar"); response.setFixedHeight(86)
+        response = QFrame(); response.setObjectName("ResponseBar"); response.setFixedHeight(96)
         response.setStyleSheet(f"QFrame#ResponseBar {{ background:{C.PANEL}; border-top:1px solid {C.BORDER_B}; }}")
         rv = QHBoxLayout(response); rv.setContentsMargins(14, 8, 14, 8); rv.addWidget(self._build_input_row(), stretch=1)
         cv.addWidget(response)
@@ -1590,6 +2131,7 @@ class MainWindow(QMainWindow):
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._mic_dev_sig.connect(self._on_mic_device)
         self._speaker_dev_sig.connect(self._on_speaker_device)
+        self._network_status_sig.connect(self._apply_network_status)
         self._cam_stop = threading.Event()
         self._cam_thread: threading.Thread | None = None
 
@@ -1599,8 +2141,15 @@ class MainWindow(QMainWindow):
 
         self._overlay: SetupOverlay | None = None
         self._ready = self._check_config()
-        self._apply_state("CONNECTING" if self._ready else "AUTH_REQUIRED")
-        if not self._ready:
+        self._network_initializing = True
+        initial_state = (
+            ("CONNECTING" if self._ready else "AUTH_REQUIRED")
+            if self._backend_enabled
+            else "LOCAL_ONLY"
+        )
+        self._apply_state(initial_state)
+        self._network_initializing = False
+        if not self._ready and self._backend_enabled:
             self._show_setup()
 
         sc_mute = QShortcut(QKeySequence("F4"), self)
@@ -1640,7 +2189,7 @@ class MainWindow(QMainWindow):
         box = QFrame(); box.setObjectName("ChatBubble"); box.setStyleSheet(f"QFrame#ChatBubble {{ background:{'#0b2948' if not jarvis else '#0a3150'}; border:1px solid {C.BORDER}; border-radius:10px; }}")
         v = QVBoxLayout(box); v.setContentsMargins(14, 10, 14, 10); v.setSpacing(5)
         head = QLabel(f"{speaker}   {time.strftime('%H:%M')}"); head.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold)); head.setStyleSheet(f"color:{C.PRI if jarvis else C.TEXT_MED}; background:transparent;")
-        body = QLabel(text); body.setWordWrap(True); body.setFont(QFont("Segoe UI", 10)); body.setStyleSheet(f"color:{C.WHITE}; background:transparent; line-height:140%;")
+        body = QLabel(text); body.setTextFormat(Qt.TextFormat.PlainText); body.setWordWrap(True); body.setFont(QFont("Segoe UI", 10)); body.setStyleSheet(f"color:{C.WHITE}; background:transparent; line-height:140%;")
         v.addWidget(head); v.addWidget(body)
         if jarvis:
             foot = QLabel("Backend yanıtı")
@@ -1650,11 +2199,24 @@ class MainWindow(QMainWindow):
     def _build_chat_panel(self):
         panel = QWidget(); panel.setStyleSheet(f"background:{C.BG};")
         v = QVBoxLayout(panel); v.setContentsMargins(18, 18, 18, 12); v.setSpacing(12)
-        self._chat_messages_layout = QVBoxLayout(); self._chat_messages_layout.setSpacing(8)
+        self._chat_messages_widget = QWidget()
+        self._chat_messages_widget.setObjectName("ChatMessages")
+        self._chat_messages_widget.setStyleSheet(f"QWidget#ChatMessages {{ background:{C.BG}; }}")
+        self._chat_messages_layout = QVBoxLayout(self._chat_messages_widget)
+        self._chat_messages_layout.setSpacing(8)
+        self._chat_messages_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._chat_empty_lbl = QLabel("Henüz mesaj yok. Backend bağlantısı kurulunca konuşmalar burada görünür.")
         self._chat_empty_lbl.setWordWrap(True); self._chat_empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter); self._chat_empty_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none; padding:24px;")
-        self._chat_messages_layout.addWidget(self._chat_empty_lbl); v.addLayout(self._chat_messages_layout)
-        self._waveform = WaveformWidget(); v.addWidget(self._waveform); v.addStretch()
+        self._chat_messages_layout.addWidget(self._chat_empty_lbl)
+        self._chat_scroll = QScrollArea()
+        self._chat_scroll.setWidgetResizable(True)
+        self._chat_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._chat_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._chat_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self._chat_scroll.setWidget(self._chat_messages_widget)
+        v.addWidget(self._chat_scroll, stretch=1)
+        self._waveform = WaveformWidget(); v.addWidget(self._waveform)
         return panel
 
     def _build_task_flow(self):
@@ -1759,15 +2321,542 @@ class MainWindow(QMainWindow):
     def _build_team_center_page(self) -> QWidget:
         page = QFrame(); page.setObjectName("TeamCenterPage")
         page.setStyleSheet(f"QFrame#TeamCenterPage {{ background:{C.BG}; border:none; }}")
-        layout = QVBoxLayout(page); layout.setContentsMargins(28, 28, 28, 20); layout.setSpacing(12)
-        heading = QLabel("AI Ekip"); heading.setFont(QFont("Segoe UI", 20, QFont.Weight.DemiBold))
-        heading.setStyleSheet(f"color:{C.WHITE}; background:transparent; border:none;"); layout.addWidget(heading)
-        desc = QLabel("Planner → Research → Security → Auditor aşamalarının gerçek görev durumunu gösterir.")
-        desc.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;"); layout.addWidget(desc)
-        self._team_summary = QTextEdit(); self._team_summary.setReadOnly(True)
-        self._team_summary.setStyleSheet(f"QTextEdit {{ color:{C.TEXT_MED}; background:{C.PANEL}; border:1px solid {C.BORDER}; border-radius:8px; padding:10px; }}")
-        layout.addWidget(self._team_summary, stretch=1)
+        layout = QVBoxLayout(page); layout.setContentsMargins(16, 12, 16, 10); layout.setSpacing(6)
+        self._team_title_lbl = QLabel("JARVIS MİMARİSİ")
+        self._team_title_lbl.setFont(QFont("Segoe UI", 18, QFont.Weight.DemiBold))
+        self._team_title_lbl.setStyleSheet(f"color:{C.WHITE}; background:transparent; border:none;")
+        self._team_desc = QLabel(
+            "Şematik bileşen görünümü — gerçek ağ cihazlarını göstermez"
+        )
+        self._team_desc.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
+        mode_row = QHBoxLayout()
+        self._team_arch_btn = QPushButton("JARVIS MİMARİSİ")
+        self._team_lan_btn = QPushButton("CANLI LAN")
+        for button in (self._team_arch_btn, self._team_lan_btn):
+            button.setCheckable(True)
+            button.setStyleSheet(
+                f"QPushButton {{ color:{C.TEXT_MED}; background:{C.PANEL}; border:1px solid {C.BORDER}; "
+                "border-radius:7px; padding:7px 12px; }"
+                f"QPushButton:checked {{ color:{C.WHITE}; background:{C.PRI_DIM}; border-color:{C.PRI}; }}"
+            )
+        mode_row.addWidget(self._team_arch_btn)
+        mode_row.addWidget(self._team_lan_btn)
+        mode_row.addStretch(1)
+        layout.addLayout(mode_row)
+        layout.insertWidget(0, self._team_title_lbl)
+        layout.insertWidget(1, self._team_desc)
+
+        self._team_legend = QFrame()
+        self._team_legend.setStyleSheet(
+            f"QFrame {{ background:{C.PANEL}; border:1px solid {C.BORDER}; border-radius:7px; }}"
+        )
+        legend_layout = QHBoxLayout(self._team_legend)
+        legend_layout.setContentsMargins(9, 5, 9, 5)
+        legend_layout.setSpacing(10)
+        for color, text in (
+            (C.GREEN, "Hazır · Boşta"), (C.PRI, "Bağlı · Çalışıyor"),
+            ("#ffb44a", "Beklemede · Onay"), (C.RED, "Hata · Recovery gerekli"),
+            (C.ACC2, "Heartbeat stale"), (C.TEXT_DIM, "Veri yok"),
+        ):
+            item = QWidget()
+            item_layout = QHBoxLayout(item)
+            item_layout.setContentsMargins(0, 0, 0, 0)
+            item_layout.setSpacing(4)
+            dot = QLabel("●")
+            dot.setStyleSheet(f"color:{color}; background:transparent; border:none;")
+            label = QLabel(text)
+            label.setFont(QFont("Segoe UI", 7, QFont.Weight.DemiBold))
+            label.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
+            item_layout.addWidget(dot)
+            item_layout.addWidget(label)
+            legend_layout.addWidget(item)
+        legend_layout.addStretch(1)
+        layout.addWidget(self._team_legend)
+
+        self._team_graph_stack = QStackedWidget()
+        self._network_canvas = SystemNetworkWidget()
+        self._network_canvas.node_selected.connect(self._show_network_node_details)
+        self._team_graph_stack.addWidget(self._network_canvas)
+
+        self._lan_canvas = LanNetworkMapWidget()
+        self._lan_canvas.node_selected.connect(self._show_lan_node_details)
+        self._lan_local_networks = active_local_networks()
+        self._lan_scope_edit = QLineEdit(suggested_scope(self._lan_local_networks))
+        self._lan_scope_edit.setPlaceholderText("Örn. 192.168.1.0/24")
+        self._lan_scope_edit.setMaximumWidth(210)
+        self._lan_scope_edit.setToolTip("Yalnız bu bilgisayara bağlı, özel IPv4 /24 veya daha dar ağlar kabul edilir.")
+        if len(self._lan_local_networks) == 1:
+            self._lan_canvas.set_local_address(str(self._lan_local_networks[0].address))
+
+        self._lan_controls = QFrame()
+        self._lan_controls.setStyleSheet(
+            f"QFrame {{ background:{C.PANEL}; border:1px solid {C.BORDER}; border-radius:8px; }}"
+        )
+        lan_layout = QVBoxLayout(self._lan_controls)
+        lan_layout.setContentsMargins(9, 7, 9, 7)
+        lan_layout.setSpacing(4)
+        control_row = QHBoxLayout()
+        scope_label = QLabel("Ağ aralığı")
+        scope_label.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
+        self._lan_scan_btn = QPushButton("Yeniden tara")
+        self._lan_live_btn = QPushButton("Canlı izlemeyi başlat")
+        self._lan_live_btn.setCheckable(True)
+        if not self._backend_enabled:
+            self._lan_scan_btn.setEnabled(False)
+            self._lan_live_btn.setEnabled(False)
+        for button in (self._lan_scan_btn, self._lan_live_btn):
+            button.setStyleSheet(
+                f"QPushButton {{ color:{C.WHITE}; background:{C.PRI_DIM}; border:1px solid {C.PRI}; "
+                "border-radius:6px; padding:6px 10px; }"
+                f"QPushButton:hover, QPushButton:checked {{ background:{C.PRI}; }}"
+            )
+        control_row.addWidget(scope_label)
+        control_row.addWidget(self._lan_scope_edit)
+        control_row.addWidget(self._lan_scan_btn)
+        control_row.addWidget(self._lan_live_btn)
+        control_row.addStretch(1)
+        lan_layout.addLayout(control_row)
+        initial_lan_status = (
+            "AI Ekip açıkken ağ 60 saniyede bir yenilenir."
+            if self._backend_enabled
+            else "UI-only mod · LAN taraması, backend ve ses kapalı."
+        )
+        self._lan_status_lbl = QLabel(initial_lan_status)
+        self._lan_status_lbl.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
+        lan_layout.addWidget(self._lan_status_lbl)
+        self._lan_note_lbl = QLabel(
+            "Yalnız ARP, ICMP veya denenmiş TCP portlarından yanıt alınan cihazlar gösterilir. "
+            "Yanıt vermeyen cihazlar bulunamayabilir; bulunan sayı toplam cihaz sayısı değildir. "
+            "Harita ağ topolojisini veya fiziksel bağlantıları göstermez."
+        )
+        self._lan_note_lbl.setWordWrap(True)
+        self._lan_note_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; font-size:8pt; background:transparent; border:none;")
+        lan_layout.addWidget(self._lan_note_lbl)
+        self._team_graph_stack.addWidget(self._lan_canvas)
+        layout.addWidget(self._lan_controls)
+        self._lan_summary_panel = QFrame()
+        self._lan_summary_panel.setObjectName("LanSummary")
+        self._lan_summary_panel.setStyleSheet(
+            f"QFrame#LanSummary {{ background:{C.PANEL}; border:1px solid {C.BORDER}; border-radius:8px; }}"
+        )
+        summary_layout = QHBoxLayout(self._lan_summary_panel)
+        summary_layout.setContentsMargins(9, 6, 9, 6)
+        summary_layout.setSpacing(8)
+        self._lan_summary_values = {}
+        for key, caption, initial in (
+            ("network", "AĞ ARALIĞI", "Veri yok"),
+            ("last_scan", "SON TARAMA", "Henüz taranmadı"),
+            ("count", "YANIT VEREN CİHAZ", "—"),
+            ("duration", "SÜRE", "—"),
+            ("result", "SONUÇ", "Veri yok"),
+        ):
+            tile = QFrame()
+            tile.setStyleSheet("QFrame { background:transparent; border:none; }")
+            tile_layout = QVBoxLayout(tile)
+            tile_layout.setContentsMargins(4, 1, 4, 1)
+            tile_layout.setSpacing(1)
+            caption_label = QLabel(caption)
+            caption_label.setFont(QFont("Segoe UI", 6, QFont.Weight.Bold))
+            caption_label.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
+            value_label = QLabel(initial)
+            value_label.setWordWrap(True)
+            value_label.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold))
+            value_label.setStyleSheet(f"color:{C.TEXT}; background:transparent; border:none;")
+            tile_layout.addWidget(caption_label)
+            tile_layout.addWidget(value_label)
+            summary_layout.addWidget(tile, 1)
+            self._lan_summary_values[key] = value_label
+        layout.addWidget(self._lan_summary_panel)
+
+        self._team_graph_panel = QFrame()
+        self._team_graph_panel.setStyleSheet(
+            f"QFrame {{ background:#050f1b; border:1px solid {C.BORDER}; border-radius:9px; }}"
+        )
+        graph_layout = QVBoxLayout(self._team_graph_panel)
+        graph_layout.setContentsMargins(5, 5, 5, 5)
+        graph_layout.addWidget(self._team_graph_stack, stretch=1)
+        self._team_content_row = QHBoxLayout()
+        self._team_content_row.setSpacing(8)
+        self._team_content_row.addWidget(self._team_graph_panel, stretch=1)
+        layout.addLayout(self._team_content_row, stretch=1)
+
+        self._lan_snapshot: ScanSnapshot | None = None
+        self._lan_scan_worker: LanScanWorker | None = None
+        self._lan_restart_after_finish = False
+        self._lan_refresh_tmr = QTimer(self)
+        self._lan_refresh_tmr.setInterval(60_000)
+        self._lan_refresh_tmr.timeout.connect(self._start_lan_scan)
+        self._lan_scan_btn.clicked.connect(self._on_lan_scan_clicked)
+        self._lan_live_btn.toggled.connect(self._set_lan_monitoring)
+        self._team_arch_btn.clicked.connect(lambda: self._set_team_mode(0))
+        self._team_lan_btn.clicked.connect(lambda: self._set_team_mode(1))
+
+        details = QFrame()
+        details.setObjectName("NetworkDetails")
+        details.setMinimumWidth(min(330, max(270, int(self.width() * 0.22))))
+        details.setMaximumWidth(350)
+        details.setStyleSheet(
+            f"QFrame#NetworkDetails {{ background:{C.PANEL}; border:1px solid {C.BORDER}; border-radius:9px; }}"
+        )
+        info = QVBoxLayout(details)
+        info.setContentsMargins(13, 12, 13, 12)
+        info.setSpacing(8)
+        selected_heading = QLabel("SEÇİLEN BİLEŞEN")
+        selected_heading.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        selected_heading.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
+        info.addWidget(selected_heading)
+        separator = QFrame()
+        separator.setFixedHeight(1)
+        separator.setStyleSheet(f"background:{C.BORDER}; border:none;")
+        info.addWidget(separator)
+        self._team_node_title = QLabel("JARVIS")
+        self._team_node_title.setWordWrap(True)
+        self._team_node_title.setFont(QFont("Segoe UI", 15, QFont.Weight.DemiBold))
+        self._team_node_title.setStyleSheet(f"color:{C.WHITE}; background:transparent; border:none;")
+        info.addWidget(self._team_node_title)
+        status_row = QHBoxLayout()
+        self._team_node_dot = QLabel("●")
+        self._team_node_dot.setFixedWidth(13)
+        self._team_node_status = QLabel("Veri yok")
+        self._team_node_status.setWordWrap(True)
+        self._team_node_status.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+        self._team_node_status.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
+        status_row.addWidget(self._team_node_dot)
+        status_row.addWidget(self._team_node_status, stretch=1)
+        info.addLayout(status_row)
+        self._team_node_runtime = QLabel("")
+        self._team_node_runtime.setWordWrap(True)
+        self._team_node_runtime.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
+        info.addWidget(self._team_node_runtime)
+        self._team_meta_widgets = {}
+
+        def add_meta_row(caption: str, attr: str):
+            row_widget = QWidget()
+            row = QHBoxLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(7)
+            name = QLabel(caption)
+            name.setMinimumWidth(86)
+            name.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
+            value = QLabel("Veri yok")
+            value.setWordWrap(True)
+            value.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
+            row.addWidget(name, alignment=Qt.AlignmentFlag.AlignTop)
+            row.addWidget(value, stretch=1)
+            info.addWidget(row_widget)
+            self._team_meta_widgets[attr] = row_widget
+            setattr(self, attr, value)
+            return value
+
+        self._team_node_heartbeat = add_meta_row("Son heartbeat", "_team_node_heartbeat")
+        self._team_node_active_task = add_meta_row("Aktif görev", "_team_node_active_task")
+        self._team_node_error = add_meta_row("Son hata", "_team_node_error")
+        self._team_node_recovery = add_meta_row("Recovery", "_team_node_recovery")
+        info.addSpacing(3)
+        self._team_node_path = QLabel()
+        self._team_node_path.setWordWrap(True)
+        self._team_node_path.setStyleSheet(f"color:{C.PRI}; background:transparent; border:none;")
+        info.addWidget(self._team_node_path)
+        self._team_node_desc = QLabel()
+        self._team_node_desc.setWordWrap(True)
+        self._team_node_desc.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
+        info.addWidget(self._team_node_desc)
+        info.addStretch(1)
+        self._team_details_panel = details
+        self._team_content_row.addWidget(details)
+
+        chat_strip = QFrame(); chat_strip.setObjectName("TeamChatStrip")
+        chat_strip.setFixedHeight(34)
+        chat_strip.setStyleSheet(
+            f"QFrame#TeamChatStrip {{ background:#061427; border:1px solid {C.BORDER}; border-radius:8px; }}"
+        )
+        chat_row = QHBoxLayout(chat_strip); chat_row.setContentsMargins(11, 3, 11, 3); chat_row.setSpacing(8)
+        chat_title = QLabel("KONUŞMA")
+        chat_title.setStyleSheet(f"color:{C.PRI}; font-size:8pt; font-weight:600; background:transparent; border:none;")
+        chat_row.addWidget(chat_title)
+        self._team_chat_lbl = QLabel("Henüz mesaj yok")
+        self._team_chat_lbl.setMinimumWidth(0)
+        self._team_chat_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._team_chat_lbl.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
+        chat_row.addWidget(self._team_chat_lbl, stretch=1)
+        layout.addWidget(chat_strip)
+        self._set_team_mode(0)
+        self._update_lan_summary(None)
         return page
+
+    def _show_network_node_details(self, node_id: str):
+        if not hasattr(self, "_network_canvas"):
+            return
+        details = SystemNetworkWidget.DETAILS.get(node_id)
+        if not details:
+            return
+        label = next((node[4] for node in SystemNetworkWidget.NODES if node[0] == node_id), node_id)
+        state, runtime_detail = self._network_canvas.status_for_node(node_id)
+        self._team_node_title.setText(label)
+        self._team_node_status.setText(SystemNetworkWidget.STATUS_LABELS.get(state, "Veri yok"))
+        color = self._network_canvas._status_color(node_id).name()
+        self._team_node_dot.setStyleSheet(f"color:{color}; background:transparent; border:none;")
+        self._team_node_runtime.setText(runtime_detail or "Bu bileşen için ek canlı ayrıntı yok.")
+        self._team_node_path.setText(details[0])
+        self._team_node_path.setToolTip(details[0])
+        self._team_node_desc.setText(details[1])
+        self._team_node_desc.setToolTip(details[1])
+        brain_nodes = {"brain", "planner", "research", "coder", "security", "brain_memory", "executor", "auditor"}
+        for row in self._team_meta_widgets.values():
+            row.setVisible(node_id in brain_nodes)
+        if node_id in brain_nodes:
+            age = self._network_canvas.seconds_since_update(node_id)
+            self._team_node_heartbeat.setText(
+                f"UI son sinyali · {age} sn önce" if age is not None else "Henüz heartbeat alınmadı"
+            )
+            active_task, last_error, recovery = self._network_canvas.task_panel_details()
+            self._team_node_active_task.setText(active_task)
+            self._team_node_error.setText(last_error)
+            self._team_node_recovery.setText(recovery)
+        self._network_canvas.update()
+
+    def _set_team_mode(self, index: int):
+        self._team_graph_stack.setCurrentIndex(index)
+        is_lan = index == 1
+        self._current_team_mode = index
+        self._lan_controls.setVisible(is_lan)
+        self._lan_summary_panel.setVisible(is_lan)
+        self._team_legend.setVisible(not is_lan)
+        self._team_arch_btn.setChecked(not is_lan)
+        self._team_lan_btn.setChecked(is_lan)
+        if is_lan:
+            self._team_title_lbl.setText("CANLI LAN")
+            self._team_desc.setText("Gerçek yerel ağ cihazları — son tarama sonuçları")
+            self._show_lan_node_details(self._lan_canvas.selected_node)
+        else:
+            self._team_title_lbl.setText("JARVIS MİMARİSİ")
+            self._team_desc.setText("Şematik bileşen görünümü — gerçek ağ cihazlarını göstermez")
+            self._show_network_node_details(self._network_canvas.selected_node)
+
+    def _show_lan_node_details(self, node_id: str | None):
+        snapshot = self._lan_snapshot
+        for row in self._team_meta_widgets.values():
+            row.hide()
+        self._team_node_runtime.clear()
+        self._team_node_dot.setStyleSheet(
+            f"color:{C.GREEN if snapshot and snapshot.hosts else C.TEXT_DIM}; "
+            "background:transparent; border:none;"
+        )
+
+        observation = next(
+            (item for item in snapshot.hosts if str(item.address) == node_id), None
+        ) if snapshot is not None and node_id is not None else None
+        if observation is not None:
+            self._team_node_title.setText("Yerel ağ cihazı")
+            evidence_label = (
+                "ARP yanıtı" if "arp" in observation.evidence else
+                "ICMP yanıtı" if "icmp" in observation.evidence else "TCP yanıtı"
+            )
+            self._team_node_status.setText(evidence_label)
+            self._team_node_dot.setStyleSheet(f"color:{C.GREEN}; background:transparent; border:none;")
+            self._team_node_path.setText(f"IPv4 · {observation.address}")
+            ports = ", ".join(service_labels(observation.open_ports)) or "Test edilen TCP portlarında açık servis yok"
+            self._team_node_desc.setText(f"{ports} · servis adı yalnızca port numarasından çıkarılır.")
+        else:
+            self._team_node_title.setText("Keşfedilmiş cihaz yok")
+            if snapshot is None:
+                address = (
+                    str(self._lan_local_networks[0].address)
+                    if len(self._lan_local_networks) == 1
+                    else "etkin yerel arayüz seçilmedi"
+                )
+                self._team_node_status.setText("Tarama başlatılmadı")
+                self._team_node_path.setText(
+                    f"Yerel arayüz · {address} (tarama bulgusu değil)"
+                )
+                self._team_node_desc.setText(
+                    "Henüz tarama sonucu yok. Yerel arayüz bilgisi tarama bulgusu değildir; "
+                    "haritada yalnızca yanıt veren cihazlar gösterilir."
+                )
+            else:
+                self._team_node_status.setText(
+                    "Tarama durduruldu" if snapshot.cancelled else "Yanıt veren cihaz yok"
+                )
+                route = (
+                    f"Ağ geçidi rota kaydı · {snapshot.gateway} (yanıtı doğrulanmadı)"
+                    if snapshot.gateway is not None else ""
+                )
+                local = (
+                    f"Yerel arayüz · {snapshot.local_address} (tarama bulgusu değil)"
+                )
+                self._team_node_path.setText(" · ".join(part for part in (route, local) if part))
+                route_note = (
+                    "Ağ geçidinin yanıtı doğrulanmadı; "
+                    if snapshot.gateway is not None else ""
+                )
+                self._team_node_desc.setText(
+                    f"{route_note}Rota ve yerel arayüz bilgileri tarama bulgusu değildir. "
+                    "Haritada yalnızca yanıt veren cihazlar gösterilir."
+                )
+        for label in (self._team_node_path, self._team_node_desc):
+            label.setToolTip(label.text())
+
+    def _update_lan_summary(self, snapshot: ScanSnapshot | None):
+        if snapshot is None:
+            values = {
+                "network": "Veri yok", "last_scan": "Henüz taranmadı",
+                "count": "—", "duration": "—", "result": "Veri yok",
+            }
+        else:
+            try:
+                scanned = datetime.fromisoformat(snapshot.scanned_at.replace("Z", "+00:00"))
+                if scanned.tzinfo is not None:
+                    scanned = scanned.astimezone()
+                scan_time = scanned.strftime("%d.%m.%Y %H:%M:%S")
+            except (TypeError, ValueError):
+                scan_time = str(snapshot.scanned_at)
+            values = {
+                "network": str(snapshot.network),
+                "last_scan": scan_time,
+                "count": f"{len(snapshot.hosts)} yanıt veren cihaz",
+                "duration": f"{snapshot.elapsed_seconds:.1f} sn",
+                "result": "Durduruldu · kısmi" if snapshot.cancelled else "Kısmi keşif",
+            }
+        for key, value in values.items():
+            label = self._lan_summary_values[key]
+            label.setText(value)
+            label.setToolTip(value)
+
+    def _set_lan_monitoring(self, enabled: bool):
+        self._lan_refresh_tmr.stop()
+        if not self._backend_enabled:
+            previous = self._lan_live_btn.blockSignals(True)
+            self._lan_live_btn.setChecked(False)
+            self._lan_live_btn.blockSignals(previous)
+            self._lan_status_lbl.setText("UI-only mod · LAN taraması, backend ve ses kapalı.")
+            return
+        if not enabled:
+            self._lan_live_btn.setText("Canlı izlemeyi başlat")
+            worker = self._lan_scan_worker
+            if worker is not None and worker.isRunning():
+                self._lan_restart_after_finish = False
+                worker.requestInterruption()
+                self._lan_status_lbl.setText("Canlı izleme kapalı · etkin tarama durduruluyor…")
+            else:
+                self._lan_status_lbl.setText("Canlı izleme kapalı · son gözlemler ekranda.")
+            return
+        try:
+            network = parse_scope(self._lan_scope_edit.text())
+            interfaces = active_local_networks()
+            if not any(item.network == network for item in interfaces):
+                raise NetworkScopeError("CIDR etkin yerel ağ arayüzüyle eşleşmiyor.")
+        except NetworkScopeError as exc:
+            previous = self._lan_live_btn.blockSignals(True)
+            self._lan_live_btn.setChecked(False)
+            self._lan_live_btn.blockSignals(previous)
+            self._lan_live_btn.setText("Canlı izlemeyi başlat")
+            self._lan_status_lbl.setText(f"Canlı izleme başlamadı · {exc}")
+            return
+        self._lan_live_btn.setText("Canlı izleme açık · 60 sn")
+        self._lan_refresh_tmr.start()
+        self._start_lan_scan()
+    def _on_lan_scan_clicked(self):
+        worker = self._lan_scan_worker
+        if worker is not None and worker.isRunning():
+            self._lan_restart_after_finish = False
+            worker.requestInterruption()
+            self._lan_scan_btn.setText("Durduruluyor…")
+            self._lan_status_lbl.setText("Etkin bağlantı denemeleri bitince tarama duracak.")
+            return
+        self._start_lan_scan()
+
+    def _start_lan_scan(self):
+        if not self._backend_enabled:
+            self._lan_status_lbl.setText("UI-only mod · LAN taraması, backend ve ses kapalı.")
+            return
+        worker = self._lan_scan_worker
+        if worker is not None and worker.isRunning():
+            if self._lan_live_btn.isChecked():
+                self._lan_restart_after_finish = True
+            return
+        try:
+            network = parse_scope(self._lan_scope_edit.text())
+            interfaces = active_local_networks()
+            if not any(item.network == network for item in interfaces):
+                raise NetworkScopeError("CIDR etkin, bu bilgisayara bağlı özel IPv4 /24 ağıyla eşleşmiyor.")
+        except NetworkScopeError as exc:
+            self._lan_status_lbl.setText(f"Tarama başlatılmadı · {exc}")
+            return
+
+        worker = LanScanWorker(str(network), interfaces, self)
+        self._lan_scan_worker = worker
+        self._lan_scan_btn.setText("Taramayı durdur")
+        self._lan_status_lbl.setText(f"{network} · canlı cihaz ve TCP port yanıtları aranıyor…")
+        worker.progress.connect(self._on_lan_scan_progress)
+        worker.result_ready.connect(self._on_lan_scan_result)
+        worker.failed.connect(self._on_lan_scan_failed)
+        worker.finished.connect(self._on_lan_scan_finished)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+    def _on_lan_scan_progress(self, completed: int, total: int):
+        self._lan_status_lbl.setText(f"Yerel ağ taranıyor · {completed}/{total} adres tamamlandı")
+
+    def _on_lan_scan_result(self, snapshot: ScanSnapshot):
+        self._lan_snapshot = snapshot
+        self._lan_canvas.set_snapshot(snapshot)
+        self._update_lan_summary(snapshot)
+        self._show_lan_node_details(self._lan_canvas.selected_node)
+        open_ports = sum(len(host.open_ports) for host in snapshot.hosts)
+        stamp = snapshot.scanned_at.replace("T", " ")
+        if snapshot.cancelled:
+            state = "Durduruldu"
+        else:
+            state = "Tarama tamamlandı"
+        self._lan_status_lbl.setText(
+            f"{state} · {len(snapshot.hosts)} yanıt veren cihaz · {open_ports} açık TCP portu · "
+            f"keşif kapsamlı değildir · "
+            f"{snapshot.network} · {stamp}"
+        )
+
+    def _on_lan_scan_failed(self, message: str):
+        self._lan_status_lbl.setText(f"Tarama başarısız · {message[:240]}")
+
+    def _on_lan_scan_finished(self):
+        self._lan_scan_worker = None
+        self._lan_scan_btn.setText("Şimdi tara")
+        if (
+            self._lan_restart_after_finish
+            and self._lan_live_btn.isChecked()
+            and self._chat_stack.currentWidget() is self._team_page
+        ):
+            self._lan_restart_after_finish = False
+            QTimer.singleShot(0, self._start_lan_scan)
+        else:
+            self._lan_restart_after_finish = False
+    def _stop_lan_scan(self, wait: bool = False):
+        self._lan_refresh_tmr.stop()
+        worker = self._lan_scan_worker
+        if worker is not None and worker.isRunning():
+            worker.requestInterruption()
+            if wait:
+                worker.wait()
+
+    def _apply_network_status(self, component: str, status: str, detail: str):
+        if not hasattr(self, "_network_canvas"):
+            return
+        if component == "tool":
+            self._network_canvas.update_tool_status(detail, status)
+            normalized = str(status or "unknown").strip().lower()
+            status_label = SystemNetworkWidget.STATUS_LABELS.get(normalized, normalized)
+            tool_text = str(detail or "Bilinmeyen araç")
+            prefix = "Aktif araç" if normalized in {"running", "pending"} else "Son araç"
+            self._last_tool_context = f"{prefix} · {tool_text} · {status_label}"
+            self._set_composer_context(self._last_tool_context)
+        else:
+            self._network_canvas.update_runtime_status(component, status, detail)
+        self._show_network_node_details(self._network_canvas.selected_node)
+
+    def _set_composer_context(self, text: str):
+        if not hasattr(self, "_composer_context_lbl"):
+            return
+        value = str(text or "").strip()
+        self._composer_context_lbl.setText(value)
+        self._composer_context_lbl.setVisible(bool(value))
 
     def _read_task_files(self) -> list[dict]:
         by_id: dict[str, dict] = {}
@@ -1779,6 +2868,7 @@ class MainWindow(QMainWindow):
                     for item in data:
                         if not isinstance(item, dict):
                             continue
+                        item = {**item, "_source": path.name}
                         task_id = str(item.get("id", "")).strip()
                         if task_id:
                             previous = by_id.get(task_id)
@@ -1794,6 +2884,34 @@ class MainWindow(QMainWindow):
                     self._task_read_error = True
                     self._log_sig.emit(f"SYS: Görev kaydı okunamadı: {exc}")
         self._task_read_error = False
+
+        board_db = memory_dir() / "agent_board.db"
+        if board_db.is_file():
+            try:
+                with sqlite3.connect(board_db.as_uri() + "?mode=ro", uri=True, timeout=0.1) as conn:
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute(
+                        "SELECT id, description, status, started_at, finished_at "
+                        "FROM jobs ORDER BY started_at DESC LIMIT 100"
+                    ).fetchall()
+                for row in rows:
+                    item = {
+                        "id": row["id"], "goal": row["description"], "status": row["status"],
+                        "updated_at": row["finished_at"] or row["started_at"],
+                        "_source": "agent_board.db",
+                    }
+                    task_id = str(item.get("id", "")).strip()
+                    if task_id:
+                        previous = by_id.get(task_id)
+                        if previous is None or str(item.get("updated_at", "")) >= str(
+                            previous.get("updated_at", previous.get("created_at", ""))
+                        ):
+                            by_id[task_id] = item
+            except (OSError, sqlite3.Error, ValueError):
+                # The database may be absent, busy, or from an older schema.
+                # The UI observer must not create or mutate it.
+                pass
+
         tasks = list(by_id.values()) + anonymous
         return sorted(
             tasks,
@@ -1807,10 +2925,21 @@ class MainWindow(QMainWindow):
         tasks = self._read_task_files()
         counts = {status: sum(1 for task in tasks if task.get("status") == status) for status in
                   ("pending", "running", "awaiting_approval", "completed", "done", "failed", "cancelled")}
-        active = next((task for task in tasks if task.get("status") in ("pending", "running", "awaiting_approval")), None)
+        recovery = next(
+            (task for task in tasks if SystemNetworkWidget._task_state(task) == "recovery_required"),
+            None,
+        )
+        active = recovery or next(
+            (task for task in tasks if task.get("status") in
+             ("pending", "running", "awaiting_approval", "waiting_approval")),
+            None,
+        )
         if active:
-            status = str(active.get("status", "pending"))
-            status_text = {"pending": "Bekliyor", "running": "Çalışıyor", "awaiting_approval": "Onay bekliyor"}.get(status, status)
+            status = SystemNetworkWidget._task_state(active)
+            status_text = {
+                "pending": "Beklemede", "running": "Çalışıyor",
+                "awaiting_approval": "Onay bekliyor", "recovery_required": "Recovery gerekli",
+            }.get(status, status)
             goal = str(active.get("goal", active.get("name", "Görev")))
             self._task_status_lbl.setText(f"{status_text} · {active.get('id', '—')}")
             self._task_detail_lbl.setText(goal[:150])
@@ -1818,8 +2947,10 @@ class MainWindow(QMainWindow):
                 self._set_task_stages("Planner", ())
             elif status == "running":
                 self._set_task_stages("Research", ("Planner",))
-            else:
+            elif status in {"awaiting_approval", "waiting_approval"}:
                 self._set_task_stages("Security", ("Planner", "Research"))
+            else:
+                self._set_task_stages(None, ())
         elif tasks:
             latest = tasks[0]
             latest_status = str(latest.get("status", "bilinmiyor"))
@@ -1843,8 +2974,18 @@ class MainWindow(QMainWindow):
             self._set_task_stages(None, ())
         if hasattr(self, "_tasks_summary"):
             self._tasks_summary.setPlainText(self._format_task_summary(tasks, counts))
-        if hasattr(self, "_team_summary"):
-            self._team_summary.setPlainText(self._format_team_summary(active))
+        if hasattr(self, "_network_canvas"):
+            self._network_canvas.update_task_records(tasks)
+            self._show_network_node_details(self._network_canvas.selected_node)
+        awaiting_approval = next(
+            (task for task in tasks if task.get("status") in {"awaiting_approval", "waiting_approval"}),
+            None,
+        )
+        if awaiting_approval:
+            task_name = str(awaiting_approval.get("goal", awaiting_approval.get("name", "Görev")))[:90]
+            self._set_composer_context(f"Onay bekliyor · {task_name}")
+        elif self._last_tool_context:
+            self._set_composer_context(self._last_tool_context)
 
     @staticmethod
     def _format_task_summary(tasks: list[dict], counts: dict[str, int]) -> str:
@@ -1858,16 +2999,6 @@ class MainWindow(QMainWindow):
             goal = str(task.get("goal", task.get("name", "Görev"))).replace("\n", " ")
             lines.append(f"[{task.get('status', '?')}] {task.get('id', '—')} · {goal[:110]}")
         return "\n".join(lines)
-
-    @staticmethod
-    def _format_team_summary(active: dict | None) -> str:
-        if not active:
-            return "PLANNER   Hazır\nRESEARCH  Hazır\nSECURITY  Hazır\nAUDITOR   Hazır\n\nAktif görev yok."
-        status = active.get("status", "pending")
-        return (f"PLANNER   {'Aktif' if status in ('pending', 'running') else 'Tamamlandı'}\n"
-                f"RESEARCH  {'Çalışıyor' if status == 'running' else 'Hazır'}\n"
-                f"SECURITY  Onay kapısı hazır\nAUDITOR   Sonuç bekleniyor\n\n"
-                f"Görev: {active.get('id', '—')}\n{active.get('goal', active.get('name', ''))}")
 
     def _create_improvement_proposal(self):
         tasks = self._read_task_files()
@@ -1893,7 +3024,7 @@ class MainWindow(QMainWindow):
         pw = _CameraPreview._W
         ph = self._cam_preview.height()
         self._cam_preview.setGeometry(
-            cw.width() - _RIGHT_W - pw - 12,
+            cw.width() - self._right_panel_width - pw - 12,
             cw.height() - ph - 28,
             pw, ph,
         )
@@ -2256,7 +3387,7 @@ class MainWindow(QMainWindow):
         pw = _CameraPreview._W
         ph = self._cam_preview.height() or _CameraPreview._H
         self._cam_preview.setGeometry(
-            cw.width() - _RIGHT_W - pw - 12,
+            cw.width() - self._right_panel_width - pw - 12,
             cw.height() - ph - 28,
             pw, ph,
         )
@@ -2342,143 +3473,278 @@ class MainWindow(QMainWindow):
 
 
     def _build_header(self):
-        w = QFrame(); w.setObjectName("Header")
-        w.setFixedHeight(74)
-        w.setStyleSheet(f"""
-            QFrame#Header {{
-                background:#061427;
-                border-bottom:1px solid {C.BORDER};
-            }}
-        """)
-
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(18, 0, 18, 0)
-        lay.setSpacing(18)
+        frame = QFrame()
+        frame.setObjectName("Header")
+        frame.setFixedHeight(86)
+        frame.setStyleSheet(
+            f"QFrame#Header {{ background:#061427; border-bottom:1px solid {C.BORDER}; }}"
+        )
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(18, 7, 18, 7)
+        layout.setSpacing(14)
 
         brand = QVBoxLayout()
-        brand.setSpacing(1)
-
+        brand.setSpacing(0)
         title = QLabel("◉  JARVIS")
-        title.setFont(
-            QFont("Segoe UI", 18, QFont.Weight.Bold)
-        )
-        title.setStyleSheet(
-            f"color:{C.PRI}; background:transparent; border:none;"
-        )
+        title.setFont(QFont("Segoe UI", 23, QFont.Weight.Bold))
+        title.setStyleSheet(f"color:{C.PRI}; background:transparent; border:none;")
+        subtitle = QLabel("PREMIUM AI WORKSTATION")
+        subtitle.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        subtitle.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
         brand.addWidget(title)
+        brand.addWidget(subtitle)
+        layout.addLayout(brand)
 
-        sub = QLabel("PREMIUM AI WORKSTATION")
-        sub.setFont(
-            QFont("Courier New", 7, QFont.Weight.Bold)
-        )
-        sub.setStyleSheet(
-            f"color:{C.TEXT_DIM}; background:transparent; border:none;"
-        )
-        brand.addWidget(sub)
+        status_row = QWidget()
+        status_layout = QHBoxLayout(status_row)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(7)
+        self._status_cards = {}
+        for key, icon, name in (
+            ("system", "◈", "Sistem"),
+            ("gemini", "↔", "Gemini Live"),
+            ("microphone", "♩", "Mikrofon"),
+            ("speaker", "◖", "Hoparlör"),
+        ):
+            card = QFrame()
+            card.setObjectName("TopStatusCard")
+            card.setMinimumWidth(112)
+            card.setStyleSheet(
+                f"QFrame#TopStatusCard {{ background:#071a30; border:1px solid {C.BORDER}; border-radius:8px; }}"
+            )
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(9, 5, 9, 5)
+            card_layout.setSpacing(1)
+            title_row = QHBoxLayout()
+            title_row.setSpacing(5)
+            dot = QLabel("●")
+            dot.setFixedWidth(11)
+            icon_label = QLabel(icon)
+            icon_label.setStyleSheet(f"color:{C.PRI}; background:transparent; border:none;")
+            title_label = QLabel(name)
+            title_label.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold))
+            title_label.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
+            title_row.addWidget(dot)
+            title_row.addWidget(icon_label)
+            title_row.addWidget(title_label)
+            title_row.addStretch(1)
+            card_layout.addLayout(title_row)
+            state_label = QLabel("Veri yok")
+            state_label.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+            state_label.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
+            updated_label = QLabel("Güncelleme bekleniyor")
+            updated_label.setFont(QFont("Courier New", 6))
+            updated_label.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
+            card_layout.addWidget(state_label)
+            card_layout.addWidget(updated_label)
+            status_layout.addWidget(card, 1)
+            self._status_cards[key] = {
+                "frame": card, "dot": dot, "state": state_label,
+                "updated": updated_label, "icon": icon_label,
+            }
+        layout.addWidget(status_row, stretch=1)
 
-        lay.addLayout(brand)
-
-        center = QVBoxLayout()
-        center.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        center.setSpacing(1)
-
-        main = QLabel("●  Bağlantı doğrulanmadı")
-        self._header_state_lbl = main
-        main.setFont(
-            QFont("Segoe UI", 10, QFont.Weight.DemiBold)
-        )
-        main.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        main.setStyleSheet(
-            f"color:{C.TEXT}; background:transparent; border:none;"
-        )
-        center.addWidget(main)
-
-        sub2 = QLabel("Backend bağlantısı bekleniyor · cihaz durumu ayrı gösterilir")
-        self._connection_detail_lbl = sub2
-        sub2.setFont(QFont("Courier New", 7))
-        sub2.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sub2.setStyleSheet(
-            f"color:{C.TEXT_DIM}; background:transparent; border:none;"
-        )
-        center.addWidget(sub2)
-
-        lay.addLayout(center, stretch=1)
-
-        status = QVBoxLayout()
-        status.setAlignment(Qt.AlignmentFlag.AlignRight)
-        status.setSpacing(2)
-
-        online = QLabel("● Bağlantı durumu: bilinmiyor")
-        self._online_lbl = online
-        online.setFont(
-            QFont("Courier New", 8, QFont.Weight.Bold)
-        )
-        online.setAlignment(Qt.AlignmentFlag.AlignRight)
-        online.setStyleSheet(
-            f"color:{C.PRI}; background:transparent; border:none;"
-        )
-        status.addWidget(online)
-
-        stack = QLabel("Servis durumu: bilinmiyor")
-        stack.setFont(QFont("Courier New", 6))
-        stack.setAlignment(Qt.AlignmentFlag.AlignRight)
-        stack.setStyleSheet(
-            f"color:{C.TEXT_DIM}; background:transparent; border:none;"
-        )
-        status.addWidget(stack)
-
-        time_row = QHBoxLayout()
-        time_row.setSpacing(8)
-
+        clock_panel = QVBoxLayout()
+        clock_panel.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        clock_panel.setSpacing(2)
         self._clock_lbl = QLabel("--:--:--")
-        self._clock_lbl.setFont(
-            QFont("Courier New", 8, QFont.Weight.Bold)
-        )
-        self._clock_lbl.setStyleSheet(
-            f"color:{C.ACC2}; background:transparent; border:none;"
-        )
-
+        self._clock_lbl.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
+        self._clock_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._clock_lbl.setStyleSheet(f"color:{C.ACC2}; background:transparent; border:none;")
         self._date_lbl = QLabel("--/--/----")
         self._date_lbl.setFont(QFont("Courier New", 7))
-        self._date_lbl.setStyleSheet(
-            f"color:{C.TEXT_DIM}; background:transparent; border:none;"
-        )
+        self._date_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._date_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
+        clock_panel.addWidget(self._clock_lbl)
+        clock_panel.addWidget(self._date_lbl)
+        layout.addLayout(clock_panel)
 
-        time_row.addWidget(self._clock_lbl)
-        time_row.addWidget(self._date_lbl)
-
-        status.addLayout(time_row)
-        lay.addLayout(status)
-
-        return w
+        self._header_state_lbl = self._status_cards["gemini"]["state"]
+        self._online_lbl = self._header_state_lbl
+        self._connection_detail_lbl = self._status_cards["gemini"]["updated"]
+        self._refresh_header_statuses()
+        return frame
 
     def _tick_clock(self):
-        self._clock_lbl.setText(time.strftime("%H:%M:%S"))
-        self._date_lbl.setText(time.strftime("%a %d %b %Y"))
+        now = datetime.now().astimezone()
+        self._clock_lbl.setText(now.strftime("%H:%M:%S"))
+        self._date_lbl.setText(now.strftime("%d %b %Y"))
+        self._refresh_header_statuses()
+
+    def _touch_status(self, key: str):
+        self._status_updated_at[key] = datetime.now().astimezone()
+
+    def _refresh_header_statuses(self):
+        if not hasattr(self, "_status_cards"):
+            return
+        connected_states = {"LISTENING", "SPEAKING", "THINKING"}
+        gemini_map = {
+            "CONNECTING": ("Bağlanıyor", "#ffb44a", "Gemini Live bağlantısı kuruluyor"),
+            "AUTH_REQUIRED": ("Kimlik doğrulaması gerekli", C.RED, "API anahtarı doğrulaması gerekli"),
+            "ERROR": ("Hata", C.RED, "Canlı oturum hata durumunda"),
+            "LOCAL_ONLY": ("Kapalı · UI-only", C.TEXT_DIM, "Backend bağlantısı başlatılmadı"),
+            "LISTENING": ("Bağlı · Dinliyor", C.PRI, "Canlı oturum açık"),
+            "SPEAKING": ("Bağlı · Yanıt veriyor", C.PRI, "Yanıt seslendiriliyor"),
+            "THINKING": ("Bağlı · İşliyor", C.PRI, "Araç çağrısı işleniyor"),
+            "SLEEPING": ("Bağlı değil", C.TEXT_DIM, "Canlı oturum kapandı"),
+            "UNKNOWN": ("Bilinmiyor", C.TEXT_DIM, "Henüz bağlantı durumu alınmadı"),
+        }
+        gemini_state, gemini_color, gemini_tip = gemini_map.get(
+            self._connection_state, ("Bilinmiyor", C.TEXT_DIM, "Henüz bağlantı durumu alınmadı")
+        )
+        mic_name = str(self._mic_device_name or "").strip()
+        mic_missing = not mic_name or mic_name.upper() in {"UNKNOWN", "BILINMIYOR", "BİLİNMİYOR", "N/A"}
+        mic_unavailable = mic_name.upper().startswith(("YOK", "DEVRE KESİCİ", "HATA"))
+        if not self._backend_enabled:
+            mic_state, mic_color, mic_tip = "Kapalı · UI-only", C.TEXT_DIM, "UI-only modunda ses başlatılmadı"
+        elif mic_missing:
+            mic_state, mic_color, mic_tip = "Bilinmiyor", C.TEXT_DIM, "Mikrofon cihazı henüz bildirilmedi"
+        elif mic_unavailable:
+            mic_state, mic_color, mic_tip = "Kullanılamıyor", C.RED, mic_name
+        elif self._muted:
+            mic_state, mic_color, mic_tip = "Sessiz", "#ffb44a", mic_name
+        else:
+            mic_state, mic_color, mic_tip = "Hazır", C.GREEN, mic_name
+
+        speaker_name = str(self._speaker_device_name or "").strip()
+        speaker_missing = not speaker_name or speaker_name.upper() in {"UNKNOWN", "BILINMIYOR", "BİLİNMİYOR", "N/A"}
+        speaker_unavailable = speaker_name.upper().startswith(("YOK", "HATA"))
+        if not self._backend_enabled:
+            speaker_state, speaker_color, speaker_tip = "Kapalı · UI-only", C.TEXT_DIM, "UI-only modunda ses başlatılmadı"
+        elif speaker_missing:
+            speaker_state, speaker_color, speaker_tip = "Bilinmiyor", C.TEXT_DIM, "Hoparlör cihazı henüz bildirilmedi"
+        elif speaker_unavailable:
+            speaker_state, speaker_color, speaker_tip = "Kullanılamıyor", C.RED, speaker_name
+        else:
+            speaker_state, speaker_color, speaker_tip = "Hazır", C.GREEN, speaker_name
+
+        if not self._backend_enabled:
+            system_state, system_color, system_tip = "Yerel arayüz", C.TEXT_DIM, "Backend ve ses başlatılmadı"
+        elif self._connection_state in {"AUTH_REQUIRED", "ERROR"}:
+            system_state, system_color, system_tip = "Eylem gerekli", C.RED, "Bağlantı veya kimlik doğrulama sorunu"
+        elif self._connection_state == "CONNECTING":
+            system_state, system_color, system_tip = "Bağlanıyor", "#ffb44a", "Canlı oturum henüz doğrulanmadı"
+        elif self._connection_state in connected_states and mic_state in {"Hazır", "Sessiz"} and speaker_state == "Hazır":
+            system_state, system_color, system_tip = "Hazır", C.GREEN, "Canlı oturum ve ses cihazları bildirildi"
+        elif self._connection_state in connected_states:
+            system_state, system_color, system_tip = "Cihaz verisi eksik", "#ffb44a", "Mikrofon veya hoparlör durumu doğrulanmadı"
+        elif self._connection_state == "SLEEPING":
+            system_state, system_color, system_tip = "Bağlı değil", C.TEXT_DIM, "Canlı oturum beklemede"
+        else:
+            system_state, system_color, system_tip = "Bilinmiyor", C.TEXT_DIM, "Henüz yeterli durum verisi yok"
+
+        values = {
+            "system": (system_state, system_color, system_tip),
+            "gemini": (gemini_state, gemini_color, gemini_tip),
+            "microphone": (mic_state, mic_color, mic_tip),
+            "speaker": (speaker_state, speaker_color, speaker_tip),
+        }
+        for key, (label, color, tip) in values.items():
+            card = self._status_cards[key]
+            card["state"].setText(label)
+            card["state"].setStyleSheet(f"color:{color}; background:transparent; border:none;")
+            card["dot"].setStyleSheet(f"color:{color}; background:transparent; border:none;")
+            card["frame"].setToolTip(tip)
+            updated = self._status_updated_at.get(key)
+            if key == "system":
+                observed = [self._status_updated_at[name] for name in ("gemini", "microphone", "speaker") if self._status_updated_at.get(name)]
+                updated = max(observed) if observed else None
+            card["updated"].setText(f"Güncellendi: {updated.strftime('%H:%M:%S')}" if updated else "Güncelleme bekleniyor")
 
 
 
 
 
     def _build_left_panel(self):
-        w = QFrame(); w.setObjectName("LeftPanel"); w.setFixedWidth(270); w.setStyleSheet(f"QFrame#LeftPanel {{ background:#061427; border-right:1px solid {C.BORDER}; }}")
-        lay = QVBoxLayout(w); lay.setContentsMargins(14, 18, 14, 14); lay.setSpacing(8)
-        self._bar_cpu = MetricBar("CPU", C.PRI); self._bar_mem = MetricBar("RAM", C.ACC2); self._bar_net = MetricBar("NET", C.GREEN); self._bar_gpu = MetricBar("GPU", C.ACC); self._bar_tmp = MetricBar("TEMP", "#ff6688")
-        for bar in (self._bar_cpu, self._bar_mem, self._bar_net, self._bar_gpu, self._bar_tmp): bar.hide()
+        panel = QFrame()
+        panel.setObjectName("LeftPanel")
+        panel.setFixedWidth(self._left_panel_width)
+        panel.setStyleSheet(
+            f"QFrame#LeftPanel {{ background:#061427; border-right:1px solid {C.BORDER}; }}"
+        )
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 16, 14, 14)
+        layout.setSpacing(7)
+        self._bar_cpu = MetricBar("CPU", C.PRI)
+        self._bar_mem = MetricBar("RAM", C.ACC2)
+        self._bar_net = MetricBar("NET", C.GREEN)
+        self._bar_gpu = MetricBar("GPU", C.ACC)
+        self._bar_tmp = MetricBar("TEMP", "#ff6688")
+        for bar in (self._bar_cpu, self._bar_mem, self._bar_net, self._bar_gpu, self._bar_tmp):
+            bar.hide()
+
         self._nav_buttons = {}
-        for icon, name, active in (("▦", "Genel Bakış", True), ("♬", "Live Sohbet", False), ("☷", "Görevler", False), ("♧", "AI Ekip", False), ("✦", "Gelişim", False), ("▱", "Dosyalar", False), ("▣", "Sistem", False), ("⚙", "Ayarlar", False)):
-            item = QPushButton(f"  {icon}    {name}"); item.setObjectName("NavButton"); item.setFixedHeight(42); item.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold)); item.setCursor(Qt.CursorShape.PointingHandCursor)
-            item.setStyleSheet(f"QPushButton#NavButton {{ color:{C.TEXT_MED}; background:{'#0b2948' if active else 'transparent'}; border:none; border-radius:9px; padding-left:5px; text-align:left; }} QPushButton#NavButton:hover, QPushButton#NavButton:focus {{ color:{C.WHITE}; background:#0a223d; }}")
-            item.clicked.connect(lambda _checked=False, n=name: self._navigate(n)); self._nav_buttons[name] = item; lay.addWidget(item)
-        lay.addSpacing(8); title = QLabel("SES AYGITLARI"); title.setFont(QFont("Courier New", 7, QFont.Weight.Bold)); title.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;"); lay.addWidget(title)
-        self._mic_lbl = QLabel("🎤  Mikrofon: bilinmiyor"); self._speaker_lbl = QLabel("🔊  Hoparlör: bilinmiyor")
-        for label in (self._mic_lbl, self._speaker_lbl): label.setWordWrap(True); label.setFont(QFont("Segoe UI", 8)); label.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;"); lay.addWidget(label)
-        self._mute_btn = QPushButton(); self._mute_btn.setObjectName("MuteButton"); self._mute_btn.setFixedHeight(34); self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor); self._mute_btn.clicked.connect(self._toggle_mute); lay.addWidget(self._mute_btn); self._style_mute_btn()
-        lay.addStretch(); self._health_lbl = QLabel("●   UI yerel · bağlantı ayrı   ›"); self._health_lbl.setFixedHeight(38); self._health_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold)); self._health_lbl.setStyleSheet(f"color:{C.TEXT_MED}; background:#071c32; border:1px solid {C.BORDER}; border-radius:9px; padding-left:10px;"); lay.addWidget(self._health_lbl)
-        self._uptime_lbl = QLabel(); self._proc_lbl = QLabel(); return w
+        nav_groups = (
+            ("ÇALIŞMA", (("♬", "Canlı Sohbet"), ("☷", "Görevler"), ("♧", "AI Ekip"))),
+            ("SİSTEM", (("✦", "Gelişim"), ("▱", "Dosyalar"), ("▣", "Sistem"), ("⚙", "Ayarlar"))),
+        )
+        for group_index, (group_title, items) in enumerate(nav_groups):
+            heading = QLabel(group_title)
+            heading.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+            heading.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
+            layout.addSpacing(7 if group_index else 0)
+            layout.addWidget(heading)
+            separator = QFrame()
+            separator.setFixedHeight(1)
+            separator.setStyleSheet(f"background:{C.BORDER}; border:none;")
+            layout.addWidget(separator)
+            for icon, name in items:
+                button = QPushButton(f"  {icon}    {name}")
+                button.setObjectName("NavButton")
+                button.setFixedHeight(43)
+                button.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+                active = name == "Canlı Sohbet"
+                button.setStyleSheet(
+                    f"QPushButton#NavButton {{ color:{C.WHITE if active else C.TEXT_MED}; "
+                    f"background:{'#0b2948' if active else 'transparent'}; border:none; "
+                    "border-radius:9px; padding-left:5px; text-align:left; }"
+                    f"QPushButton#NavButton:hover, QPushButton#NavButton:focus {{ color:{C.WHITE}; background:#0a223d; }}"
+                )
+                button.clicked.connect(lambda _checked=False, target=name: self._navigate(target))
+                self._nav_buttons[name] = button
+                layout.addWidget(button)
+
+        layout.addSpacing(8)
+        device_title = QLabel("SES AYGITLARI")
+        device_title.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+        device_title.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
+        layout.addWidget(device_title)
+        self._mic_lbl = QLabel("🎤  Mikrofon: bilinmiyor")
+        self._speaker_lbl = QLabel("🔊  Hoparlör: bilinmiyor")
+        for label in (self._mic_lbl, self._speaker_lbl):
+            label.setWordWrap(True)
+            label.setFont(QFont("Segoe UI", 8))
+            label.setStyleSheet(f"color:{C.TEXT_MED}; background:transparent; border:none;")
+            layout.addWidget(label)
+
+        self._mute_btn = QPushButton()
+        self._mute_btn.setObjectName("MuteButton")
+        self._mute_btn.setFixedHeight(34)
+        self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mute_btn.clicked.connect(self._toggle_mute)
+        layout.addWidget(self._mute_btn)
+        self._style_mute_btn()
+        if not self._backend_enabled:
+            self._mute_btn.setText("MİKROFON · UI-ONLY")
+            self._mute_btn.setEnabled(False)
+            self._mute_btn.setToolTip("Ses için JARVIS'i --ui-only olmadan başlatın.")
+
+        layout.addStretch(1)
+        self._health_lbl = QLabel("●   UI yerel · bağlantı ayrı   ›")
+        self._health_lbl.setFixedHeight(38)
+        self._health_lbl.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold))
+        self._health_lbl.setStyleSheet(
+            f"color:{C.TEXT_MED}; background:#071c32; border:1px solid {C.BORDER}; "
+            "border-radius:9px; padding-left:10px;"
+        )
+        layout.addWidget(self._health_lbl)
+        self._uptime_lbl = QLabel()
+        self._proc_lbl = QLabel()
+        return panel
 
     def _build_right_panel(self):
-        w = QFrame(); w.setObjectName("RightPanel"); w.setFixedWidth(380); w.setStyleSheet(f"QFrame#RightPanel {{ background:#061427; border-left:1px solid {C.BORDER}; }}")
+        w = QFrame(); w.setObjectName("RightPanel"); w.setFixedWidth(self._right_panel_width); w.setStyleSheet(f"QFrame#RightPanel {{ background:#061427; border-left:1px solid {C.BORDER}; }}")
         lay = QVBoxLayout(w); lay.setContentsMargins(18, 16, 18, 16); lay.setSpacing(10)
         def section(title, icon="◈"):
             row = QHBoxLayout(); ico = QLabel(icon); ico.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold)); ico.setStyleSheet(f"color:{C.PRI}; background:transparent; border:none;"); lab = QLabel(title); lab.setFont(QFont("Segoe UI", 12, QFont.Weight.DemiBold)); lab.setStyleSheet(f"color:{C.WHITE}; background:transparent; border:none;"); row.addWidget(ico); row.addWidget(lab); row.addStretch(); lay.addLayout(row)
@@ -2505,18 +3771,26 @@ class MainWindow(QMainWindow):
 
     def _build_input_row(self):
         row = QWidget()
+        outer = QVBoxLayout(row)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(3)
+        self._composer_context_lbl = QLabel("")
+        self._composer_context_lbl.setFont(QFont("Segoe UI", 7, QFont.Weight.DemiBold))
+        self._composer_context_lbl.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;")
+        self._composer_context_lbl.hide()
+        outer.addWidget(self._composer_context_lbl)
 
-        lay = QHBoxLayout(row)
+        lay = QHBoxLayout()
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(5)
+        lay.setSpacing(8)
+        self._composer_mute_btn = QPushButton("🎙")
+        self._composer_mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._composer_mute_btn.clicked.connect(self._toggle_mute)
+        lay.addWidget(self._composer_mute_btn)
 
         self._input = QLineEdit()
-        self._input.setPlaceholderText(
-            "/ komut yazarak hızlı işlem yapın..."
-        )
-        self._input.setFont(
-            QFont("Segoe UI", 10)
-        )
+        self._input.setPlaceholderText("Komutunuzu yazın veya konuşun...")
+        self._input.setFont(QFont("Segoe UI", 10))
         self._input.setStyleSheet(f"""
             QLineEdit {{
                 color:{C.TEXT};
@@ -2533,18 +3807,16 @@ class MainWindow(QMainWindow):
         self._input.returnPressed.connect(self._send)
 
         send = QPushButton("➤")
-        send.setFont(
-            QFont("Segoe UI Symbol", 15, QFont.Weight.Bold)
-        )
-        send.setCursor(
-            Qt.CursorShape.PointingHandCursor
-        )
+        self._send_btn = send
+        send.setFont(QFont("Segoe UI Symbol", 15, QFont.Weight.Bold))
+        send.setFixedSize(48, 48)
+        send.setCursor(Qt.CursorShape.PointingHandCursor)
         send.setStyleSheet(f"""
             QPushButton {{
                 color:#ffffff;
                 background:{C.PRI};
                 border:1px solid {C.PRI}; border-radius:21px;
-                min-width:42px; max-width:42px;
+                min-width:48px; max-width:48px;
             }}
             QPushButton:hover {{
                 background:{C.ACC2};
@@ -2555,6 +3827,10 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(self._input, stretch=1)
         lay.addWidget(send)
+        outer.addLayout(lay)
+        self._style_mute_btn()
+        if not self._backend_enabled:
+            self._composer_mute_btn.setEnabled(False)
 
         return row
 
@@ -2686,24 +3962,6 @@ class MainWindow(QMainWindow):
 
         lay.addStretch()
 
-        audio = QLabel("AUDIO  ◆")
-        audio.setFont(
-            QFont("Courier New", 6, QFont.Weight.Bold)
-        )
-        audio.setStyleSheet(
-            f"color:{C.PRI}; background:transparent; border:none;"
-        )
-        lay.addWidget(audio)
-
-        neural = QLabel("NEURAL  ◆")
-        neural.setFont(
-            QFont("Courier New", 6, QFont.Weight.Bold)
-        )
-        neural.setStyleSheet(
-            f"color:{C.PRI}; background:transparent; border:none;"
-        )
-        lay.addWidget(neural)
-
         version = QLabel("JARVIS V4.1")
         version.setFont(
             QFont("Courier New", 6, QFont.Weight.Bold)
@@ -2725,8 +3983,17 @@ class MainWindow(QMainWindow):
             body = text.split(":", 1)[1].strip() if ":" in text else text
             if not body:
                 return
+            if hasattr(self, "_team_chat_lbl"):
+                one_line = " ".join(body.split())
+                preview = one_line[:112] + ("…" if len(one_line) > 112 else "")
+                self._team_chat_lbl.setText(f"{speaker} · {preview}")
+                self._network_canvas.update_runtime_status("history", "observed", f"Son konuşma: {speaker}")
+            scroll_bar = self._chat_scroll.verticalScrollBar()
+            follow_latest = scroll_bar.value() >= scroll_bar.maximum() - 4
             self._chat_empty_lbl.hide()
             self._chat_messages_layout.addWidget(self._bubble(speaker, body, speaker == "JARVIS"))
+            if follow_latest:
+                QTimer.singleShot(0, lambda bar=scroll_bar: bar.setValue(bar.maximum()))
 
     def _navigate(self, name: str):
         for nav_name, button in self._nav_buttons.items():
@@ -2737,7 +4004,16 @@ class MainWindow(QMainWindow):
                 f"border-radius:9px; padding-left:5px; text-align:left; }} "
                 f"QPushButton#NavButton:hover, QPushButton#NavButton:focus {{ color:{C.WHITE}; background:#0a223d; }}"
             )
-        if name in {"Genel Bakış", "Live Sohbet"}:
+        if name != "AI Ekip" and hasattr(self, "_lan_live_btn"):
+            if self._lan_live_btn.isChecked() and self._lan_scan_worker is not None and self._lan_scan_worker.isRunning():
+                self._lan_restart_after_finish = True
+            if self._lan_live_btn.isChecked():
+                self._lan_live_btn.setChecked(False)
+            self._stop_lan_scan()
+        network_view = name == "AI Ekip"
+        self._right_panel.setVisible(not network_view)
+        self._task_flow.setVisible(not network_view)
+        if name == "Canlı Sohbet":
             self._chat_stack.setCurrentIndex(0)
         elif name == "Sistem":
             self._chat_stack.setCurrentIndex(1)
@@ -2745,6 +4021,9 @@ class MainWindow(QMainWindow):
             self._chat_stack.setCurrentIndex(self._tasks_page_index)
         elif name == "AI Ekip":
             self._chat_stack.setCurrentIndex(self._team_page_index)
+            self._set_team_mode(0)
+            if not self._lan_live_btn.isChecked():
+                self._lan_live_btn.setChecked(True)
         elif name == "Gelişim":
             self._chat_stack.setCurrentIndex(self._growth_page_index)
         elif name == "Dosyalar":
@@ -2830,23 +4109,33 @@ class MainWindow(QMainWindow):
             self._log_sig.emit("SYS: Mikrofon aktif.")
 
     def _style_mute_btn(self):
-        if self._muted:
-            self._mute_btn.setText("🔇  MİKROFON SESSİZE ALINDI")
-            self._mute_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: #140006; color: {C.MUTED_C};
-                    border: 1px solid {C.MUTED_C}; border-radius: 3px;
-                }}
-            """)
+        mic_name = str(self._mic_device_name or "").upper()
+        unavailable = bool(mic_name.startswith(("YOK", "DEVRE KESİCİ", "HATA")))
+        if not self._backend_enabled:
+            left_text, icon, color, enabled = "MİKROFON · UI-ONLY", "🎙", C.TEXT_DIM, False
+        elif unavailable:
+            left_text, icon, color, enabled = "MİKROFON KULLANILAMIYOR", "🎙!", C.RED, False
+        elif self._muted:
+            left_text, icon, color, enabled = "MİKROFON SESSİZE ALINDI", "🔇", "#ffb44a", True
         else:
-            self._mute_btn.setText("🎙  MICROPHONE ACTIVE")
-            self._mute_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: #00140a; color: {C.GREEN};
-                    border: 1px solid {C.GREEN}; border-radius: 3px;
-                }}
-                QPushButton:hover {{ background: #001f10; }}
-            """)
+            left_text, icon, color, enabled = "SESSİZ MOD KAPALI", "🎙", C.GREEN, True
+        if hasattr(self, "_mute_btn"):
+            self._mute_btn.setText(f"{icon}  {left_text}")
+            self._mute_btn.setEnabled(enabled)
+            self._mute_btn.setStyleSheet(
+                f"QPushButton {{ color:{color}; background:#07182b; border:1px solid {color}; border-radius:5px; }}"
+                f"QPushButton:hover {{ background:#0a2038; }}"
+            )
+        if hasattr(self, "_composer_mute_btn"):
+            self._composer_mute_btn.setText(icon)
+            self._composer_mute_btn.setEnabled(enabled)
+            self._composer_mute_btn.setToolTip(
+                "Mikrofonu sessize al" if not self._muted else "Mikrofon sesini aç"
+            )
+            self._composer_mute_btn.setStyleSheet(
+                f"QPushButton {{ color:{color}; background:#071a30; border:1px solid {color}; "
+                "border-radius:24px; min-width:48px; max-width:48px; min-height:48px; max-height:48px; }"
+            )
 
     def _send(self):
         txt = self._input.text().strip()
@@ -2858,8 +4147,30 @@ class MainWindow(QMainWindow):
 
     def _apply_state(self, state: str):
         state = str(state or "ERROR").upper(); self.hud.state = state; self.hud.speaking = state == "SPEAKING"
+        if state in {"CONNECTING", "AUTH_REQUIRED", "ERROR", "LOCAL_ONLY", "LISTENING", "SPEAKING", "THINKING", "SLEEPING"}:
+            self._connection_state = state
+            self._touch_status("gemini")
+            self._touch_status("system")
+        elif state == "MUTED":
+            self._touch_status("microphone")
+            self._touch_status("system")
+        network_state = {
+            "CONNECTING": ("connecting", "Gemini Live oturumu deneniyor"),
+            "AUTH_REQUIRED": ("auth_required", "API anahtarı doğrulaması gerekli"),
+            "ERROR": ("error", "Canlı oturum hata durumunda"),
+            "LOCAL_ONLY": ("disconnected", "UI-only modunda backend ve ses başlatılmadı"),
+            "LISTENING": ("connected", "Canlı oturum açıldı"),
+            "SPEAKING": ("connected", "Canlı oturum açık; yanıt seslendiriliyor"),
+            "THINKING": ("connected", "Canlı oturum açık; araç çağrısı işleniyor"),
+            "SLEEPING": ("disconnected", "Canlı oturum kapandı; yeniden bağlanma bekleniyor"),
+        }.get(state)
+        initial_placeholder = state == "CONNECTING" and getattr(self, "_network_initializing", False)
+        if network_state and not initial_placeholder and hasattr(self, "_network_canvas"):
+            self._network_canvas.update_runtime_status("session", *network_state)
+            self._network_canvas.update_runtime_status("main", *network_state)
+            self._show_network_node_details(self._network_canvas.selected_node)
         if hasattr(self, "_waveform"): self._waveform.set_active(state == "SPEAKING")
-        labels = {"CONNECTING":"◌  Bağlanıyor", "AUTH_REQUIRED":"⚠  Kimlik doğrulama gerekli", "ERROR":"⚠  Hata", "LISTENING":"●  Dinliyor", "SPEAKING":"◉  Yanıt veriyor", "SLEEPING":"○  Beklemede", "MUTED":"◌  Mikrofon sessiz"}
+        labels = {"CONNECTING":"◌  Bağlanıyor", "AUTH_REQUIRED":"⚠  Kimlik doğrulama gerekli", "ERROR":"⚠  Hata", "LISTENING":"●  Dinliyor", "SPEAKING":"◉  Yanıt veriyor", "SLEEPING":"○  Beklemede", "MUTED":"◌  Mikrofon sessiz", "LOCAL_ONLY":"○  Yerel arayüz · ses kapalı"}
         text = labels.get(state, f"●  {state.title()}")
         voice_state = {
             "SPEAKING": ("SPEAKING", "Yanıt seslendiriliyor"),
@@ -2868,31 +4179,33 @@ class MainWindow(QMainWindow):
             "SLEEPING": ("SLEEPING", "Bekleme modu"),
             "MUTED": ("MUTED", "Mikrofon kapalı"),
             "ERROR": ("ERROR", "Ses bağlantısı kontrol edilmeli"),
+            "LOCAL_ONLY": ("SLEEPING", "UI-only modunda mikrofon ve ses başlatılmadı"),
         }.get(state, ("LISTENING", "Yerel UI hazır"))
         if hasattr(self, "_voice_hud"):
             self._voice_hud.set_state(*voice_state)
         if hasattr(self, "_center_state_lbl"): self._center_state_lbl.setText(text)
-        if hasattr(self, "_header_state_lbl"): self._header_state_lbl.setText(text)
-        if hasattr(self, "_online_lbl"): self._online_lbl.setText(f"● {text}")
         if hasattr(self, "_chat_meta_lbl"):
             if state in {"LISTENING", "SPEAKING", "THINKING"}:
                 self._chat_meta_lbl.setText("Backend bağlı · görev verisi canlı")
+            elif state == "LOCAL_ONLY":
+                self._chat_meta_lbl.setText("UI-only mod · backend ve ses kapalı")
             elif state == "AUTH_REQUIRED":
                 self._chat_meta_lbl.setText("Backend kimlik doğrulaması bekleniyor")
             elif state == "CONNECTING":
                 self._chat_meta_lbl.setText("Backend bağlantısı kuruluyor…")
             else:
                 self._chat_meta_lbl.setText("Backend bağlantısı bekleniyor")
-        if hasattr(self, "_connection_detail_lbl"): self._connection_detail_lbl.setText("Backend bağlantısı doğrulandı" if state not in {"CONNECTING", "AUTH_REQUIRED", "ERROR"} else "Backend bağlantısı bekleniyor")
         if hasattr(self, "_internet_lbl"):
-            online = state not in {"CONNECTING", "AUTH_REQUIRED", "ERROR"}
-            self._internet_lbl.setText("Gemini bağlı" if online else "Bekleniyor")
+            online = state in {"LISTENING", "SPEAKING", "THINKING"}
+            text = "Kapalı (UI-only)" if state == "LOCAL_ONLY" else ("Gemini bağlı" if online else "Bekleniyor")
+            self._internet_lbl.setText(text)
             self._internet_lbl.setStyleSheet(
                 f"color:{C.GREEN if online else C.TEXT_DIM}; background:transparent; border:none;"
             )
         if hasattr(self, "_health_lbl"):
-            color = C.MUTED_C if state == "MUTED" else (C.RED if state == "ERROR" else (C.PRI if state in {"CONNECTING", "AUTH_REQUIRED"} else C.GREEN))
+            color = C.TEXT_DIM if state == "LOCAL_ONLY" else (C.MUTED_C if state == "MUTED" else (C.RED if state == "ERROR" else (C.PRI if state in {"CONNECTING", "AUTH_REQUIRED"} else C.GREEN)))
             self._health_lbl.setText(f"{text}   ·   UI yerel"); self._health_lbl.setStyleSheet(f"color:{color}; background:#071c32; border:1px solid {C.BORDER}; border-radius:9px; padding-left:10px;")
+        self._refresh_header_statuses()
 
     def _apply_voice_state(self, state: str, detail: str):
         if hasattr(self, "_voice_hud"):
@@ -2907,25 +4220,33 @@ class MainWindow(QMainWindow):
             self._voice_hud.set_volume(value)
 
     def _on_mic_device(self, name: str):
-        self._mic_lbl.setText(f"🎤 {name}")
+        self._mic_device_name = str(name or "").strip()
+        self._touch_status("microphone")
+        self._touch_status("system")
+        upper = self._mic_device_name.upper()
+        unavailable = upper.startswith(("YOK", "DEVRE KESİCİ", "HATA"))
+        unknown = not self._mic_device_name or upper in {"UNKNOWN", "BILINMIYOR", "BİLİNMİYOR", "N/A"}
+        shown = "Kullanılamıyor" if unavailable else ("Bilinmiyor" if unknown else self._mic_device_name)
+        self._mic_lbl.setText(f"🎤  Mikrofon: {shown}")
         if hasattr(self, "_connection_rows"):
-            self._connection_rows["microphone"].setText("Aktif" if not str(name).upper().startswith(("YOK", "DEVRE KESİCİ")) else "Kullanılamıyor")
-        unavailable = str(name).upper().startswith(("YOK", "DEVRE KESİCİ"))
-        if unavailable:
-            self._mute_btn.setText("🎙  MICROPHONE UNAVAILABLE")
-            self._mute_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: #180b0b; color: {C.RED};
-                    border: 1px solid {C.RED}; border-radius: 3px;
-                }}
-            """)
-        else:
-            self._style_mute_btn()
+            self._connection_rows["microphone"].setText("Kullanılamıyor" if unavailable else ("Bilinmiyor" if unknown else "Hazır"))
+        self._style_mute_btn()
+        self._refresh_header_statuses()
 
     def _on_speaker_device(self, name: str):
-        self._speaker_lbl.setText(f"🔊 {name}")
+        self._speaker_device_name = str(name or "").strip()
+        self._touch_status("speaker")
+        self._touch_status("system")
+        upper = self._speaker_device_name.upper()
+        unavailable = upper.startswith(("YOK", "HATA"))
+        unknown = not self._speaker_device_name or upper in {"UNKNOWN", "BILINMIYOR", "BİLİNMİYOR", "N/A"}
+        shown = "Kullanılamıyor" if unavailable else ("Bilinmiyor" if unknown else self._speaker_device_name)
+        self._speaker_lbl.setText(f"🔊  Hoparlör: {shown}")
         if hasattr(self, "_connection_rows"):
-            self._connection_rows["speaker"].setText("Aktif" if name and not str(name).upper().startswith(("YOK", "HATA")) else "Kullanılamıyor")
+            self._connection_rows["speaker"].setText(
+                "Kullanılamıyor" if unavailable else ("Bilinmiyor" if unknown else "Hazır")
+            )
+        self._refresh_header_statuses()
 
     def _check_config(self) -> bool:
         try:
@@ -2957,6 +4278,10 @@ class MainWindow(QMainWindow):
         self._apply_state("CONNECTING"); self._log_sig.emit(f"SYS: Anahtar varlığı kaydedildi. OS={os_name.upper()}; remote doğrulama bekleniyor.")
 
     def closeEvent(self, event):
+        if hasattr(self, "_lan_live_btn") and self._lan_live_btn.isChecked():
+            self._lan_live_btn.setChecked(False)
+        if hasattr(self, "_lan_refresh_tmr"):
+            self._stop_lan_scan(wait=True)
         self.stop_camera_stream()
         self._clock_tmr.stop()
         self._metric_tmr.stop()
@@ -2985,10 +4310,10 @@ class _RootShim:
 
 
 class JarvisUI:
-    def __init__(self, face_path: str, size=None):
+    def __init__(self, face_path: str, size=None, *, backend_enabled: bool = True):
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
-        self._win = MainWindow(face_path)
+        self._win = MainWindow(face_path, backend_enabled=backend_enabled)
         self._win.show()
         self.root = _RootShim(self._app)
 
@@ -3034,6 +4359,14 @@ class JarvisUI:
 
     def set_state(self, state: str):
         self._win._state_sig.emit(state)
+
+    def set_network_status(self, component: str, status: str, detail: str = ""):
+        """Thread-safe update for a runtime state observed by the app."""
+        self._win._network_status_sig.emit(str(component), str(status), str(detail))
+
+    def set_network_tool_status(self, tool_name: str, status: str):
+        """Thread-safe update for a tool dispatch observed by JarvisLive."""
+        self._win._network_status_sig.emit("tool", str(status), str(tool_name))
 
     def set_voice_state(self, state: str, detail: str = ""):
         """Thread-safe update for the compact Voice Assistant HUD."""
