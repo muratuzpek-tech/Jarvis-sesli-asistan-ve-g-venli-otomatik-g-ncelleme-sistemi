@@ -129,17 +129,7 @@ class WaylandBackend:
         if not shutil.which("wl-copy") and self._run is _default_runner:
             raise DesktopIOError("wl-clipboard kurulu değil (sudo apt install wl-clipboard)")
         code, previous = self._run(["wl-paste", "--no-newline"], None)
-        if code != 0:
-            detail = previous.decode(errors="replace")[:200]
-            # wl-paste, pano boş olduğunda da sıfırdan farklı kod döndürebilir.
-            # Yalnızca açıkça boş pano bildirimi varsa boş kabul et.
-            if "no selection" in detail.lower():
-                previous = b""
-                had_previous = False
-            else:
-                raise DesktopIOError(f"Panodaki içerik okunamadı: {detail}")
-        else:
-            had_previous = True
+        had_previous = code == 0
         if self._run is not _default_runner:
             code, out = self._run(["wl-copy"], text.encode("utf-8"))
             if code != 0:
@@ -188,17 +178,6 @@ class WaylandBackend:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=1)
-
-            # Restore the previous text clipboard after the one-shot paste.
-            # wl-paste exposes text here; other clipboard MIME types are not preserved.
-            if had_previous:
-                restore_code, restore_output = self._run(["wl-copy"], previous)
-            else:
-                restore_code, restore_output = self._run(["wl-copy", "--clear"], None)
-
-            if restore_code != 0:
-                detail = restore_output.decode(errors="replace")[:200]
-                raise DesktopIOError(f"Pano geri yüklenemedi: {detail}")
 
     # ── fare ─────────────────────────────────────────────────────────────
     def moveTo(self, x: float | None = None, y: float | None = None, duration: float = 0.0, **_: object) -> None:  # noqa: N802
