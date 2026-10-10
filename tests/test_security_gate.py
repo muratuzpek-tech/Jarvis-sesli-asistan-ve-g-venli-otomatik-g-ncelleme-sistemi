@@ -299,8 +299,8 @@ def test_readonly_tools_of_agent_loop_are_read_or_documented():
 
 
 # ── Kapiyi yalnizca kapidan gecirilmis yollar kullaniyor (Adim 2) ──
-# E1/E2: main.py; E3: tools/agent/react_runtime.py. Yeni bir kullanici
-# eklenirse bu liste bilincli olarak guncellenmeli.
+# E1/E2: main.py; E3: tools/agent/react_runtime.py; E16: P0 plugin gate.
+# Yeni bir kullanici eklenirse bu liste bilincli olarak guncellenmeli.
 
 def test_only_the_gated_paths_import_the_gate():
     import ast
@@ -329,5 +329,10 @@ def test_only_the_gated_paths_import_the_gate():
                 users.append(str(path.relative_to(root)))
                 break
     # Adim 3.4: agent_loop (E5) ve Brain Team (E6) de kapidan gecer.
-    assert sorted(users) == ["src/jarvis/actions/agent_loop.py", "src/jarvis/core/brain_orchestrator.py",
-                             "src/jarvis/main.py", "tools/agent/react_runtime.py"], users
+    assert sorted(users) == [
+        "src/jarvis/actions/agent_loop.py",
+        "src/jarvis/core/brain_orchestrator.py",
+        "src/jarvis/core/p0_critical_fixes.py",
+        "src/jarvis/main.py",
+        "tools/agent/react_runtime.py",
+    ], users
