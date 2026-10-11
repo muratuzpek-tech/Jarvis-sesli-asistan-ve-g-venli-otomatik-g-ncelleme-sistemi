@@ -292,9 +292,10 @@ def ollama_reachable() -> bool:
         return False
 
     try:
-        # nosemgrep: python.lang.security.audit.insecure-transport.requests.request-with-http
         # Loopback HTTP is Ollama's local default; non-loopback HTTP is rejected above.
-        response = requests.get(f"{base}/api/tags", timeout=3)
+        response = requests.get(  # nosemgrep: python.lang.security.audit.insecure-transport.requests.request-with-http
+            f"{base}/api/tags", timeout=3  # nosemgrep
+        )
         return response.status_code == 200
     except requests.RequestException:
         return False
