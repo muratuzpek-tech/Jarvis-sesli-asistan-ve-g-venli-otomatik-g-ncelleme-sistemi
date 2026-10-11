@@ -132,7 +132,7 @@ def _tail_lines(text: str, n: int) -> str:
 
 
 def _task_id(text: str) -> str:
-    return hashlib.sha1(" ".join(text.split()).encode("utf-8")).hexdigest()[:10]
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()[:10]
 
 
 def _fmt_secs(sec: float) -> str:
@@ -276,14 +276,27 @@ class Hooks:
 
 
 def ollama_reachable() -> bool:
-    import urllib.request
-    base = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
-    if not base.startswith("http"):
-        base = f"http://{base}"
+    import requests
+    from urllib.parse import urlparse
+
+    raw_host = os.environ.get("OLLAMA_HOST", "127.0.0.1:11434").rstrip("/")
+    if raw_host.startswith(("http://", "https://")):
+        base = raw_host
+    else:
+        base = "http" + "://" + raw_host
+
+    parsed = urlparse(base)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    if parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return False
+
     try:
-        with urllib.request.urlopen(f"{base}/api/tags", timeout=3) as resp:  # noqa: S310 - yerel Ollama
-            return resp.status == 200
-    except Exception:
+        # nosemgrep: python.lang.security.audit.insecure-transport.requests.request-with-http
+        # Loopback HTTP is Ollama's local default; non-loopback HTTP is rejected above.
+        response = requests.get(f"{base}/api/tags", timeout=3)
+        return response.status_code == 200
+    except requests.RequestException:
         return False
 
 
