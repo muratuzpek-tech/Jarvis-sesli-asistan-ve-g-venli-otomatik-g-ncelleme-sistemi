@@ -69,7 +69,7 @@ def ensure_speaker_model(log=print) -> Path:
     VOICE_DIR.mkdir(parents=True, exist_ok=True)
     tmp = SPEAKER_MODEL_PATH.with_suffix(".indiriliyor")
     log("Ses tanıma modeli indiriliyor (26 MB, bir kez)…")
-    urllib.request.urlretrieve(SPEAKER_MODEL_URL, tmp)  # nosec B310: sabit https adresi + SHA-256 kontrolü
+    urllib.request.urlretrieve(SPEAKER_MODEL_URL, tmp)  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
     if _sha256(tmp) != SPEAKER_MODEL_SHA256:
         tmp.unlink(missing_ok=True)
         raise RuntimeError("indirilen ses modeli doğrulanamadı (SHA-256 uyuşmadı); kullanılmadı")

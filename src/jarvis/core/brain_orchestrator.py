@@ -395,7 +395,7 @@ class BrainOrchestrator:
         try:
             if path in (".", "", None):
                 for _tok in description.split():
-                    _clean = _tok.rstrip(".:,;:!?").strip(chr(34)).strip(chr(39))
+                    _clean = re.sub(r"^[\'\"]+|[\'\"]+$", "", re.sub(r"[.,:;!?]+$", "", _tok))
                     if re.match(r"^~?/[^ ]+\.[A-Za-z0-9]+$", _clean):
                         _si = _clean.rfind("/")
                         if _si > 0:
@@ -404,8 +404,8 @@ class BrainOrchestrator:
                             break
         except Exception:
             pass
-        _dc = description.strip().strip(chr(34)).strip(chr(39))
-        _cc = content.strip().strip(chr(34)).strip(chr(39))
+        _dc = description.strip().strip('"').strip("'")
+        _cc = content.strip().strip('"').strip("'")
         if content and _cc == _dc:
             content = ''
         if not content:
@@ -416,7 +416,7 @@ class BrainOrchestrator:
                 ):
                     _cm = re.search(_pt, description, re.IGNORECASE)
                     if _cm:
-                        content = _cm.group(1).strip().strip(chr(34)).strip(chr(39))
+                        content = _cm.group(1).strip().strip('"').strip("'")
                         if content:
                             break
             except Exception:
@@ -480,7 +480,7 @@ class BrainOrchestrator:
         try:
             if base_path in (".", "", None):
                 for _tok in description.split():
-                    _clean = _tok.rstrip(".:,;:!?").strip(chr(34)).strip(chr(39))
+                    _clean = re.sub(r"^[\'\"]+|[\'\"]+$", "", re.sub(r"[.,:;!?]+$", "", _tok))
                     if re.match(r"^~?/[^ ]+\.[A-Za-z0-9]+$", _clean):
                         _si = _clean.rfind("/")
                         if _si > 0:
@@ -489,8 +489,8 @@ class BrainOrchestrator:
                             break
         except Exception:
             pass
-        _dc = description.strip().strip(chr(34)).strip(chr(39))
-        _cc = content.strip().strip(chr(34)).strip(chr(39))
+        _dc = description.strip().strip('"').strip("'")
+        _cc = content.strip().strip('"').strip("'")
         if content and _cc == _dc:
             content = ''
         if not content:
@@ -501,7 +501,7 @@ class BrainOrchestrator:
                 ):
                     _cm = re.search(_pt, description, re.IGNORECASE)
                     if _cm:
-                        content = _cm.group(1).strip().strip(chr(34)).strip(chr(39))
+                        content = _cm.group(1).strip().strip('"').strip("'")
                         if content:
                             break
             except Exception:
@@ -555,7 +555,7 @@ class BrainOrchestrator:
             try:
                 if _fm_path in (".", "", None) and _desc:
                     for _tok in _desc.split():
-                        _clean = _tok.rstrip(".:,;:!?").strip(chr(34)).strip(chr(39))
+                        _clean = re.sub(r"^[\'\"]+|[\'\"]+$", "", re.sub(r"[.,:;!?]+$", "", _tok))
                         if re.match(r"^~?/[^ ]+\.[A-Za-z0-9]+$", _clean):
                             _si = _clean.rfind("/")
                             if _si > 0:
@@ -563,8 +563,8 @@ class BrainOrchestrator:
                                 _fm_name = _clean[_si+1:]
                                 break
                 if _fm_content and _desc:
-                    _dc = _desc.strip().strip(chr(34)).strip(chr(39))
-                    _cc = _fm_content.strip().strip(chr(34)).strip(chr(39))
+                    _dc = _desc.strip().strip('"').strip("'")
+                    _cc = _fm_content.strip().strip('"').strip("'")
                     if _cc == _dc:
                         _fm_content = ""
                 if not _fm_content and _desc:
@@ -574,7 +574,7 @@ class BrainOrchestrator:
                     ):
                         _cm = re.search(_pt, _desc, re.IGNORECASE)
                         if _cm:
-                            _fm_content = _cm.group(1).strip().strip(chr(34)).strip(chr(39))
+                            _fm_content = _cm.group(1).strip().strip('"').strip("'")
                             if _fm_content:
                                 break
             except Exception:

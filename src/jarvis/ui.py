@@ -1767,7 +1767,7 @@ class MainWindow(QMainWindow):
         self._chat_messages_layout.addWidget(self._chat_empty_lbl)
         msg_container = QWidget(); msg_container.setLayout(self._chat_messages_layout); msg_container.setStyleSheet("background: transparent;")
         self._chat_scroll = QScrollArea(); self._chat_scroll.setWidgetResizable(True); self._chat_scroll.setWidget(msg_container)
-        self._chat_scroll.setStyleSheet(f"QScrollArea {{ background: transparent; border: none; }} QScrollArea > QWidget > QWidget {{ background: transparent; }}"); self._chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._chat_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; } QScrollArea > QWidget > QWidget { background: transparent; }"); self._chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         v.addWidget(self._chat_scroll, stretch=1)
         self._waveform = WaveformWidget(); v.addWidget(self._waveform); v.addStretch()
         return panel
@@ -2635,7 +2635,6 @@ class MainWindow(QMainWindow):
         self._connection_rows["microphone"].setText("Bekleniyor"); self._connection_rows["speaker"].setText("Bekleniyor"); lay.addWidget(conn)
         section("Dosya Eki", "▣"); files = QFrame(); files.setObjectName("AttachmentPanel"); files.setStyleSheet(f"QFrame#AttachmentPanel {{ background:#0a2038; border:1px solid {C.BORDER}; border-radius:14px; }}")
         fv = QVBoxLayout(files); fv.setContentsMargins(12, 9, 12, 9); self._drop_zone = FileDropZone(); self._drop_zone.setFocusPolicy(Qt.FocusPolicy.StrongFocus); self._drop_zone.file_selected.connect(self._on_file_selected); self._file_hint = QLabel("Dosya seçin veya sürükleyin; burada onay işlemi yapılmaz."); self._file_hint.setWordWrap(True); self._file_hint.setStyleSheet(f"color:{C.TEXT_DIM}; background:transparent; border:none;"); fv.addWidget(self._drop_zone); fv.addWidget(self._file_hint); lay.addWidget(files)
-        self._toast_sig.emit("Dosya secildi", "info")
         section("Aktivite Akışı", "☷"); self._log = LogWidget(); self._log.setMinimumHeight(105); lay.addWidget(self._log, stretch=1)
         self._task_running_lbl = QLabel("RUNNING       --"); self._task_pending_lbl = QLabel("PENDING       --"); self._task_waiting_lbl = QLabel("APPROVAL      --"); self._task_completed_lbl = QLabel("COMPLETED     --")
         for label in (self._task_running_lbl, self._task_pending_lbl, self._task_waiting_lbl, self._task_completed_lbl): label.hide()
@@ -2914,6 +2913,7 @@ class MainWindow(QMainWindow):
             self._log_sig.emit(f"SYS: {name} için backend görünümü bağlı değil.")
 
     def _on_file_selected(self, path: str):
+        self._toast_sig.emit("Dosya seçildi", "info")
         self._current_file = path
         p = Path(path)
         cat  = _file_category(p)

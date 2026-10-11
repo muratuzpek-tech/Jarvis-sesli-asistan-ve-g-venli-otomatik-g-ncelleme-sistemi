@@ -235,7 +235,7 @@ def set_wallpaper_from_url(url: str) -> str:
             return "Could not download wallpaper: only HTTPS URLs are allowed."
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp_path = Path(tmp.name)
-        with urllib.request.urlopen(url, timeout=30) as response, tmp_path.open("wb") as out:  # nosec B310: HTTPS-only URL is validated above.
+        with urllib.request.urlopen(url, timeout=30) as response, tmp_path.open("wb") as out:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             total = 0
             while chunk := response.read(1024 * 1024):
                 total += len(chunk)

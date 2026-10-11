@@ -2,7 +2,7 @@
 dashboard/server.py — JARVIS Local HTTP Dashboard
 
 Plain HTTP on port 8000 (no SSL warnings, no firewall issues).
-Security at the application layer: AES-256-CBC with session-key-derived key.
+Security at the application layer: AES-256-GCM with session-key-derived key.
 CryptoJS is auto-downloaded once and served locally — no CDN needed after that.
 
 Install deps:  pip install fastapi "uvicorn[standard]" cryptography
@@ -70,7 +70,7 @@ def _get_gemini_key() -> str | None:
 _KEY_CHARS = [c for c in (string.ascii_uppercase + string.digits)
               if c not in ('O', 'I', 'L', '0', '1')]
 
-# ── AES-256-CBC ───────────────────────────────────────────────────────────────
+# ── AES-256-GCM ───────────────────────────────────────────────────────────────
 _AES_SALT = b'JARVIS-DASHBOARD-v1'
 
 
@@ -79,16 +79,14 @@ def _derive_key(session_key: str) -> bytes:
     return hashlib.sha256(session_key.encode('utf-8') + _AES_SALT).digest()
 
 
-def _decrypt_cbc(aes_key: bytes, enc_b64: str) -> str:
-    """Decrypt base64(IV[16] ‖ ciphertext) with AES-256-CBC + PKCS7."""
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    from cryptography.hazmat.primitives import padding as sym_pad
-    raw      = base64.b64decode(enc_b64)
-    iv, ct   = raw[:16], raw[16:]
-    dec      = Cipher(algorithms.AES(aes_key), modes.CBC(iv)).decryptor()
-    padded   = dec.update(ct) + dec.finalize()
-    unpadder = sym_pad.PKCS7(128).unpadder()
-    return (unpadder.update(padded) + unpadder.finalize()).decode('utf-8')
+def _decrypt_gcm(aes_key: bytes, enc_b64: str) -> str:
+    """Decrypt base64(nonce[12] ‖ ciphertext ‖ tag) with authenticated GCM."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    raw = base64.b64decode(enc_b64, validate=True)
+    if len(raw) < 12 + 16:
+        raise ValueError("encrypted payload is too short")
+    return AESGCM(aes_key).decrypt(raw[:12], raw[12:], None).decode("utf-8")
 
 
 # ── CryptoJS (served locally only) ────────────────────────────────────────────
@@ -193,7 +191,7 @@ def _ensure_network_access(port: int) -> None:
         # ── Try running directly (succeeds when already admin) ────────────────
         try:
             r = subprocess.run(
-                [os.environ.get("COMSPEC", "cmd.exe"), "/c", bat_path],
+                ["cmd.exe", "/c", bat_path],
                 capture_output=True, timeout=8,
             )
             if r.returncode == 0:
@@ -437,7 +435,7 @@ class DashboardServer:
         if not sk:
             return None
         try:
-            return _decrypt_cbc(self._aes_key(sk), enc_b64)
+            return _decrypt_gcm(self._aes_key(sk), enc_b64)
         except Exception:
             return None
 

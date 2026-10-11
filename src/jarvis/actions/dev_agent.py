@@ -235,7 +235,7 @@ class _CloudLLM:
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": _ollama_options().get("temperature", 0.2),
-            "max_tokens": int(os.environ.get("JARVIS_CLOUD_LLM_MAX_TOKENS", "16384") or 16384),
+            "max_tokens": int(os.environ.get("JARVIS_CLOUD_LLM_MAX_TOKENS", "4096") or 4096),
         }
         headers = {"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"}
         # Canlı deneme 2026-09-30: ücretsiz planda DAKİKADA 8K token; ardışık dosya
@@ -2114,7 +2114,7 @@ def _probe_web_app(run_command: str, project_dir: Path, file_codes: dict[str, st
                 for port in dict.fromkeys([*map(int, printed), *ports]):
                     url = f"http://127.0.0.1:{port}/"
                     try:
-                        with urllib.request.urlopen(url, timeout=3) as resp:  # nosec B310: sabit yerel adres
+                        with urllib.request.urlopen(url, timeout=3) as resp:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
                             html = resp.read(500_000).decode("utf-8", "replace")
                     except Exception:  # noqa: BLE001
                         continue

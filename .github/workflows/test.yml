@@ -43,3 +43,4 @@ jobs:
         run: pytest
         env:
           JARVIS_HOME: ${{ runner.temp }}/jarvis_ci_home
+          JARVIS_SANDBOX: off

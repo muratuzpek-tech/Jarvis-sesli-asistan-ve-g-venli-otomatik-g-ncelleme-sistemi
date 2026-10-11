@@ -55,3 +55,28 @@ def test_list_files_reports_exact_counts_by_type(tmp_path, monkeypatch):
     out = fc.list_files(str(tmp_path))
     assert ".py: 3, .zip: 2" in out and ".sh: 1" in out and "(uzantısız): 1" in out
     assert "klasör: 1" in out and "Toplam: 8." in out
+
+
+def test_absolute_directory_path_is_not_split_for_list(tmp_path, monkeypatch):
+    monkeypatch.setattr(fc, "_SAFE_ROOTS", [tmp_path])
+    target = tmp_path / "Downloads"
+    target.mkdir()
+    (target / "rapor.txt").write_text("ok", encoding="utf-8")
+
+    out = fc.file_controller({"action": "list", "path": str(target)})
+
+    assert "rapor.txt" in out
+    assert "Contents of Downloads/" in out
+
+
+def test_absolute_directory_path_is_not_split_for_bulk_delete_preview(tmp_path, monkeypatch):
+    monkeypatch.setattr(fc, "_SAFE_ROOTS", [tmp_path])
+    target = tmp_path / "Downloads"
+    target.mkdir()
+    (target / "rapor.txt").write_text("ok", encoding="utf-8")
+
+    out = fc.file_controller({"action": "delete_all_files", "path": str(target)})
+
+    assert str(target) in out
+    assert "1 dosya" in out
+    assert "confirm_code=" in out

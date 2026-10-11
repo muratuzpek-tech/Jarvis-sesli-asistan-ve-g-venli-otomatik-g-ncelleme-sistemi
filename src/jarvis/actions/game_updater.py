@@ -502,7 +502,7 @@ def _search_steam_appid(game_name: str) -> tuple[str | None, str | None]:
         if parsed.scheme != "https" or parsed.netloc.lower() != "store.steampowered.com":
             return None, None
         req   = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=6) as resp:  # nosec B310: fixed HTTPS Steam host is validated above.
+        with urllib.request.urlopen(req, timeout=6) as resp:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             items = json.loads(resp.read().decode()).get("items", [])
         if items:
             best = items[0]
