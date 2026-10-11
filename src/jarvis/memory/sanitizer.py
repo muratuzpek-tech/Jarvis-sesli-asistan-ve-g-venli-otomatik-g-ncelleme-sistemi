@@ -55,6 +55,45 @@ def sanitize(text: str) -> str:
     return text
 
 
+# Kalici bellege yazilan metin sistem istemine geri girer: talimata benzeyen
+# bir kayit (ör. bir web sayfasindan modele sizmis "onceki talimatlari yok
+# say") kalici bir prompt-injection olur. Bu kaliplar YALNIZCA isaretler -
+# metni degistirmez; karar (onay istemek) security_gate'tedir. Sezgiseldir:
+# yanlis pozitif yalnizca bir onay sorusuna, yanlis negatif bugunku davranisa
+# yol acar.
+_INSTRUCTION_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("ignore_previous", re.compile(
+        r"(?i)\b(ignore|disregard|forget|override)\b.{0,30}\b(previous|prior|above|all|earlier)\b"
+        r".{0,20}\b(instruction|rule|prompt|message)s?\b")),
+    ("ignore_previous_tr", re.compile(
+        r"(?i)(önceki|onceki|yukarıdaki|yukaridaki|tüm|tum|bütün|butun)\s+(talimat|kural|komut|yönerge|yonerge)\w*"
+        r".{0,30}(yok\s*say|unut|görmezden|gormezden|uyma|geçersiz|gecersiz)")),
+    ("role_override", re.compile(
+        r"(?i)\b(you are now|act as|from now on|new instructions?)\b|"
+        r"(bundan\s+sonra|artık|artik)\s+(sen|her\s+zaman|daima)")),
+    ("always_do", re.compile(
+        r"(?i)\b(always|her\s+zaman|daima|otomatik(?:\s+olarak)?)\b.{0,40}"
+        r"\b(call|run|execute|invoke|approve|çağır|cagir|çalıştır|calistir|onayla|gönder|gonder|sil)\w*")),
+    ("skip_confirmation", re.compile(
+        r"(?i)\b(without|don'?t|do\s+not|never)\b.{0,20}\b(ask|asking|confirm|confirmation|approval)\b|"
+        r"\b(onay|izin)\w*\s+(istemeden|almadan|sormadan)|\b(sormadan|onaysız|onaysiz)\b")),
+    ("approval_token", re.compile(r"(?i)confirm_code|confirmation_required|onay\s*kodu")),
+    ("system_tag", re.compile(r"(?i)<\s*/?\s*(system|instructions?|tool|assistant)\s*>|\[\s*(system|sistem)\s*\]")),
+    ("system_prompt", re.compile(r"(?i)\b(system|sistem)\s+(prompt|talimat\w*|mesaj\w*|instruction\w*)")),
+    ("tool_identifier", re.compile(
+        r"\b(send_message|file_controller|computer_control|terminal_tool|self_improve|agent_loop|"
+        r"code_helper|agentic_code|shutdown_jarvis|computer_settings)\b")),
+]
+
+
+def instruction_markers(text) -> list[str]:
+    """Metin modele verilen bir TALIMATA benziyorsa eslesen kural adlari
+    (bos liste = olagan icerik)."""
+    if not text or not isinstance(text, str):
+        return []
+    return [name for name, pattern in _INSTRUCTION_PATTERNS if pattern.search(text)]
+
+
 def sanitize_value(value):
     """remember()/update_memory() gibi str olmayan değerlerin de güvenle
     geçmesi için: sadece str ise sanitize eder, değilse aynen döner."""

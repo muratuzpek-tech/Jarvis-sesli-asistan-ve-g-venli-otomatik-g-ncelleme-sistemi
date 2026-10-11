@@ -11,7 +11,6 @@ actions/capability_resolver.py'nin de referans verdiği aynı ilke).
 Kullananlar (bu arayüz KORUNDU, imzalar değişmedi):
   - actions/discovery.py::_gap_analyze() / _capability_usability_analyze()
     -> get_capability_summary()
-  - actions/entegrasyon.py::_verify_module() -> guess_missing_deps(path)
   - actions/capability_resolver.py -> get_capabilities(),
     _extract_dict_keys(source, dict_name)
 """
@@ -42,7 +41,8 @@ TOOLS_KOPRU_PATH = BASE_DIR / "actions" / "tools_kopru.py"
 #     entegrasyon_uygula - bkz. tools_kopru.is_destructive())
 _ALWAYS_HIGH_RISK = {"send_message", "discovery_register", "entegrasyon_uygula"}
 #   - riski action/parametreye göre değişen araçlar (file_controller,
-#     computer_settings - bkz. _DESTRUCTIVE_FILE_ACTIONS/_SETTINGS_ACTIONS)
+#     computer_settings - bkz. file_controller.READONLY_ACTIONS ve
+#     tools_kopru._DESTRUCTIVE_SETTINGS_ACTIONS)
 #     + salt-okunur olsa da sistem/ağ bilgisi ifşa eden windows_system
 #     (bkz. windows_shell.py ekleme planı - bilinçli olarak "conditional").
 _CONDITIONAL_RISK = {"file_controller", "computer_settings", "windows_system"}
@@ -138,7 +138,10 @@ def _risk_for_tool(name: str, allowed_keys: list[str]) -> str:
     if name in _CONDITIONAL_RISK:
         return "conditional"
     if name in allowed_keys:
-        return "low"
+        # tools_kopru.is_destructive fail-closed: yalnizca acikca salt-okunur
+        # isaretli araclar onaysiz calisir.
+        from jarvis.actions.tools_kopru import _READONLY_TOOLS
+        return "low" if name in _READONLY_TOOLS else "high"
     return "unknown"
 
 

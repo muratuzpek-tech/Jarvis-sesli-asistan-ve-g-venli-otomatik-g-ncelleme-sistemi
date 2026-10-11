@@ -10,6 +10,7 @@ from pathlib import Path
 from datetime import datetime
 
 from jarvis.config import is_windows, is_mac, is_linux
+from jarvis.core.audit_log import log_action
 
 _CNW: dict = (
     {"creationflags": subprocess.CREATE_NO_WINDOW}
@@ -635,6 +636,11 @@ def _get_download_status(steam_path: Path) -> str:
 
 
 def _system_shutdown() -> None:
+    # GUVENLIK (2026-10-03): Audit log — critical risk islem
+    log_action(module="game_updater", action="system_shutdown",
+               detail="Power off / restart attempt",
+               risk="critical", approval_required=True,
+               result="EXECUTING")
     if is_windows():
         subprocess.run(["shutdown", "/s", "/t", "10"], **_CNW)
     elif is_mac():
@@ -665,6 +671,10 @@ def _watch_and_shutdown(steam_path: Path, speak=None,
             if speak:
                 speak("Download complete. Shutting down now.")
             time.sleep(5)
+            log_action(module="game_updater", action="auto_shutdown_after_download",
+                       detail="Download completed, initiating shutdown",
+                       risk="critical", approval_required=True,
+                       result="EXECUTING")
             _system_shutdown()
             return
 
@@ -947,6 +957,12 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
     hour      = int(p.get("hour",   3))
     minute    = int(p.get("minute", 0))
     shutdown  = str(p.get("shutdown_when_done", "false")).lower() == "true"
+
+    if shutdown and p.get("_user_confirmation_granted") is not True:
+        return (
+            "CONFIRMATION_REQUIRED:game_shutdown: İndirme tamamlanınca bilgisayarın "
+            "kapatılması isteniyor. Kullanıcı onayı olmadan otomatik kapatma başlatılmadı."
+        )
 
     results = []
 

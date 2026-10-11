@@ -46,19 +46,21 @@ def _exec_file_controller(params: dict) -> str:
 
 
 def _exec_backup_create(params: dict) -> str:
-    import sys
+    # Kok dizin TEK yerden: backup_tool.jarvis_project_root() (src/jarvis).
     from jarvis.backup_tool import JarvisBackupTool
-    base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
-    path = JarvisBackupTool(base).create_backup()
+    path = JarvisBackupTool.for_jarvis().create_backup()
     return f"Yedek oluşturuldu: {path}"
 
 
 def _exec_backup_rollback(params: dict) -> str:
-    import sys
+    """Jarvis klasorunun TAMAMINI en son yedege atomik olarak geri alir
+    (HIGH risk, yalnizca kullanici onayiyla). Basarisizlik "tamamlandi"
+    olarak donmez: BrainError yukseltilir, adim basarisiz sayilir."""
     from jarvis.backup_tool import JarvisBackupTool
-    base = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
-    ok = JarvisBackupTool(base).rollback()
-    return "Rollback tamamlandı." if ok else "Rollback başarısız - yedek bulunamadı."
+    tool = JarvisBackupTool.for_jarvis()
+    if not tool.rollback():
+        raise BrainError(f"executor_ai: rollback başarısız, proje değiştirilmedi: {tool.last_error}")
+    return "Rollback tamamlandı."
 
 
 def _exec_vault_encrypt(params: dict) -> str:

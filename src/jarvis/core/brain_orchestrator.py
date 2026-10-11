@@ -86,9 +86,10 @@ from jarvis.brains.memory_ai import MemoryAI
 from jarvis.brains.executor_ai import ExecutorAI
 from jarvis.brains.auditor_ai import AuditorAI
 from jarvis.core.message_bus import MessageBus
-from jarvis.core.task_manager import TaskManager, TASKS_PATH
+from jarvis.core.task_manager import TaskManager, TASKS_PATH, WAITING_APPROVAL
 from jarvis.core import watchdog
 from jarvis.actions import capability_resolver
+from jarvis import security_gate as _gate
 
 DEFAULT_INTERVAL_S = 20.0
 MAX_AUDIT_ROUNDS = 2   # ayni adim en fazla bu kadar kez tekrar denenir
@@ -273,6 +274,113 @@ class BrainOrchestrator:
                 except Exception as e:
                     print(f"[BrainTeam] ⚠️ Sesli bildirim başarısız (sonuç yine de loglandı): {e}")
 
+    def _describe_pending_step(self, task: dict, step: dict) -> dict:
+        """Onay isteginde gosterilecek arac/eylem/hedef. Hedef, adimi GERCEKTEN
+        calistiracak karar noktasiyla (_resolve_action_with_file_modification)
+        ayni yerden cozulur - kullanicinin gordugu yol, yazilacak yoldur."""
+        if step.get("agent") == "coder_ai":
+            return {"tool": "coder_ai", "action": "modify_critical_file",
+                    "target": step.get("file_path") or "—"}
+        base_path = task.get("payload", {}).get("_active_folder", ".")
+        try:
+            tool, params = self._resolve_action_with_file_modification(task, step, base_path)
+        except Exception:
+            tool, params = step.get("tool") or step.get("agent") or "?", dict(step.get("parameters") or {})
+        action = params.get("action") or step.get("action") or "?"
+        target = "—"
+        if tool == "file_controller":
+            try:
+                from jarvis.actions.file_controller import _resolve_path
+                base = _resolve_path(str(params.get("path") or "."))
+                name = params.get("name") or ""
+                target = str((base / name if name else base).resolve())
+                if params.get("destination"):
+                    target += f" → {_resolve_path(str(params['destination'])).resolve()}"
+            except Exception:
+                target = f"{params.get('path', '')}/{params.get('name', '')}"
+        elif params:
+            # Gizli argumanlar (ör. vault password) "***", icerik alanlari
+            # yalnizca uzunluk: bu metin kullaniciya, modele ve
+            # task_results.log'a gider.
+            from jarvis.core.audit_log import format_params
+            target = format_params(params, limit=60)
+        return {"tool": tool, "action": action, "target": target}
+
+    def _audit(self, event: str, task: dict | None, step: dict | None, *, result="",
+               approved: bool = False, executed: bool = False, verdict: str | None = None) -> None:
+        """Onay istegi, onay, ret ve yurutme olaylari TEK denetim kaydina
+        (JARVIS_HOME/memory/audit.log). Arac ve argumanlar yurutmeyle ayni
+        cozumlemeden (_resolve_step_call) gelir ve maskelenir; onay metni
+        (hedefte arguman degerleri olabilir) kayda yazilmaz. Kayit hatasi
+        gorev akisini bozmaz."""
+        task = task or {}
+        step = step or {}
+        try:
+            from jarvis.core.audit_log import log_tool_event
+            agent = step.get("agent")
+            if agent == "executor_ai":
+                try:
+                    tool, params = self._resolve_step_call(task, step)
+                except Exception as e:
+                    tool, params = "executor_ai", {"cozumleme_hatasi": type(e).__name__}
+            elif agent == "coder_ai":
+                tool, params = "coder_ai", {
+                    "operation": step.get("operation", "modify"),
+                    "file_path": step.get("file_path") or task.get("payload", {}).get("file_path", ""),
+                }
+            else:
+                tool, params = str(agent or "brain_team"), {}
+            log_tool_event(
+                source="brain_team", event=event, tool=str(tool), params=dict(params),
+                result=str(result)[:500], approved=approved, executed=executed,
+                verdict=verdict, task_id=str(task.get("id", "")),
+                risk=str(step.get("risk") or ("low" if verdict == "allow" else "high")),
+            )
+        except Exception as e:
+            print(f"[BrainTeam] ⚠️ audit yazılamadı: {e}")
+
+    def _request_approval(self, task: dict) -> None:
+        """HIGH riskli adim beklemeye alindiginda kullaniciya ONAY ISTEGI
+        gonderir (sonuc ozeti degil). Canli oturum (JarvisLive) bunu
+        request_brain_team_approval ile tek kullanimlik, parmak izi bagli
+        onay mekanizmasina kaydeder; onay ancak kullanicinin gercek bir
+        sonraki turundan gelir."""
+        step = task["payload"].get("pending_step") or {}
+        info = self._describe_pending_step(task, step)
+        message = (
+            f"Onay gerekiyor: AI Beyin Takımı '{info['tool']}' aracıyla "
+            f"'{info['action']}' işlemi yapacak. Hedef: {info['target']}. "
+            f"Onaylamak için 'evet', iptal etmek için 'hayır' deyin. "
+            f"(görev id={task['id']}, risk={step.get('risk', '?')})"
+        )
+        try:
+            self._results_logger.info(f"[{WAITING_APPROVAL.upper()}] (id={task['id']}) {message}")
+        except Exception as e:
+            print(f"[BrainTeam] ⚠️ Onay istegi loglanamadi: {e}")
+        self._audit("approval_requested", task, step, result="kullanıcı onayı bekleniyor",
+                    verdict="needs_approval")
+
+        player = self._last_player
+        if player is None:
+            return
+        hook = getattr(player, "request_brain_team_approval", None)
+        try:
+            call = self._approval_call(task, step)
+        except Exception:
+            call = None   # cozulemeyen adim: onay sozde cagriya baglanir, calisamaz
+        try:
+            if callable(hook):
+                hook(task["id"], step, message, call=call)
+                return
+            log_fn = getattr(player, "write_log", None) or getattr(getattr(player, "ui", None), "write_log", None)
+            if callable(log_fn):
+                log_fn(f"[BrainTeam] {message}")
+            speak_fn = getattr(player, "speak", None)
+            if callable(speak_fn):
+                speak_fn(f"[BRAIN_TEAM_ONAY_ISTEGI] {message}")
+        except Exception as e:
+            print(f"[BrainTeam] ⚠️ Onay istegi iletilemedi (loglandi): {e}")
+
     def get_team_health(self) -> str:
         """"2. Heartbeat/health check": her beynin gerçekten çalışıyor mu
         yoksa takılı mı olduğunu (status + o durumda ne kadar süredir
@@ -307,36 +415,79 @@ class BrainOrchestrator:
         lines = []
         for t in all_tasks[-15:]:
             extra = ""
-            if t["status"] == "waiting_approval" and t["payload"].get("pending_step"):
+            if t["status"] == WAITING_APPROVAL and t["payload"].get("pending_step"):
                 ps = t["payload"]["pending_step"]
                 extra = f" — ONAY BEKLİYOR: [{ps.get('agent')}] {ps.get('description', '')[:60]} (risk={ps.get('risk')})"
             lines.append(f"[{t['id']}] {t['status']}: {t['name'][:70]}{extra}")
         return f"{len(all_tasks)} takım görevi (son {len(lines)} tanesi):\n" + "\n".join(lines)
 
-    def approve(self, task_id: str) -> str:
+    def approve(self, task_id: str, *, approved_call: _gate.ResolvedCall | None = None) -> str:
+        """Onay bekleyen adimi calistirir. YALNIZCA main.py'nin kullanici-turu
+        onay yolu cagirir ve depodaki kendi istegini tuketen onayin cagrisini
+        (approved_call) verir. Calistirmadan hemen once adim yeniden cozulur
+        ve kapiya sorulur (kaynak BRAIN_TEAM): DENY ya da onaylanan parmak izi
+        ile calisacak cagrinin parmak izi birebir esit degilse calismaz."""
         task = self.tasks.get(task_id)
         if task is None:
             return f"'{task_id}' id'li AI takım görevi bulunamadı."
-        if task["status"] != "waiting_approval" or not task["payload"].get("pending_step"):
+        if task["status"] != WAITING_APPROVAL or not task["payload"].get("pending_step"):
             return f"'{task_id}' onay bekleyen bir AI takım görevi değil (durum: {task['status']})."
 
         step = task["payload"]["pending_step"]
         try:
+            call = self._approval_call(task, step)
+            decision = _gate.authorize(call.tool, call.params, _gate.Source.BRAIN_TEAM)
+        except Exception as e:
+            call, decision = None, None
+            resolve_error = e
+        if decision is not None and decision.verdict is _gate.Verdict.DENY:
+            self._audit("gate_denied", task, step, result=decision.reason, verdict="deny")
+            task["payload"]["pending_step"] = None
+            self.tasks.update(task_id, status="failed", payload=task["payload"],
+                              error=f"Güvenlik kapısı reddetti: {decision.reason}")
+            self._notify_result(self.tasks.get(task_id))
+            return f"Adım güvenlik kapısı tarafından reddedildi; çalıştırılmadı ({decision.reason})."
+        if call is None or approved_call is None or approved_call.tool != call.tool \
+                or approved_call.fingerprint != call.fingerprint:
+            # Onaylanan cagri ile calisacak cagri ayni degil (adim/hedef
+            # degismis ya da onay kaniti yok): calistirma, guncel hali sor.
+            why = (f"çözümlenemedi: {resolve_error}" if call is None
+                   else "onaylanan çağrı ile çalıştırılacak çağrı aynı değil")
+            self._audit("approval_mismatch", task, step, result=why, verdict="needs_approval")
+            if call is not None:
+                self._request_approval(task)
+            return f"Onay uygulanmadı: {why}. Hiçbir şey çalıştırılmadı."
+        grant = _gate.Grant(call.fingerprint) if decision.verdict is _gate.Verdict.NEEDS_APPROVAL else None
+        _gate.prepare(decision, grant)   # savunma derinligi: yetki yoksa PermissionError
+
+        ran = False   # adim calisti mi? (sonraki hata "post_failure" olarak kaydedilir)
+        task["_approved_call"] = call     # yurutme bu cagriyla, yeniden cozumleme yok
+        try:
             result = self._execute_step(task, step)
+            ran = True
+            self._audit("approved_executed", task, step, result=result, approved=True,
+                        executed=True, verdict="needs_approval")
             task["payload"]["pending_step"] = None
             self._finish_step(task, step, result)
             self.tasks.update(task_id, status="pending", payload=task["payload"])
             return f"Onaylandı ve gerçekleştirildi: {str(result)[:200]}"
         except Exception as e:
+            self._audit("post_failure" if ran else "approved_failed", task, step,
+                        result=f"HATA: {e}", approved=True, executed=True,
+                        verdict="needs_approval")
             task["payload"]["pending_step"] = None
             self.tasks.update(task_id, status="failed", error=str(e), payload=task["payload"])
             self._notify_result(self.tasks.get(task_id))
             return f"Onaylandı ama çalıştırılırken hata oluştu: {e}"
+        finally:
+            task.pop("_approved_call", None)
 
     def deny(self, task_id: str) -> str:
         task = self.tasks.get(task_id)
         if task is None:
             return f"'{task_id}' id'li AI takım görevi bulunamadı."
+        self._audit("denied", task, task["payload"].get("pending_step"),
+                    result="kullanıcı reddetti", verdict="needs_approval")
         task["payload"]["pending_step"] = None
         self.tasks.update(task_id, status="cancelled", payload=task["payload"])
         self._safe_memory_event("orchestrator", "task_denied", task["name"])
@@ -493,6 +644,12 @@ class BrainOrchestrator:
             }
             if file_mod.get("action") == "write":
                 params["append"] = bool(file_mod.get("append", False))
+        elif isinstance(file_mod, dict) and file_mod.get("action"):
+            # delete/move/list/... : file_modification'daki eylem AYNEN
+            # kullanilir - aciklamadan yeniden tahmin edilmez.
+            action = "file_controller"
+            params = {k: v for k, v in file_mod.items() if v not in (None, "")}
+            params.setdefault("path", base_path)
         else:
             action, params = self._resolve_executor_call(step, base_path)
 
@@ -651,7 +808,40 @@ class BrainOrchestrator:
 
         return self._infer_executor_action(desc, base_path)
 
-    def _risk_of_step(self, step: dict) -> tuple[str, str]:
+    def _resolve_step_call(self, task: dict | None, step: dict) -> tuple[str, dict]:
+        """Risk degerlendirmesinin, onay metninin ve yurutmenin ORTAK karar
+        noktasi: executor adiminin GERCEKTEN calistiracagi (tool, params)."""
+        task = task or {"payload": {}}
+        # Onaylanmis / kapidan gecmis cagri yurutme sirasinda SABITTIR:
+        # yeniden cozumleme yapilmaz (plan §4.1-1). Yalnizca bellekte durur.
+        pinned = task.get("_approved_call")
+        if pinned is not None:
+            return pinned.tool, dict(pinned.params)
+        base_path = task.get("payload", {}).get("_active_folder", ".")
+        return self._resolve_action_with_file_modification(task, step, base_path)
+
+    def _approval_call(self, task: dict | None, step: dict) -> _gate.ResolvedCall:
+        """Adimin kapidaki cozulmus hali (arac + normalize argumanlar, kaynak
+        BRAIN_TEAM). Onay istegi bu cagriya baglanir; calistirmadan hemen once
+        yeniden hesaplanir ve parmak izi onaylananla birebir eslesmelidir."""
+        task = task or {"payload": {}}
+        agent = step.get("agent")
+        desc = step.get("description", "")
+        if agent == "executor_ai":
+            tool, params = self._resolve_step_call(task, step)
+        elif agent == "coder_ai":
+            tool, params = "coder_ai", {
+                "operation": step.get("operation", "modify"),
+                "file_path": step.get("file_path") or task.get("payload", {}).get("file_path") or "",
+                "change_request": desc,
+            }
+        elif agent == "research_ai":
+            tool, params = "research_ai", {"query": desc}
+        else:
+            raise ValueError(f"Bilinmeyen/uygun olmayan beyin: {agent!r}")
+        return _gate.resolve(tool, params, _gate.Source.BRAIN_TEAM)
+
+    def _risk_of_step(self, step: dict, task: dict | None = None) -> tuple[str, str]:
         """Riski BELİRLEYEN yer security_ai beynidir (deterministik kural
         tablosu + Gemini'den sadece okunabilir açıklama) - burada SADECE
         hangi (tool, action) çiftinin security_ai'ye sorulacağı seçilir, ve
@@ -692,20 +882,23 @@ class BrainOrchestrator:
             # başarısız olsa bile, _execute_step() içindeki mevcut
             # try/except tarafından düzgünce yakalanıp failed_steps'e
             # düşecek - burada sadece güvenli bir yer tutucuyla devam edilir.
+            # Risk, _execute_step'in calistiracagi AYNI cozumlemeden sorulur
+            # (eskiden yalnizca aciklamadan tahmin ediliyordu: "notlar3.txt
+            # olustur" -> info/LOW, yurutme -> create_file). Cozumleme hata
+            # verirse fail-closed HIGH.
             try:
-                inferred_action, inferred_params = self._resolve_executor_call(step)
-            except ValueError:
-                inferred_action = step.get("tool") or step.get("capability") or "unknown"
-                inferred_params = {}
+                inferred_action, inferred_params = self._resolve_step_call(task, step)
+            except Exception as e:
+                return "high", (f"Adım çözümlenemedi ({type(e).__name__}: {e}); "
+                                f"güvenli tarafta kalınarak HIGH risk.")
             if inferred_action == "file_controller":
                 # DÜZELTME: burası ÖNCEDEN HER ZAMAN "info" (LOW risk)
                 # hardcode ediyordu - yani _infer_executor_action()'ın
                 # GERÇEKTE hangi iç eylemi (create_file/create_folder/
                 # delete/move/...) seçtiği risk değerlendirmesine hiç
-                # yansımıyordu. security_ai.py'nin kendi kural tablosu
-                # create_file/create_folder için zaten MEDIUM, delete/move
-                # için HIGH diyor - ama bu tablo hiç SORULMUYORDU. Artık
-                # gerçek iç eylem security_ai'ye soruluyor.
+                # yansımıyordu. security_ai salt-okunur eylemler dışındaki
+                # her file_controller eylemine HIGH diyor - ama hiç
+                # SORULMUYORDU. Artık gerçek iç eylem security_ai'ye soruluyor.
                 tool, action = "file_controller", inferred_params.get("action", "info")
             elif inferred_action == "windows_system":
                 # windows_system SALT-OKUNUR (madde 11) - is_destructive()
@@ -782,13 +975,23 @@ class BrainOrchestrator:
                 # (bu metodun dönüşünden sonra _finish_step -> Auditor ->
                 # gerekirse rollback). Hiçbir satır değiştirilmedi.
                 # 14. BACKUP KURALI: ONCE backup, SONRA degisiklik.
+                # Proje yedegi (src/jarvis) HEDEF dosyayi kapsamaz - hedef cogu
+                # zaman proje disindadir. Bu yuzden hedef dosyanin da ayrica
+                # yedegi alinir; otomatik geri alma YALNIZCA bu dosyayi geri
+                # yukler (bkz. _finish_step). Yedeklerden biri alinamazsa
+                # degisiklik YAPILMAZ.
+                target_backup = self._backup_modify_target(task, file_path)
                 backup_resp = self.bus.send("orchestrator", "executor_ai", "backup_create",
                                              payload={"action": "backup_create", "params": {}})
+                if backup_resp.get("status") != "completed":
+                    raise RuntimeError(f"Proje yedeği alınamadı, '{file_path}' değiştirilmedi: "
+                                       f"{backup_resp.get('result')}")
                 resp = self.bus.send("orchestrator", "coder_ai", desc,
                                       payload={"file_path": file_path, "change_request": desc})
                 resp.setdefault("result", {})
                 if isinstance(resp["result"], dict):
                     resp["result"]["backup"] = backup_resp.get("result")
+                    resp["result"]["target_backup"] = str(target_backup)
                 return resp
             finally:
                 lock.release()
@@ -798,13 +1001,22 @@ class BrainOrchestrator:
             # başarıyla oluşturulmuş bir klasör varsa (bkz. _finish_step),
             # bu adım o klasörün İÇİNDE çalışsın - eskiden hep "." (düz
             # çalışma dizini) kullanılıyordu.
-            base_path = task["payload"].get("_active_folder", ".")
             # YENİ mimari (2026-09-16, 2026-09-22 birlestirildi): action/params
             # karari artik TEK bir ortak metotta (_resolve_action_with_
             # file_modification) - hem burasi hem _verify_file_action AYNI
             # sonucu uretir, bir daha birbirinden sapmaz (bkz. o metodun
             # docstring'i).
-            action, params = self._resolve_action_with_file_modification(task, step, base_path)
+            action, params = self._resolve_step_call(task, step)
+            # Gizli argumanlar diske maskeli yazilir, gercek deger yalnizca
+            # surec belleginde durur (core/task_manager). Deger yoksa (ör.
+            # yeniden baslatma) maske ile calistirma - fail-closed.
+            from jarvis.core.audit_log import masked_secret_keys
+            missing = masked_secret_keys(params)
+            if missing:
+                raise RuntimeError(
+                    f"Gizli argüman(lar) ({', '.join(missing)}) bellekte yok (Jarvis yeniden "
+                    "başlatılmış olabilir; güvenlik için diske yazılmadı). Adım çalıştırılmadı; "
+                    "görevi değeri yeniden vererek başlatın.")
 
             # DUZELTME (code review bulgusu, 2026-09-28, PR #3): icerik
             # geri-kazanim + "sessizce bos yazma" korumasi ARTIK yukaridaki
@@ -914,6 +1126,40 @@ class BrainOrchestrator:
         except Exception as e:
             evidence["error"] = f"'{target}' kontrol edilirken hata: {e}"
         return evidence
+
+    @staticmethod
+    def _step_key(task: dict) -> str:
+        return str(task["payload"].get("step_index", 0))
+
+    def _backup_modify_target(self, task: dict, file_path: str):
+        """Hedef dosyanin yedegini alir. Ayni adim tekrar denenirse (denetim
+        turlari) ILK degisiklikten onceki yedek korunur - geri alma
+        kullanicinin orijinal dosyasina doner. Hata yukseltilir."""
+        from jarvis.backup_tool import JarvisBackupTool
+        backups = task["payload"].setdefault("target_backups", {})
+        key = self._step_key(task)
+        if key in backups:
+            return backups[key]["backup"]
+        folder = JarvisBackupTool.for_jarvis().backup_file(file_path)
+        backups[key] = {"file": str(Path(file_path).resolve()), "backup": str(folder)}
+        return str(folder)
+
+    def _restore_modify_target(self, task: dict) -> None:
+        from jarvis.backup_tool import JarvisBackupTool
+        entry = task["payload"].get("target_backups", {}).get(self._step_key(task))
+        record = {"step_index": task["payload"].get("step_index", 0)}
+        if not entry:
+            record.update(ok=False, error="bu adım için hedef dosya yedeği yok")
+        else:
+            tool = JarvisBackupTool.for_jarvis()
+            try:
+                ok = tool.restore_file(entry["backup"])
+                record.update(ok=ok, file=entry["file"], error=None if ok else tool.last_error)
+            except Exception as e:
+                record.update(ok=False, file=entry["file"], error=f"{type(e).__name__}: {e}")
+        task["payload"].setdefault("rollbacks", []).append(record)
+        if not record["ok"]:
+            print(f"[BrainTeam] ❌ Otomatik geri alma BAŞARISIZ: {record.get('error')}")
 
     def _finish_step(self, task: dict, step: dict, result) -> None:
         # "6. Result verification": agent "tamamlandı" dedi diye görev
@@ -1056,12 +1302,15 @@ class BrainOrchestrator:
                 # yukleyip veri kaybina yol acabilirdi. operation == "modify"
                 # (ya da eski/operation'siz gorevler) icin davranis AYNEN
                 # KORUNDU.
+                # DUZELTME (2026-10-06): eskiden burada executor backup_rollback
+                # cagriliyordu - Jarvis'in KENDI klasorunun (src/jarvis) TAMAMI
+                # silinip en son yedekten yeniden yaziliyordu, degistirilen
+                # HEDEF dosya ise (cogu zaman proje disinda) hic geri
+                # alinmiyordu. Artik yalnizca o hedef dosya, adimin ILK
+                # degisikliginden onceki yedeginden geri yuklenir; sonuc (basari
+                # ya da hata) gorev kaydina yazilir, yutulmaz.
                 if step.get("agent") == "coder_ai" and step.get("operation") != "analyze":
-                    try:
-                        self.bus.send("orchestrator", "executor_ai", "rollback",
-                                       payload={"action": "backup_rollback", "params": {}})
-                    except Exception:
-                        pass
+                    self._restore_modify_target(task)
                 task["payload"]["step_index"] = task["payload"].get("step_index", 0) + 1
                 task["payload"]["audit_retries"] = 0
                 task["payload"].setdefault("failed_steps", []).append(step.get("description", ""))
@@ -1183,24 +1432,59 @@ class BrainOrchestrator:
                 self.tasks.update(task["id"], payload=payload)
                 return
 
-        risk, reason = self._risk_of_step(step)
-        if risk == "high":
+        risk, reason = self._risk_of_step(step, task)
+        # Calistirmadan hemen once kapi (kaynak BRAIN_TEAM). classify_risk
+        # yalnizca YUKARI yuvarlar: kapi onay istiyorsa risk dusuk olsa da
+        # beklenir; DENY ise adim hic calismaz.
+        try:
+            call = self._approval_call(task, step)
+            decision = _gate.authorize(call.tool, call.params, _gate.Source.BRAIN_TEAM)
+        except Exception:
+            call, decision = None, None   # cozulemedi: _risk_of_step zaten HIGH
+        if decision is not None and decision.verdict is _gate.Verdict.DENY:
+            self._audit("gate_denied", task, step, result=decision.reason, verdict="deny")
+            payload.setdefault("failed_steps", []).append(step.get("description", ""))
+            payload["step_index"] = idx + 1
+            self.tasks.update(task["id"], payload=payload)
+            self._safe_memory_event(step.get("agent", "?"), "gate_denied", decision.reason[:200])
+            return
+        if decision is None or decision.verdict is _gate.Verdict.NEEDS_APPROVAL:
+            if risk != "high" and decision is not None:
+                reason = f"{reason} (güvenlik kapısı: {decision.reason})"
+            risk_needs_approval = True
+        else:
+            risk_needs_approval = risk == "high"
+        if risk_needs_approval:
             step_with_risk = {**step, "risk": risk, "reason": reason}
             payload["pending_step"] = step_with_risk
-            self.tasks.update(task["id"], status="waiting_approval", payload=payload)
+            self.tasks.update(task["id"], status=WAITING_APPROVAL, payload=payload)
             print(f"[BrainTeam] ℹ️ Onay bekleyen adım (id={task['id']}): "
                   f"[{step.get('agent')}] {step.get('description', '')[:80]} — risk={risk} ({reason})")
+            # Eskiden burada kullaniciya HIC bildirim gitmiyordu; gorev
+            # sessizce, suresiz bekliyordu.
+            self._request_approval(self.tasks.get(task["id"]))
             return
 
+        step_with_risk = {**step, "risk": risk}
+        ran = False   # adim calisti mi? (sonraki hata "post_failure" olarak kaydedilir)
+        task["_approved_call"] = call     # kapidan gecen cagri; yeniden cozumleme yok
         try:
             result = self._execute_step(task, step)
+            ran = True
+            self._audit("executed", task, step_with_risk, result=result, executed=True, verdict="allow")
             self._finish_step(task, step, result)
             self.tasks.update(task["id"], payload=payload)
         except Exception as e:
+            # Tek tutarli dizi: calismadiysa "execution_failed"; calistiktan
+            # sonra (_finish_step / kayit) hata verdiyse "executed" + "post_failure".
+            self._audit("post_failure" if ran else "execution_failed", task, step_with_risk,
+                        result=f"HATA: {e}", executed=True, verdict="allow")
             payload.setdefault("failed_steps", []).append(step.get("description", ""))
             payload["step_index"] = idx + 1
             self.tasks.update(task["id"], payload=payload)
             self._safe_memory_event(step.get("agent", "?"), "step_error", str(e)[:200])
+        finally:
+            task.pop("_approved_call", None)
 
     def _worker_loop(self, interval_seconds: float) -> None:
         print(f"[BrainTeam] ✅ AI Beyin Takımı başladı ({interval_seconds:.0f}sn'de bir kontrol).")
@@ -1323,8 +1607,8 @@ def brain_team_tool(parameters: dict = None, player=None) -> str:
         return orch.start_goal(params.get("goal", ""))
     if action == "status":
         return orch.list_status()
-    if action == "approve":
-        return orch.approve(params.get("task_id", ""))
+    # "approve" bilerek YOK: bekleyen adim yalnizca main.py'nin kullanici-turu
+    # onay yolundan (_handle_brain_team_reply -> orch.approve) calisir.
     if action == "deny":
         return orch.deny(params.get("task_id", ""))
     if action == "health":
@@ -1345,4 +1629,4 @@ def brain_team_tool(parameters: dict = None, player=None) -> str:
             caps = f" — capabilities: {', '.join(entry['capabilities'])}" if entry["capabilities"] else ""
             lines.append(f"{name}: {entry['module']}.{entry['class']} ({real}){caps}")
         return "\n".join(lines)
-    return f"Bilinmeyen action: '{action}'. start/status/approve/deny/health/agents kullanın."
+    return f"Bilinmeyen action: '{action}'. start/status/deny/health/agents kullanın."

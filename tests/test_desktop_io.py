@@ -79,7 +79,7 @@ def test_write_turkish_layout_uses_clipboard_and_restores_it():
     backend(r, layout="tr").write("Şişli'de ığdır")
     copies = [stdin for a, stdin in r.calls if a == ["wl-copy"]]
     assert copies == ["Şişli'de ığdır".encode(), b"eski pano"]
-    assert ["key", "29:1", "47:1", "47:0", "29:0"] in r.ydotool()  # Ctrl+V
+    assert ["key", "29:1", "42:1", "47:1", "47:0", "42:0", "29:0"] in r.ydotool()  # Ctrl+Shift+V
     assert r.clipboard == b"eski pano"
 
 
@@ -199,3 +199,46 @@ def test_falls_back_to_pyautogui_and_raises_importerror_when_unusable(monkeypatc
     except Exception:
         pyautogui = None
     assert pyautogui is None and mod is not None
+
+def test_write_fails_if_clipboard_copy_fails():
+    r = FakeRunner(fail={"wl-copy"})
+    with pytest.raises(DesktopIOError, match="wl-copy başarısız"):
+        backend(r, layout="tr").write("Türkçe metin")
+
+
+def test_write_continues_when_clipboard_read_fails():
+    """wl-paste başarısız olsa da yazma iptal olmaz (had_previous=False, pano temizlenerek devam)."""
+    r = FakeRunner(fail={"wl-paste"})
+    backend(r, layout="tr").write("Türkçe metin")
+    # İşlem tamamlanmalı — hata fırlatılmamalı
+    assert r.ydotool()
+
+
+def test_custom_runner_path_restores_previous_clipboard(monkeypatch):
+    """Custom runner yolunda pano geri yüklenmeli."""
+    from jarvis.desktop_io import wayland
+
+    run_calls = []
+
+    def fake_run(cmd, input_data):
+        run_calls.append((list(cmd), input_data))
+        if cmd[0] == "wl-paste":
+            return 0, "eski pano".encode()
+        return 0, b""
+
+    # NOTE: _default_runner is NOT replaced — keeps identity check working
+    monkeypatch.setattr(wayland.time, "sleep", lambda _: None)
+
+    b = WaylandBackend(layout="tr")
+    b._run = fake_run  # custom runner → not _default_runner → custom path
+    b.PAUSE = 0
+    b.write("Turkce metin")
+
+    # Metin wl-copy ile gönderilmeli
+    assert any(c == ["wl-copy"] and d == "Turkce metin".encode() for c, d in run_calls), \
+        f"Text not in run_calls: {run_calls}"
+    # Pano geri yüklenmeli
+    assert any(c == ["wl-copy"] and d == "eski pano".encode() for c, d in run_calls), \
+        f"Clipboard restore not in run_calls: {run_calls}"
+
+

@@ -274,6 +274,10 @@ def test_dev_agent_routes_go_to_devkit(tmp_path, monkeypatch):
     preview = da.dev_agent({"description": "rapor yaz", "language": "Go"})
     assert "go mod tidy" in preview and "pip" not in preview
     code = preview.split("confirm_code='")[1].split("'")[0]
+    # Onay kapisi fail-closed: kullanicinin gercek "evet" turu gerekir.
+    monkeypatch.setattr(da, "_last_user_turn_at", None)
+    monkeypatch.setattr(da, "_last_user_turn_text", None)
+    da.note_user_turn("evet", now=da._pending_dev_agent[code]["issued_at"] + 5)
     result = da.dev_agent({"description": "rapor yaz", "language": "Go", "confirm_code": code})
     assert "çalışıyor" in result, result
     assert (tmp_path / "ram_report" / "report.log").is_file()

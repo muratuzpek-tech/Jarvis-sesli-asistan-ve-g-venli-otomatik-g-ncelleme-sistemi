@@ -23,7 +23,7 @@ TASARIM SINIRLARI (kullanici talimati ile birebir):
   gerektigini belirler. Gercek calistirma HER ZAMAN executor_ai.py'nin
   _ALLOWED_ACTIONS'i + tools_kopru.py'nin mevcut wrapper'lari uzerinden
   olur.
-- resolve_capability() (serbest metin) SADECE windows_system icin - digger
+- resolve_capability() (serbest metin) SADECE windows_system icin - diger
   capability'ler (github_arama, backup, vb.) zaten calisan legacy
   _infer_executor_action() yoluna DOKUNULMADAN birakildi (kullanici
   talimati: "legacy action'larin geriye donuk uyumlulugunu koru").
@@ -84,9 +84,9 @@ def log_resolution(**fields: Any) -> None:
     """[TOOL_RESOLVER] izlenebilir bir trace satiri yazar. SADECE isim/etiket
     turunden alanlar kabul edilir (_LOG_SAFE_FIELDS) - sifre, token, API
     anahtari ya da baska hassas veri buraya ASLA gecirilmemeli/yazilmamali."""
-    safe = {k: v for k, v in fields.items() if k in _LOG_SAFE_FIELDS}
-    line = " ".join(f"{k}={v!r}" for k, v in safe.items())
     try:
+        safe = {k: v for k, v in fields.items() if k in _LOG_SAFE_FIELDS}
+        line = " ".join(f"{k}={v!r}" for k, v in safe.items())
         _logger.info(f"[TOOL_RESOLVER] {line}")
     except Exception:
         pass  # loglama basarisiz olsa bile cozumleme ASLA cokmemeli
@@ -109,11 +109,11 @@ _AGENT_MODULES: dict[str, tuple[str, str]] = {
 
 
 def _read_source(module_dotted: str) -> str | None:
-    rel_path = module_dotted.replace(".", "/") + ".py"
-    path = BASE_DIR / rel_path
     try:
+        rel_path = module_dotted.replace(".", "/") + ".py"
+        path = BASE_DIR / rel_path
         return path.read_text(encoding="utf-8")
-    except OSError:
+    except Exception:
         return None
 
 
@@ -124,15 +124,15 @@ def _class_exists_in_source(module_dotted: str, class_name: str) -> bool:
     o dosyada tanimli olup olmadigini dogrular. Tahmin ETMEZ - capability_
     registry.py'nin main.py/tools_kopru.py'yi okurken kullandigi AYNI
     'sadece oku, calistirma' ilkesi."""
-    source = _read_source(module_dotted)
-    if source is None:
-        return False
     try:
+        source = _read_source(module_dotted)
+        if source is None:
+            return False
         tree = ast.parse(source)
-    except SyntaxError:
+        return any(isinstance(node, ast.ClassDef) and node.name == class_name
+                   for node in ast.walk(tree))
+    except Exception:
         return False
-    return any(isinstance(node, ast.ClassDef) and node.name == class_name
-               for node in ast.walk(tree))
 
 
 def _extract_executor_legacy_actions() -> list[str]:
@@ -140,10 +140,13 @@ def _extract_executor_legacy_actions() -> list[str]:
     capability_registry.py'nin ZATEN VAR olan _extract_dict_keys() yardimcisi
     ile (import etmeden, ast ile) okur - ayni ayiklama mantigi ikinci kez
     YAZILMIYOR."""
-    source = _read_source("jarvis.brains.executor_ai")
-    if source is None:
+    try:
+        source = _read_source("jarvis.brains.executor_ai")
+        if source is None:
+            return []
+        return capability_registry._extract_dict_keys(source, "_ALLOWED_ACTIONS")
+    except Exception:
         return []
-    return capability_registry._extract_dict_keys(source, "_ALLOWED_ACTIONS")
 
 
 def get_agent_registry() -> dict[str, dict[str, Any]]:
@@ -152,19 +155,7 @@ def get_agent_registry() -> dict[str, dict[str, Any]]:
     dogrulanmis, tahmin degil). 'capabilities' SADECE executor_ai icin
     doldurulur - diger beyinlerin gorevi zaten kendi adiyla ayni sey
     (arastirma/kodlama/denetim/guvenlik/hafiza), capability listesi
-    kavrami sadece "hangi araci calistirabiliyor" sorusu icin anlamli.
-
-    ONEMLI DOGRULUK NOTU: buraya SADECE su ikisinin BIRLESIMI yazilir -
-    (a) executor_ai.py'nin KENDI _ALLOWED_ACTIONS'indaki isimler (bunlar
-    HER ZAMAN gercekten calistirilabilir) ve (b) _STRUCTURED_DISPATCHABLE
-    (asagida, resolve_structured()'in GERCEKTEN destekledigi capability'ler
-    - su an SADECE windows_system). tools_kopru.ALLOWED_TOOLS'taki DIGER
-    tum isimler (ör. system_status, reminder, discovered_jc) bilerek
-    DAHIL EDILMEZ - capability_registry'de kayitli/tools_kopru'da izinli
-    olsalar bile, executor_ai bugun bunlari CALISTIRAMAZ (resolve_structured
-    onlar icin ValueError firlatir) - bu listeyi "teorik olarak tools_kopru'da
-    var" ile "executor_ai'nin bugun gercekten calistirabildigi" karistirmamak
-    icin bilinçli bir tercih (yanlis pozitif raporlamamak icin)."""
+    kavrami sadece "hangi araci calistirabiliyor" sorusu icin anlamli."""
     registry: dict[str, dict[str, Any]] = {}
     for name, (module_dotted, class_name) in _AGENT_MODULES.items():
         registry[name] = {
@@ -176,7 +167,8 @@ def get_agent_registry() -> dict[str, dict[str, Any]]:
         }
 
     legacy_actions = set(_extract_executor_legacy_actions())
-    registry["executor_ai"]["capabilities"] = sorted(legacy_actions | _STRUCTURED_DISPATCHABLE)
+    if "executor_ai" in registry:
+        registry["executor_ai"]["capabilities"] = sorted(legacy_actions | _STRUCTURED_DISPATCHABLE)
     return registry
 
 
@@ -225,6 +217,8 @@ _TR_MAP = str.maketrans({"ı": "i", "İ": "i", "ş": "s", "Ş": "s", "ğ": "g",
 
 
 def _normalize(text: str) -> str:
+    if not text:
+        return ""
     return text.translate(_TR_MAP).lower()
 
 
@@ -237,11 +231,11 @@ def resolve_capability(description: str) -> dict[str, Any] | None:
     _resolve_executor_call) bunu legacy _infer_executor_action() fallback'ine
     dusurur (kullanici talimati madde 7 - "yapilandirilmis tool bilgisi
     yoksa legacy fallback olarak kullanilabilir")."""
-    if not description:
+    if not description or not isinstance(description, str):
         return None
     norm = _normalize(description)
 
-    matched_command = None
+    matched_command: str | None = None
     for command_name, triggers in _WINDOWS_SYSTEM_TRIGGERS.items():
         if any(_normalize(t) in norm for t in triggers):
             matched_command = command_name
@@ -268,7 +262,7 @@ def resolve_capability(description: str) -> dict[str, Any] | None:
                         reason="DOGRULAMA BASARISIZ: tools_kopru.ALLOWED_TOOLS'ta yok")
         return None
 
-    result = {
+    result: dict[str, Any] = {
         "capability": "windows_system",
         "tool": "windows_system",
         "command": matched_command,
@@ -281,9 +275,7 @@ def resolve_capability(description: str) -> dict[str, Any] | None:
 
 
 # resolve_structured()'in GERCEKTEN calistirabildigi capability'lerin listesi
-# - get_agent_registry() de DOGRULUK icin AYNI sabiti kullanir (bkz. orada ki
-# not). Buraya yeni bir capability eklenirse (resolve_structured'a gercek
-# bir dal eklenerek), SADECE burasi guncellenir - registry otomatik yansitir.
+# - get_agent_registry() de DOGRULUK icin AYNI sabiti kullanir.
 _STRUCTURED_DISPATCHABLE: set[str] = {"windows_system"}
 
 
@@ -325,3 +317,8 @@ def resolve_structured(capability: str, tool: str | None, parameters: dict | Non
         f"'{capability}' capability'si icin executor_ai'nin bugunku _ALLOWED_ACTIONS'inda "
         f"yapilandirilmis bir calistirma yolu tanimli degil."
     )
+
+
+# Geriye donuk cagri uyumlulugu icin takma adlar
+resolve = resolve_capability
+resolve_tool = resolve_capability
