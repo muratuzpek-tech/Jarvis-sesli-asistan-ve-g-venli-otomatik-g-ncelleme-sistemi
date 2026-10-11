@@ -65,7 +65,7 @@ def sandbox_works() -> tuple[bool, str]:
     # /bin/true denemek, yorumlayıcının kafeste bulunamadığı durumu gizliyordu.
     import tempfile
     with tempfile.TemporaryDirectory(prefix="jarvis_kafes_") as d:
-        probe, env = build([sys.executable, "-c", "import json, ssl, sqlite3"], Path(d), network=True)
+        probe, env = build([sys.executable, "-c", "import json, ssl, sqlite3"], Path(d), network=False)
         try:
             r = subprocess.run(probe, env=env, capture_output=True, text=True, timeout=30, check=False)
         except (OSError, subprocess.TimeoutExpired) as e:
