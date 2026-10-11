@@ -1,4 +1,4 @@
-"""Run only the historical script-style regression checks.
+﻿"""Run only the historical script-style regression checks.
 
 Pytest modules are deliberately not executed as plain scripts: doing so would
 skip their test functions and could make a broken module look successful.
@@ -36,11 +36,14 @@ def test_legacy_script(script: str, tmp_path: Path) -> None:
     result = subprocess.run(
         [sys.executable, str(TESTS_DIR / script)],
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         text=True,
         timeout=300,
         env=env,
         cwd=TESTS_DIR.parent,
     )
     assert result.returncode == 0, (
-        f"{script} başarısız:\n{result.stdout}\n{result.stderr}"
+        f"{script} baÅŸarÄ±sÄ±z:\n{result.stdout}\n{result.stderr}"
     )
+
