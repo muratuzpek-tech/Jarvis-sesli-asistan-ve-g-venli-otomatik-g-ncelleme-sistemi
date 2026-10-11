@@ -10,6 +10,7 @@ from pathlib import Path
 from datetime import datetime
 
 from jarvis.config import is_windows, is_mac, is_linux
+from jarvis.core.audit_log import log_action
 
 _CNW: dict = (
     {"creationflags": subprocess.CREATE_NO_WINDOW}
@@ -494,16 +495,19 @@ def _search_steam_appid(game_name: str) -> tuple[str | None, str | None]:
             return app_id, canonical
 
     try:
-        import urllib.request
-        import urllib.parse
-        query = urllib.parse.quote(game_name)
+        import requests
+        from urllib.parse import quote, urlsplit
+        query = quote(game_name)
         url   = f"https://store.steampowered.com/api/storesearch/?term={query}&l=english&cc=US"
-        parsed = urllib.parse.urlsplit(url)
+        parsed = urlsplit(url)
         if parsed.scheme != "https" or parsed.netloc.lower() != "store.steampowered.com":
             return None, None
-        req   = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=6) as resp:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
-            items = json.loads(resp.read().decode()).get("items", [])
+        resp = requests.get(
+            url, headers={"User-Agent": "Mozilla/5.0"}, timeout=6,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
         if items:
             best = items[0]
             print(f"[GameUpdater] 🌐 Store API: {best['name']} ({best['id']})")
@@ -632,6 +636,11 @@ def _get_download_status(steam_path: Path) -> str:
 
 
 def _system_shutdown() -> None:
+    # GUVENLIK (2026-10-03): Audit log — critical risk islem
+    log_action(module="game_updater", action="system_shutdown",
+               detail="Power off / restart attempt",
+               risk="critical", approval_required=True,
+               result="EXECUTING")
     if is_windows():
         subprocess.run(["shutdown", "/s", "/t", "10"], **_CNW)
     elif is_mac():
@@ -662,6 +671,10 @@ def _watch_and_shutdown(steam_path: Path, speak=None,
             if speak:
                 speak("Download complete. Shutting down now.")
             time.sleep(5)
+            log_action(module="game_updater", action="auto_shutdown_after_download",
+                       detail="Download completed, initiating shutdown",
+                       risk="critical", approval_required=True,
+                       result="EXECUTING")
             _system_shutdown()
             return
 
@@ -944,6 +957,12 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
     hour      = int(p.get("hour",   3))
     minute    = int(p.get("minute", 0))
     shutdown  = str(p.get("shutdown_when_done", "false")).lower() == "true"
+
+    if shutdown and p.get("_user_confirmation_granted") is not True:
+        return (
+            "CONFIRMATION_REQUIRED:game_shutdown: İndirme tamamlanınca bilgisayarın "
+            "kapatılması isteniyor. Kullanıcı onayı olmadan otomatik kapatma başlatılmadı."
+        )
 
     results = []
 
