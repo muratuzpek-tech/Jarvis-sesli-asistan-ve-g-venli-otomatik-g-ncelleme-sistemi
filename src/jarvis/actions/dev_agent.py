@@ -42,6 +42,7 @@ _pending_dev_agent: dict[str, dict] = {}
 # ancak kod VERILDIKTEN SONRA gercek bir kullanici turu geldiyse kabul edilir.
 # None = izleme yok (testler/CLI gibi arayuzsuz kullanim) → eski davranis.
 _last_user_turn_at: float | None = None
+_last_user_turn_text: str | None = None
 # Kullanicinin ISTEK cumlesinin gec gelen ses-yazi parcalari "onay" sayilmasin.
 USER_TURN_GRACE_S = 1.5
 
@@ -56,12 +57,18 @@ _NEGATE = re.compile(r"\b(hay[iı]r|iptal\w*|dur|durdur\w*|vazge[cç]\w*|istemiy
                      r"ba[sş]lama|bekle|no|cancel|stop)\b")
 
 
-def note_user_turn(now: float | None = None, text: str = "") -> None:
-    """Kullanicidan gercek bir girdi (ses veya yazi) geldigini kaydeder."""
-    global _last_user_turn_at
+def note_user_turn(value=None, *, now: float | None = None, text: str = "") -> None:
+    """Kullanıcı turunu kaydeder; eski ``(now, text=...)`` ve yeni
+    ``(text, now=...)`` çağrı biçimleri birlikte desteklenir."""
+    global _last_user_turn_at, _last_user_turn_text
+    if isinstance(value, str) and not text:
+        text = value
+    elif value is not None and now is None:
+        now = value
     _last_user_turn_at = time.monotonic() if now is None else now
-    if text and text.strip():
-        _user_texts.append((_last_user_turn_at, text.strip()))
+    _last_user_turn_text = text.strip() if text else None
+    if _last_user_turn_text:
+        _user_texts.append((_last_user_turn_at, _last_user_turn_text))
         del _user_texts[:-50]
 
 
