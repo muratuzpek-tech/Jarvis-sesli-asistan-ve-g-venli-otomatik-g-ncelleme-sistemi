@@ -53,32 +53,4 @@ src/jarvis/self_improvement/virtual_brain/brain_state/state.json
 .jarvis_kontrol/
 .jarvis_kontrol/
 src/jarvis/self_improvement/virtual_brain/brain_state/state.json
-
-# Audit & log files
-*.log
-# Git cop
-~
-log.txt
-*.log
-__pycache__/
-*.pyc
-.pytest_cache/
-
-# Backup dirs
-src/jarvis_yedekler/
-build/
-*.bak*
-*.orig
-
-# Logs (central at ~/.jarvis/logs/)
-logs/
-log.txt
-*.log
-
-# Memory logs
-memory/*_log.jsonl
-memory/*_log.json
-memory/error_log.json
-
-# Runtime log rotation files
-*.log.*
+tests/manual/ui_smoke.png
