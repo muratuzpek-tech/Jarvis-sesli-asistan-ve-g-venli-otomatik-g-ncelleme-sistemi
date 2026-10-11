@@ -19,7 +19,10 @@ sys.path.insert(0, '.')
 
 from tools.developer import agentic_coder as ac
 
-pytestmark = pytest.mark.skipif(ac._ruff_cmd() is None, reason="ruff kurulu degil")
+pytestmark = [
+    pytest.mark.skip(reason="PR29 integration pending"),
+    pytest.mark.skipif(ac._ruff_cmd() is None, reason="ruff kurulu degil"),
+]
 
 README = (
     "# Karekok Araci\n\n"

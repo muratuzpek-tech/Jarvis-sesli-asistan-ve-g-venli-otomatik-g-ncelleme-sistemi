@@ -1,7 +1,7 @@
 import platform as _platform
 import subprocess as _subprocess
 
-# ── Nuclear: force CREATE_NO_WINDOW on EVERY subprocess call on Windows ───────
+# â”€â”€ Nuclear: force CREATE_NO_WINDOW on EVERY subprocess call on Windows â”€â”€â”€â”€â”€â”€â”€
 # This patches Popen itself, so no per-file flag is needed anywhere.
 if _platform.system() == "Windows":
     _OrigPopen = _subprocess.Popen
@@ -13,7 +13,7 @@ if _platform.system() == "Windows":
             super().__init__(args, **kw)
 
     _subprocess.Popen = _Popen
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 import asyncio
 from jarvis.core.bg_tasks import keep as keep_task
@@ -90,8 +90,8 @@ from jarvis.paths import asset
 # ICERMEYEN aramalar bundan ETKILENMEZ - onlar normal sekilde modele gidip
 # github_arama'ya yonlenmeye devam eder.
 _GITHUB_SELF_IMPROVE_HINTS = (
-    "kendine", "kendin için", "kendi kendine", "kendi gelişim", "kendini geliştir",
-    "kendisi için", "kendi geliş", "senin gelişimin", "senin gelişim",
+    "kendine", "kendin iÃ§in", "kendi kendine", "kendi geliÅŸim", "kendini geliÅŸtir",
+    "kendisi iÃ§in", "kendi geliÅŸ", "senin geliÅŸimin", "senin geliÅŸim",
 )
 
 
@@ -104,7 +104,7 @@ def _is_github_self_improve_request(text: str) -> bool:
 
 def _is_generic_task_request(text: str) -> bool:
     t = (text or "").casefold().strip()
-    return any(e in t for e in ["görev kuyruğuna ekle", "görev listeme ekle", "arka planda çalıştır"])
+    return any(e in t for e in ["gÃ¶rev kuyruÄŸuna ekle", "gÃ¶rev listeme ekle", "arka planda Ã§alÄ±ÅŸtÄ±r"])
 
 
 def get_base_dir():
@@ -118,7 +118,7 @@ API_CONFIG_PATH = api_keys_path()
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
 LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 # Deneme (Murat@goxs 2026-09-30): JARVIS_LIVE_MODEL=gemini-3.8-live ile yeni sesli model
-# denenir; bağlanamazsa ya da kota/desteklenmeyen ayar hatası verirse otomatik LIVE_MODEL'e dönülür.
+# denenir; baÄŸlanamazsa ya da kota/desteklenmeyen ayar hatasÄ± verirse otomatik LIVE_MODEL'e dÃ¶nÃ¼lÃ¼r.
 _FALLBACK_HINTS = ("not found", "not supported", "unsupported", "invalid", "INVALID_ARGUMENT",
                    "RESOURCE_EXHAUSTED", "quota", "429", "1007", "1008", "permission")
 CHANNELS            = 1
@@ -143,7 +143,7 @@ def _pcm_rms_level(data: bytes, max_expected: float = 9000.0) -> float:
 # cihaz listesini bastan taramak yerine kisa bir sure hizlica pes eder
 # (resilience.py'deki devre kesici deseniyle tutarli).
 _mic_breaker      = CircuitBreaker(name="mikrofon", failure_threshold=3, cooldown_seconds=30.0)
-_speaker_breaker  = CircuitBreaker(name="hoparlör", failure_threshold=3, cooldown_seconds=30.0)
+_speaker_breaker  = CircuitBreaker(name="hoparlÃ¶r", failure_threshold=3, cooldown_seconds=30.0)
 
 def _get_api_key() -> str:
     from jarvis.core.secure_config import get_gemini_api_key
@@ -157,7 +157,7 @@ def _load_system_prompt() -> str:
         return (
             "You are JARVIS, Tony Stark's AI assistant. "
             "Be concise, direct, and always use the provided tools to complete tasks. "
-            "Never simulate or guess results — always call the appropriate tool."
+            "Never simulate or guess results â€” always call the appropriate tool."
         )
 
 _CTRL_RE = re.compile(r"<ctrl\d+>", re.IGNORECASE)
@@ -166,40 +166,40 @@ _NON_LATIN_RE = re.compile(
 )
 
 def _join_transcript(parts: list[str]) -> str:
-    """Canlı yazıya dökme parçaları kelime ortasından bölünür (' Ya','rı','n hat',…).
-    Parçalar kendi baştaki boşluğuyla saklanır ve boşluksuz birleştirilir; eskiden
-    ' '.join ile 'Ya rı n hat ır lat' oluyor, günlük ve hafıza bozuk metin görüyordu."""
+    """CanlÄ± yazÄ±ya dÃ¶kme parÃ§alarÄ± kelime ortasÄ±ndan bÃ¶lÃ¼nÃ¼r (' Ya','rÄ±','n hat',â€¦).
+    ParÃ§alar kendi baÅŸtaki boÅŸluÄŸuyla saklanÄ±r ve boÅŸluksuz birleÅŸtirilir; eskiden
+    ' '.join ile 'Ya rÄ± n hat Ä±r lat' oluyor, gÃ¼nlÃ¼k ve hafÄ±za bozuk metin gÃ¶rÃ¼yordu."""
     return re.sub(r"\s+", " ", "".join(parts)).strip()
 
 
-_CLOSE_RE = re.compile(r"\b(kapat|kapan|kapansın|kapanabilirsin|çıkış yap|shut ?down|turn off|close)", re.I)
-_TR_SUFFIXES = {"ın", "in", "un", "ün", "nın", "nin", "nun", "nün", "ı", "i", "u", "ü", "yı", "yi", "yu",
-                "yü", "a", "e", "ya", "ye", "da", "de", "ta", "te", "dan", "den", "tan", "ten", "la", "le",
-                "yla", "yle", "ım", "im", "um", "üm", "ımız", "imiz", "cım", "cim", "cığım", "ciğim"}
+_CLOSE_RE = re.compile(r"\b(kapat|kapan|kapansÄ±n|kapanabilirsin|Ã§Ä±kÄ±ÅŸ yap|shut ?down|turn off|close)", re.I)
+_TR_SUFFIXES = {"Ä±n", "in", "un", "Ã¼n", "nÄ±n", "nin", "nun", "nÃ¼n", "Ä±", "i", "u", "Ã¼", "yÄ±", "yi", "yu",
+                "yÃ¼", "a", "e", "ya", "ye", "da", "de", "ta", "te", "dan", "den", "tan", "ten", "la", "le",
+                "yla", "yle", "Ä±m", "im", "um", "Ã¼m", "Ä±mÄ±z", "imiz", "cÄ±m", "cim", "cÄ±ÄŸÄ±m", "ciÄŸim"}
 _EN_WORDS = {"The", "His", "Her", "Their", "User", "Son", "Daughter", "Wife", "Husband", "Name", "Named",
              "Is", "Has", "Child", "Friend", "Mother", "Father", "Brother", "Sister", "Called", "And", "Of"}
 
 
 def _fold(text: str) -> str:
-    return (text or "").replace("İ", "i").replace("I", "ı").casefold().replace("'", "").replace("’", "")
+    return (text or "").replace("Ä°", "i").replace("I", "Ä±").casefold().replace("'", "").replace("â€™", "")
 
 
 def _known_names(memory: dict | None) -> list[str]:
-    """Hafızadaki kişi/kimlik değerlerinden özel isimler (duyulma hatalarını düzeltmek için)."""
+    """HafÄ±zadaki kiÅŸi/kimlik deÄŸerlerinden Ã¶zel isimler (duyulma hatalarÄ±nÄ± dÃ¼zeltmek iÃ§in)."""
     names: list[str] = []
     for cat in ("identity", "relationships"):
         for entry in ((memory or {}).get(cat) or {}).values():
             val = entry.get("value") if isinstance(entry, dict) else entry
-            for w in re.findall(r"[A-ZÇĞİÖŞÜ][\wçğıöşüÇĞİÖŞÜ]+", str(val or "")):
+            for w in re.findall(r"[A-ZÃ‡ÄÄ°Ã–ÅÃœ][\wÃ§ÄŸÄ±Ã¶ÅŸÃ¼Ã‡ÄÄ°Ã–ÅÃœ]+", str(val or "")):
                 if w not in _EN_WORDS and w not in names:
                     names.append(w)
     return names[:20]
 
 
 def _sounds_like(name: str, heard: str) -> bool:
-    """'Miran' ile duyulan 'Mira'nın' gibi: ortak ön ek en az 4 harf ya da 1 harf fark."""
+    """'Miran' ile duyulan 'Mira'nÄ±n' gibi: ortak Ã¶n ek en az 4 harf ya da 1 harf fark."""
     n = _fold(name)
-    for w in re.findall(r"[\wçğıöşüÇĞİÖŞÜ'’]+", heard or ""):
+    for w in re.findall(r"[\wÃ§ÄŸÄ±Ã¶ÅŸÃ¼Ã‡ÄÄ°Ã–ÅÃœ'â€™]+", heard or ""):
         w = _fold(w)
         common = 0
         for a, b in zip(n, w, strict=False):
@@ -216,13 +216,13 @@ def _asked_to_close(heard: str) -> bool:
 
 
 def _unheard_names(value: str, heard: str) -> list[str]:
-    """Kaydedilecek değerdeki özel isimlerden (büyük harfli kelimeler) HİÇBİRİ kullanıcının
-    söylediklerinde yoksa o isimleri döndürür. Türkçe ekler ('Miran'ın', 'Mira'yı') kabul;
-    başka kelimenin parçası ('emirdeyiz' ≠ Emir) kabul edilmez."""
-    names = [w for w in re.findall(r"[A-ZÇĞİÖŞÜ][\wçğıöşüÇĞİÖŞÜ]+", value or "") if w not in _EN_WORDS]
+    """Kaydedilecek deÄŸerdeki Ã¶zel isimlerden (bÃ¼yÃ¼k harfli kelimeler) HÄ°Ã‡BÄ°RÄ° kullanÄ±cÄ±nÄ±n
+    sÃ¶ylediklerinde yoksa o isimleri dÃ¶ndÃ¼rÃ¼r. TÃ¼rkÃ§e ekler ('Miran'Ä±n', 'Mira'yÄ±') kabul;
+    baÅŸka kelimenin parÃ§asÄ± ('emirdeyiz' â‰  Emir) kabul edilmez."""
+    names = [w for w in re.findall(r"[A-ZÃ‡ÄÄ°Ã–ÅÃœ][\wÃ§ÄŸÄ±Ã¶ÅŸÃ¼Ã‡ÄÄ°Ã–ÅÃœ]+", value or "") if w not in _EN_WORDS]
     if not names:
         return []
-    words = [_fold(w) for w in re.findall(r"[\wçğıöşüÇĞİÖŞÜ'’]+", heard or "")]
+    words = [_fold(w) for w in re.findall(r"[\wÃ§ÄŸÄ±Ã¶ÅŸÃ¼Ã‡ÄÄ°Ã–ÅÃœ'â€™]+", heard or "")]
 
     def heard_it(name: str) -> bool:
         n = _fold(name)
@@ -307,6 +307,62 @@ def _close_audio_stream(stream) -> None:
                 pass
 
 
+_AUTH_TEXT_MARKERS = (
+    "api key not valid", "api_key_invalid", "invalid api key",
+    "unauthenticated", "permission_denied", "permission denied",
+    "authentication",
+)
+# Sayilar kelime sinirli: "retry in 31007s" ya da "31007sn" auth hatasi degil.
+_AUTH_CODE_RE = re.compile(r"\b(?:401|403|1007)\b")
+# WebSocket 1007 (invalid frame payload / invalid argument) ve 1008 (policy
+# violation): sunucu bir canli oturum ayarini reddetti, anahtar degil.
+_CONFIG_REJECT_RE = re.compile(r"\b(?:1007|1008)\b|invalid[ _]argument")
+_KEY_LIKE_RE = re.compile(r"AIza[0-9A-Za-z_\-]{10,}|([?&]key=)[^&\s]+")
+
+
+def _has_auth_text(text: str) -> bool:
+    return any(marker in text for marker in _AUTH_TEXT_MARKERS)
+
+
+def _is_config_rejection(error_text: str) -> bool:
+    """1007/1008/invalid argument kapanisi, anahtar metni olmadan."""
+    text = (error_text or "").casefold()
+    return not _has_auth_text(text) and bool(_CONFIG_REJECT_RE.search(text))
+
+
+def _is_auth_error(error_text: str) -> bool:
+    text = (error_text or "").casefold()
+    if _has_auth_text(text):
+        return True
+    if _is_config_rejection(text):
+        return False
+    return bool(_AUTH_CODE_RE.search(text))
+
+
+def _mask_key_like(text) -> str:
+    return _KEY_LIKE_RE.sub(lambda m: (m.group(1) or "") + "***", str(text or ""))
+
+
+def _config_rejection_message(error_text: str) -> str:
+    return f"canli oturum ayari reddedildi: {_mask_key_like(error_text)[:300]}"
+
+
+def _describe_live_error(exc: BaseException, depth: int = 0) -> list[str]:
+    """Yeniden baglanma dongusu icin: tur + maskelenmis mesaj (<=300) + son
+    traceback satirinin dosya:satir'i. Tam traceback ve yol yazilmaz.
+    ExceptionGroup'un alt istisnalari girintili olarak eklenir."""
+    line = f"{'  ' * depth}{type(exc).__name__}: {_mask_key_like(exc)[:300]}"
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+    if frames:
+        last = frames[-1]
+        line += f" @ {Path(last.filename).name}:{last.lineno} {type(exc).__name__}"
+    lines = [line]
+    if isinstance(exc, BaseExceptionGroup) and depth < 5:
+        for sub in exc.exceptions[:10]:
+            lines.extend(_describe_live_error(sub, depth + 1))
+    return lines
+
+
 def _is_auth_error(error_text: str) -> bool:
     text = (error_text or "").casefold()
     return any(marker in text for marker in (
@@ -321,7 +377,7 @@ TOOL_DECLARATIONS = [
         "description": (
             "Opens any application on the computer. "
             "Use this whenever the user asks to open, launch, or start any app, "
-            "website, or program. Always call this tool — never just say you opened it."
+            "website, or program. Always call this tool â€” never just say you opened it."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -338,14 +394,14 @@ TOOL_DECLARATIONS = [
         "name": "web_search",
         "description": (
             "Searches the web. Use for ANY question about current facts, events, prices, "
-            "or topics — always prefer this over guessing. "
+            "or topics â€” always prefer this over guessing. "
             "Modes: 'search' (default), 'news' (latest headlines on a topic), "
             "'research' (deep comprehensive answer), 'price' (product cost lookup), "
             "'compare' (side-by-side comparison of items). "
             "Do NOT use this for searching GitHub repositories specifically (use github_arama "
             "instead), and do NOT use this if the user is asking Jarvis to find/search for a "
-            "new capability or tool FOR ITSELF, e.g. 'kendine github'da bir şey bul', "
-            "'kendini geliştirmek için github'ı tara' — that always goes through agent_loop "
+            "new capability or tool FOR ITSELF, e.g. 'kendine github'da bir ÅŸey bul', "
+            "'kendini geliÅŸtirmek iÃ§in github'Ä± tara' â€” that always goes through agent_loop "
             "(action=add), never web_search."
         ),
         "parameters": {
@@ -414,7 +470,7 @@ TOOL_DECLARATIONS = [
         "name": "reminder",
         "description": (
             "Sets a reminder with a desktop notification and sound. One-time: give date + time. "
-            "Repeating (e.g. every weekday at 17:00): give time + repeat and NO date — make ONE "
+            "Repeating (e.g. every weekday at 17:00): give time + repeat and NO date â€” make ONE "
             "call, never one call per day."
         ),
         "parameters": {
@@ -453,7 +509,7 @@ TOOL_DECLARATIONS = [
             "MUST be called when user asks what is on screen, what you see, "
             "look at camera, analyze my screen, etc. "
             "You have NO visual ability without this tool. "
-            "After the image is captured it is sent directly to you — describe what you see and answer the user's question. "
+            "After the image is captured it is sent directly to you â€” describe what you see and answer the user's question. "
             "When using camera: the live view stays open until user says close it or calls close_camera."
         ),
         "parameters": {
@@ -470,7 +526,7 @@ TOOL_DECLARATIONS = [
         "description": (
             "Closes the live camera view shown on screen. "
             "Call when user says: close camera, stop camera, turn off camera, "
-            "kamerayı kapat, kapat, creepy, etc."
+            "kamerayÄ± kapat, kapat, creepy, etc."
         ),
         "parameters": {"type": "OBJECT", "properties": {}, "required": []}
     },
@@ -582,14 +638,14 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "task_manager",
-        "description": "Schedules a Jarvis command to run automatically at a future date/time (add), lists scheduled tasks (list), or cancels one (remove). Scheduled commands are actually re-sent to you (Jarvis) when their time comes, exactly as if the user had said them live — plan and execute them for real at that moment, including calling any other tools needed.",
+        "description": "Schedules a Jarvis command to run automatically at a future date/time (add), lists scheduled tasks (list), or cancels one (remove). Scheduled commands are actually re-sent to you (Jarvis) when their time comes, exactly as if the user had said them live â€” plan and execute them for real at that moment, including calling any other tools needed.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "action":           {"type": "STRING", "description": "add | list | remove"},
-                "minutes_from_now": {"type": "INTEGER", "description": "For action=add, PREFERRED for relative delays (e.g. user says 'in 2 minutes', 'in an hour'): number of minutes from now. The exact target time is computed reliably in code, not by you — never compute or guess the clock time yourself for relative requests."},
-                "run_at":           {"type": "STRING", "description": "For action=add, ONLY use this for an explicit absolute date/time the user gave (e.g. 'Dec 31 at 18:00'): 'YYYY-MM-DD HH:MM' format. Do not use this for relative delays like 'in N minutes' — use minutes_from_now instead."},
-                "command":          {"type": "STRING", "description": "For action=add: the natural-language command to run at that time, e.g. 'masaüstünü organize et'."},
+                "minutes_from_now": {"type": "INTEGER", "description": "For action=add, PREFERRED for relative delays (e.g. user says 'in 2 minutes', 'in an hour'): number of minutes from now. The exact target time is computed reliably in code, not by you â€” never compute or guess the clock time yourself for relative requests."},
+                "run_at":           {"type": "STRING", "description": "For action=add, ONLY use this for an explicit absolute date/time the user gave (e.g. 'Dec 31 at 18:00'): 'YYYY-MM-DD HH:MM' format. Do not use this for relative delays like 'in N minutes' â€” use minutes_from_now instead."},
+                "command":          {"type": "STRING", "description": "For action=add: the natural-language command to run at that time, e.g. 'masaÃ¼stÃ¼nÃ¼ organize et'."},
                 "task_id":          {"type": "STRING", "description": "For action=remove: the task id to cancel."},
             },
             "required": ["action"]
@@ -602,7 +658,7 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "start_parallel_task",
-        "description": "Starts a dev_agent coding task in the BACKGROUND and returns immediately without waiting — lets the user keep talking to you while the project is being built. Use this when the user wants to run multiple coding tasks at once, or explicitly asks for something to run 'in the background' / 'paralel' / 'arka planda'. Same confirmation rule as dev_agent: the first call (no confirm_code) only returns a preview + code; call again with that code ONLY after the user's explicit confirmation in a later message.",
+        "description": "Starts a dev_agent coding task in the BACKGROUND and returns immediately without waiting â€” lets the user keep talking to you while the project is being built. Use this when the user wants to run multiple coding tasks at once, or explicitly asks for something to run 'in the background' / 'paralel' / 'arka planda'. Same confirmation rule as dev_agent: the first call (no confirm_code) only returns a preview + code; call again with that code ONLY after the user's explicit confirmation in a later message.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -616,7 +672,7 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "check_agent_board",
-        "description": "Shows the status of all background tasks started with start_parallel_task — which are pending, running, completed, or failed. Use when the user asks to check on background tasks, or see the 'board'/'pano'.",
+        "description": "Shows the status of all background tasks started with start_parallel_task â€” which are pending, running, completed, or failed. Use when the user asks to check on background tasks, or see the 'board'/'pano'.",
         "parameters": {"type": "OBJECT", "properties": {}}
     },
     {
@@ -675,7 +731,7 @@ TOOL_DECLARATIONS = [
             "the file, then VERIFIES the result (syntax check + real import in a separate process) "
             "before keeping it. If verification fails it retries up to 3 times, then restores the "
             "original file automatically. Use this when the user asks Jarvis to improve/refactor "
-            "its own code, fix itself, or 'kendini geliştir'. If no file is named, picks the "
+            "its own code, fix itself, or 'kendini geliÅŸtir'. If no file is named, picks the "
             "actions/ file that hasn't been reviewed the longest. The first call (no confirm_code) "
             "never touches the file, it only returns a preview and a confirm_code. You MUST relay "
             "which file and goal to the user and wait for their explicit confirmation in their "
@@ -695,32 +751,32 @@ TOOL_DECLARATIONS = [
     {
         "name": "agent_loop",
         "description": (
-            "Manages Jarvis's background autonomous task list — a loop that runs on its own "
+            "Manages Jarvis's background autonomous task list â€” a loop that runs on its own "
             "every ~60 seconds, working one step at a time toward goals the user adds, using "
             "only Jarvis's existing safe tools (never arbitrary code/commands). Use action=add "
             "when the user asks Jarvis to handle/work on something in the background over time "
-            "(e.g. 'bunu arka planda halllet', 'görev listeme ekle'). ALSO use action=add "
+            "(e.g. 'bunu arka planda halllet', 'gÃ¶rev listeme ekle'). ALSO use action=add "
             "(NEVER web_search or github_arama directly) whenever the user asks Jarvis to "
             "search GitHub on its OWN BEHALF for a new capability/tool for ITSELF, e.g. "
-            "'kendine github'da bir araç bul', 'kendini geliştirmek için github'ı tara', "
-            "'github'dan kendine yeni bir şey bul, bulursan bana sor' — put the search topic "
-            "into the goal text (e.g. goal='GitHub'da basit bir todo list aracı bul ve "
-            "entegre etmeyi öner'). The background loop will repeatedly search/analyze "
+            "'kendine github'da bir araÃ§ bul', 'kendini geliÅŸtirmek iÃ§in github'Ä± tara', "
+            "'github'dan kendine yeni bir ÅŸey bul, bulursan bana sor' â€” put the search topic "
+            "into the goal text (e.g. goal='GitHub'da basit bir todo list aracÄ± bul ve "
+            "entegre etmeyi Ã¶ner'). The background loop will repeatedly search/analyze "
             "candidates on its own and will ALWAYS ask for approval before integrating "
-            "anything — it never does so silently. Use action=list when the "
+            "anything â€” it never does so silently. Use action=list when the "
             "user asks what background tasks are pending or what's awaiting approval. "
             "CRITICAL: if a task is 'awaiting_approval' (a destructive step like deleting a file, "
             "shutting down, or sending a message is waiting for permission) and the user says "
-            "something like 'onaylıyorum'/'evet yap'/'approve it' in that context, call this with "
-            "action=approve and that task's id. If they say 'iptal et'/'hayır'/'deny', use "
+            "something like 'onaylÄ±yorum'/'evet yap'/'allow it' in that context, call this with "
+            "action=allow and that task's id. If they say 'iptal et'/'hayÄ±r'/'deny', use "
             "action=deny with that task's id."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":  {"type": "STRING", "description": "add | list | approve | deny"},
+                "action":  {"type": "STRING", "description": "add | list | allow | deny"},
                 "goal":    {"type": "STRING", "description": "The goal to work toward in the background (action=add only)."},
-                "task_id": {"type": "STRING", "description": "The short task id to approve/deny (action=approve or action=deny only)."},
+                "task_id": {"type": "STRING", "description": "The short task id to allow/deny (action=allow or action=deny only)."},
             },
             "required": ["action"]
         }
@@ -729,20 +785,20 @@ TOOL_DECLARATIONS = [
         "name": "recall_conversation",
         "description": (
             "Recalls and summarizes past conversation with the user from a real, persisted "
-            "conversation log — use this whenever the user asks what was discussed before, "
-            "e.g. 'dün ne konuştuk', 'geçen hafta ne demiştim', 'bunu daha önce konuşmuş "
+            "conversation log â€” use this whenever the user asks what was discussed before, "
+            "e.g. 'dÃ¼n ne konuÅŸtuk', 'geÃ§en hafta ne demiÅŸtim', 'bunu daha Ã¶nce konuÅŸmuÅŸ "
             "muyduk', 'what did we talk about yesterday', OR a recent/same-session reference "
-            "like 'demin ne dedin', '10 dakika önce ne konuşmuştuk', 'az önce söyledin ama' — "
+            "like 'demin ne dedin', '10 dakika Ã¶nce ne konuÅŸmuÅŸtuk', 'az Ã¶nce sÃ¶yledin ama' â€” "
             "for those, use the 'minutes' parameter instead of 'period'. Never say you don't "
             "have access to past conversations without calling this tool first."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "minutes": {"type": "INTEGER", "description": "Use for recent/same-session references ('demin', 'az önce', 'X dakika önce', 'biraz önce'): how many minutes back to search, e.g. 10. Takes priority over period/date when set."},
-                "period": {"type": "STRING", "description": "bugun | dun | bu_hafta | gecen_hafta — use this for day-level relative time references."},
+                "minutes": {"type": "INTEGER", "description": "Use for recent/same-session references ('demin', 'az Ã¶nce', 'X dakika Ã¶nce', 'biraz Ã¶nce'): how many minutes back to search, e.g. 10. Takes priority over period/date when set."},
+                "period": {"type": "STRING", "description": "bugun | dun | bu_hafta | gecen_hafta â€” use this for day-level relative time references."},
                 "date":   {"type": "STRING", "description": "Optional explicit date in YYYY-MM-DD format instead of period."},
-                "topic":  {"type": "STRING", "description": "Optional — focus the summary on a specific topic if the user mentioned one."},
+                "topic":  {"type": "STRING", "description": "Optional â€” focus the summary on a specific topic if the user mentioned one."},
             },
             "required": []
         }
@@ -750,12 +806,12 @@ TOOL_DECLARATIONS = [
     {
         "name": "github_arama",
         "description": (
-            "Searches GitHub's real, public repository search API (read-only — never clones, "
+            "Searches GitHub's real, public repository search API (read-only â€” never clones, "
             "downloads, or installs anything) and reports results back to the user directly. "
             "Use this ONLY for a one-off lookup the user wants to see the results of themselves, "
-            "e.g. 'github'da X ara', 'github'da bununla ilgili bir proje var mı bak', "
+            "e.g. 'github'da X ara', 'github'da bununla ilgili bir proje var mÄ± bak', "
             "'search github for X'. Do NOT use this if the user is asking Jarvis to find a new "
-            "capability/tool for ITSELF (for self-improvement) — that goes through agent_loop "
+            "capability/tool for ITSELF (for self-improvement) â€” that goes through agent_loop "
             "(action=add) instead, never this tool directly."
         ),
         "parameters": {
@@ -771,11 +827,11 @@ TOOL_DECLARATIONS = [
     {
         "name": "discovered_topydo",
         "description": (
-            "Simple to-do / task list tool (todo.txt format) — use whenever the user wants to "
+            "Simple to-do / task list tool (todo.txt format) â€” use whenever the user wants to "
             "add, list, complete, delete, prioritize, or clear items on a personal to-do list, "
-            "e.g. 'yapılacaklar listeme ekle', 'listeme süt al yaz', 'görevlerimi göster', "
-            "'şu görevi tamamladım', 'listemi temizle', 'to-do list', 'add a task'. This is a "
-            "separate, lightweight list from agent_loop's background task queue — use this one "
+            "e.g. 'yapÄ±lacaklar listeme ekle', 'listeme sÃ¼t al yaz', 'gÃ¶revlerimi gÃ¶ster', "
+            "'ÅŸu gÃ¶revi tamamladÄ±m', 'listemi temizle', 'to-do list', 'add a task'. This is a "
+            "separate, lightweight list from agent_loop's background task queue â€” use this one "
             "for the user's own personal to-do items, not for background automation steps."
         ),
         "parameters": {
@@ -797,7 +853,7 @@ TOOL_DECLARATIONS = [
             "Converts the plain-text output of a standard command-line tool (e.g. 'ls', 'ps', "
             "'df', 'ifconfig', 'netstat') into structured JSON, using the open-source 'jc' "
             "parser library. Use this ONLY if the user explicitly gives you raw command output "
-            "and asks you to parse/structure it into JSON — this is a low-level utility, not a "
+            "and asks you to parse/structure it into JSON â€” this is a low-level utility, not a "
             "general system-info tool (use system_status or windows_system for that instead)."
         ),
         "parameters": {
@@ -878,7 +934,7 @@ TOOL_DECLARATIONS = [
         "name": "forget_memory",
         "description": (
             "Delete a WRONG or outdated fact from long-term memory when the user says it is wrong "
-            "or asks to forget it (e.g. 'kızımın adı Mira değil', 'bunu unut'). Use the same "
+            "or asks to forget it (e.g. 'kÄ±zÄ±mÄ±n adÄ± Mira deÄŸil', 'bunu unut'). Use the same "
             "category and key the fact was saved with."
         ),
         "parameters": {
@@ -895,8 +951,8 @@ TOOL_DECLARATIONS = [
         "description": (
             "Shuts down the assistant completely. "
             "Call this ONLY when the user explicitly asks to close/shut down/turn off Jarvis "
-            "(e.g. 'kendini kapat', 'Jarvis'i kapat', 'kapan'). A goodbye such as 'iyi günler', "
-            "'görüşürüz' or 'teşekkürler' is NOT a shutdown request: just say goodbye."
+            "(e.g. 'kendini kapat', 'Jarvis'i kapat', 'kapan'). A goodbye such as 'iyi gÃ¼nler', "
+            "'gÃ¶rÃ¼ÅŸÃ¼rÃ¼z' or 'teÅŸekkÃ¼rler' is NOT a shutdown request: just say goodbye."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -976,7 +1032,7 @@ TOOL_DECLARATIONS = [
             "Call this silently whenever the user reveals something worth remembering: "
             "name, age, city, job, preferences, hobbies, relationships, projects, or future plans. "
             "Do NOT call for: weather, reminders, searches, or one-time commands. "
-            "Do NOT announce that you are saving — just call it silently. "
+            "Do NOT announce that you are saving â€” just call it silently. "
             "Values must be in English regardless of the conversation language."
         ),
         "parameters": {
@@ -985,12 +1041,12 @@ TOOL_DECLARATIONS = [
                 "category": {
                     "type": "STRING",
                     "description": (
-                        "identity — name, age, birthday, city, job, language, nationality | "
-                        "preferences — favorite food/color/music/film/game/sport, hobbies | "
-                        "projects — active projects, goals, things being built | "
-                        "relationships — friends, family, partner, colleagues | "
-                        "wishes — future plans, things to buy, travel dreams | "
-                        "notes — habits, schedule, anything else worth remembering"
+                        "identity â€” name, age, birthday, city, job, language, nationality | "
+                        "preferences â€” favorite food/color/music/film/game/sport, hobbies | "
+                        "projects â€” active projects, goals, things being built | "
+                        "relationships â€” friends, family, partner, colleagues | "
+                        "wishes â€” future plans, things to buy, travel dreams | "
+                        "notes â€” habits, schedule, anything else worth remembering"
                     )
                 },
                 "key":   {"type": "STRING", "description": "Short snake_case key (e.g. name, favorite_food, sister_name)"},
@@ -1042,7 +1098,7 @@ def _report_brain_health(ui, snapshot: dict) -> None:
         ui,
         "brain",
         "ready" if worker_running else "error",
-        f"Arka plan görev döngüsü {'çalışıyor' if worker_running else 'çalışmıyor'} · {interval} sn",
+        f"Arka plan gÃ¶rev dÃ¶ngÃ¼sÃ¼ {'Ã§alÄ±ÅŸÄ±yor' if worker_running else 'Ã§alÄ±ÅŸmÄ±yor'} Â· {interval} sn",
     )
     for heartbeat in snapshot.get("agents", ()):
         component = _BRAIN_NODE_BY_NAME.get(str(heartbeat.get("name", "")))
@@ -1053,13 +1109,13 @@ def _report_brain_health(ui, snapshot: dict) -> None:
             state = "unknown"
         seconds = max(0, int(float(heartbeat.get("seconds_in_state", 0))))
         if state == "error":
-            detail = f"Son çağrıda hata · {seconds} sn"
+            detail = f"Son Ã§aÄŸrÄ±da hata Â· {seconds} sn"
         elif state == "running":
-            detail = f"İş yürütüyor · {seconds} sn"
+            detail = f"Ä°ÅŸ yÃ¼rÃ¼tÃ¼yor Â· {seconds} sn"
         elif state == "idle":
-            detail = f"Hazır, boşta · {seconds} sn"
+            detail = f"HazÄ±r, boÅŸta Â· {seconds} sn"
         else:
-            detail = "Durum henüz gözlenmedi"
+            detail = "Durum henÃ¼z gÃ¶zlenmedi"
         _report_network_status(ui, component, state, detail)
 
 
@@ -1073,17 +1129,17 @@ class JarvisLive:
         self._loop                = None
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
-        self._heard_now           = ""      # kullanıcının şu anki (bitmemiş) sözü
-        self._heard_prev          = ""      # bir önceki tam sözü
+        self._heard_now           = ""      # kullanÄ±cÄ±nÄ±n ÅŸu anki (bitmemiÅŸ) sÃ¶zÃ¼
+        self._heard_prev          = ""      # bir Ã¶nceki tam sÃ¶zÃ¼
         self._live_model          = (os.environ.get("JARVIS_LIVE_MODEL", "").strip() or LIVE_MODEL)
-        self._resume_handle       = None    # Gemini oturum devam anahtarı (~2 saat geçerli)
+        self._resume_handle       = None    # Gemini oturum devam anahtarÄ± (~2 saat geÃ§erli)
         self._resume_time         = 0.0
-        self._voice_gate          = None    # ses kapısı (core/voice_gate.py); None = her ses dinlenir
+        self._voice_gate          = None    # ses kapÄ±sÄ± (core/voice_gate.py); None = her ses dinlenir
         self._voice_gate_ready    = False
         self._gate_loop           = None
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
-        self._vision_cam_active    = False   # True if camera was opened for vision → auto-close after response
+        self._vision_cam_active    = False   # True if camera was opened for vision â†’ auto-close after response
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
@@ -1112,23 +1168,23 @@ class JarvisLive:
         return url, key, f"{url}/auto-login?key={key}", manual
 
     def _log_send_result(self, fut, label: str) -> None:
-        # TEŞHİS AMAÇLI GÖZLEMLENEBİLİRLİK (2026-09-16) — mevcut davranışı
-        # DEĞİŞTİRMEZ, sadece send_client_content() coroutine'inin gerçekten
-        # başarılı mı yoksa sessizce mi hata verdiğini görünür kılar.
+        # TEÅHÄ°S AMAÃ‡LI GÃ–ZLEMLENEBÄ°LÄ°RLÄ°K (2026-09-16) â€” mevcut davranÄ±ÅŸÄ±
+        # DEÄÄ°ÅTÄ°RMEZ, sadece send_client_content() coroutine'inin gerÃ§ekten
+        # baÅŸarÄ±lÄ± mÄ± yoksa sessizce mi hata verdiÄŸini gÃ¶rÃ¼nÃ¼r kÄ±lar.
         try:
             exc = fut.exception()
         except Exception as e:
             exc = e
         if exc:
-            msg = f"ERR: [{label}] send_client_content başarısız: {exc}"
-            print(f"[JARVIS] ❌ {msg}")
+            msg = f"ERR: [{label}] send_client_content baÅŸarÄ±sÄ±z: {exc}"
+            print(f"[JARVIS] âŒ {msg}")
             try:
                 self.ui.write_log(msg)
             except Exception:
                 pass
         else:
-            ok_msg = f"SYS: [{label}] send_client_content tamamlandı (hatasız)."
-            print(f"[JARVIS] ✅ {ok_msg}")
+            ok_msg = f"SYS: [{label}] send_client_content tamamlandÄ± (hatasÄ±z)."
+            print(f"[JARVIS] âœ… {ok_msg}")
             try:
                 self.ui.write_log(ok_msg)
             except Exception:
@@ -1136,8 +1192,8 @@ class JarvisLive:
 
     def _on_ui_text_command(self, text: str):
         """Kullanicinin arayuzden YAZDIGI komut. Sesli girdi zaten transkripsiyon
-        aninda isaretlenir; _on_text_command ic yonlendirmelerde (ses → dosya
-        router'i, tur sonunda) da cagrildigi icin isaret burada konur — aksi halde
+        aninda isaretlenir; _on_text_command ic yonlendirmelerde (ses â†’ dosya
+        router'i, tur sonunda) da cagrildigi icin isaret burada konur â€” aksi halde
         istegin kendisi gecikmeli olarak "onay" sayilabilirdi."""
         note_user_turn(text=text)  # dev_agent onay kapisi: gercek kullanici girdisi
         self._on_text_command(text)
@@ -1149,12 +1205,12 @@ class JarvisLive:
             self._heard_prev = text
             log_turn("user", text)
         except Exception as e:
-            print(f"[JARVIS] ⚠️ conversation_log (text command): {e}")
+            print(f"[JARVIS] âš ï¸ conversation_log (text command): {e}")
 
-        # BRAIN_TEAM_HEALTH: "AI takımının sağlık durumu" gibi açık sağlık
-        # isteklerini genel Gemini sohbetine bırakma.  Bu, daha önce komutun
-        # "bu yeteneğim yok" cevabına düşmesine neden oluyordu; Brain Team'in
-        # gerçek heartbeat endpoint'ine deterministik olarak yönlendir.
+        # BRAIN_TEAM_HEALTH: "AI takÄ±mÄ±nÄ±n saÄŸlÄ±k durumu" gibi aÃ§Ä±k saÄŸlÄ±k
+        # isteklerini genel Gemini sohbetine bÄ±rakma.  Bu, daha Ã¶nce komutun
+        # "bu yeteneÄŸim yok" cevabÄ±na dÃ¼ÅŸmesine neden oluyordu; Brain Team'in
+        # gerÃ§ek heartbeat endpoint'ine deterministik olarak yÃ¶nlendir.
         normalized = text.casefold()
         # Copied Explorer paths are local file requests, not Brain Team goals.
         # Handle file:///C:/... before generic task routing so Gemini 503/429
@@ -1176,124 +1232,124 @@ class JarvisLive:
                 from jarvis.actions.file_controller import get_file_info
                 info = get_file_info(local_file)
                 self.ui.write_log(f"[LOCAL_FILE_INFO] {info}")
-                self.speak(f"[LOCAL_FILE_INFO_SONUC] Yerel dosya bilgisi: {info}. Dosyayı değiştirmedim.")
+                self.speak(f"[LOCAL_FILE_INFO_SONUC] Yerel dosya bilgisi: {info}. DosyayÄ± deÄŸiÅŸtirmedim.")
             except Exception as e:
                 self.ui.write_log(f"[LOCAL_FILE_INFO_HATA] {e}")
-                self.speak(f"Yerel dosya bilgisi alınamadı: {e}")
+                self.speak(f"Yerel dosya bilgisi alÄ±namadÄ±: {e}")
             return
         health_terms = (
-            "ai takım", "beyin takımı", "brain team", "ajan takım",
-            "agent takım", "ajanların sağlık", "ajanlarin saglik",
+            "ai takÄ±m", "beyin takÄ±mÄ±", "brain team", "ajan takÄ±m",
+            "agent takÄ±m", "ajanlarÄ±n saÄŸlÄ±k", "ajanlarin saglik",
         )
-        team_terms = ("ai takım", "beyin takımı", "brain team", "ajan takım")
-        task_terms = ("görev", "gorev", "araştır", "arastır", "araştir", "özet", "ozet", "incele", "analiz", "denetim")
+        team_terms = ("ai takÄ±m", "beyin takÄ±mÄ±", "brain team", "ajan takÄ±m")
+        task_terms = ("gÃ¶rev", "gorev", "araÅŸtÄ±r", "arastÄ±r", "araÅŸtir", "Ã¶zet", "ozet", "incele", "analiz", "denetim")
         explicit_task_request = (
             any(term in normalized for term in team_terms)
             and any(term in normalized for term in task_terms)
-            and any(term in normalized for term in ("ver", "başlat", "baslat", "gönder", "gonder", "hazırla", "hazirla"))
+            and any(term in normalized for term in ("ver", "baÅŸlat", "baslat", "gÃ¶nder", "gonder", "hazÄ±rla", "hazirla"))
         )
-        status_terms = ("görev durumu", "gorev durumu", "çalışma ne durumda", "calisma ne durumda", "neden beklemede")
+        status_terms = ("gÃ¶rev durumu", "gorev durumu", "Ã§alÄ±ÅŸma ne durumda", "calisma ne durumda", "neden beklemede")
         explicit_status_request = any(term in normalized for term in status_terms)
         health_intent = (
             any(term in normalized for term in health_terms)
-            and any(term in normalized for term in ("sağlık", "saglik", "health", "durumu", "durumunu", "heartbeat"))
+            and any(term in normalized for term in ("saÄŸlÄ±k", "saglik", "health", "durumu", "durumunu", "heartbeat"))
             and not explicit_task_request
             and not explicit_status_request
         )
         if health_intent:
-            _report_network_status(self.ui, "brain", "running", "AI Beyin Takımı sağlık sorgusu")
+            _report_network_status(self.ui, "brain", "running", "AI Beyin TakÄ±mÄ± saÄŸlÄ±k sorgusu")
             try:
                 from jarvis.core.brain_orchestrator import brain_team_tool
                 health_result = brain_team_tool({"action": "health"}, player=self)
-                _report_network_status(self.ui, "brain", "returned", "Sağlık sorgusu yanıt döndürdü")
+                _report_network_status(self.ui, "brain", "returned", "SaÄŸlÄ±k sorgusu yanÄ±t dÃ¶ndÃ¼rdÃ¼")
                 self.ui.write_log(f"[BRAIN_TEAM_HEALTH] {health_result}")
                 self.speak(
-                    f"[BRAIN_TEAM_HEALTH_SONUC] Gerçek AI Beyin Takımı heartbeat sonucu: "
-                    f"{health_result}. Her beyni ve durumunu kullanıcıya kısa ve doğal "
-                    f"Türkçe ile özetle; ham teknik JSON okuma."
+                    f"[BRAIN_TEAM_HEALTH_SONUC] GerÃ§ek AI Beyin TakÄ±mÄ± heartbeat sonucu: "
+                    f"{health_result}. Her beyni ve durumunu kullanÄ±cÄ±ya kÄ±sa ve doÄŸal "
+                    f"TÃ¼rkÃ§e ile Ã¶zetle; ham teknik JSON okuma."
                 )
             except Exception as e:
-                _report_network_status(self.ui, "brain", "error", f"Sağlık sorgusu: {type(e).__name__}")
-                error = f"AI Beyin Takımı sağlık kontrolü çalıştırılamadı: {e}"
+                _report_network_status(self.ui, "brain", "error", f"SaÄŸlÄ±k sorgusu: {type(e).__name__}")
+                error = f"AI Beyin TakÄ±mÄ± saÄŸlÄ±k kontrolÃ¼ Ã§alÄ±ÅŸtÄ±rÄ±lamadÄ±: {e}"
                 self.ui.write_log(f"[BRAIN_TEAM_HEALTH_HATA] {error}")
                 self.speak(f"[BRAIN_TEAM_HEALTH_HATA] {error}")
             return
 
-        # BRAIN_TEAM_START: Kullanıcı açıkça "AI takımına ... görevi ver"
-        # dediğinde isteği genel Gemini araç seçimine bırakma.  Aksi halde
-        # model bunu Agent Loop/task_manager'a yönlendirebiliyor; görev 60sn
-        # kuyruğunda beklerken gerçek Brain Team hiç başlamıyordu.  Araştırma,
-        # analiz ve özet gibi salt-okunur hedefleri doğrudan Brain Team'in
-        # planner -> research -> security -> auditor zincirine gönder.
+        # BRAIN_TEAM_START: KullanÄ±cÄ± aÃ§Ä±kÃ§a "AI takÄ±mÄ±na ... gÃ¶revi ver"
+        # dediÄŸinde isteÄŸi genel Gemini araÃ§ seÃ§imine bÄ±rakma.  Aksi halde
+        # model bunu Agent Loop/task_manager'a yÃ¶nlendirebiliyor; gÃ¶rev 60sn
+        # kuyruÄŸunda beklerken gerÃ§ek Brain Team hiÃ§ baÅŸlamÄ±yordu.  AraÅŸtÄ±rma,
+        # analiz ve Ã¶zet gibi salt-okunur hedefleri doÄŸrudan Brain Team'in
+        # planner -> research -> security -> auditor zincirine gÃ¶nder.
         if (
             any(term in normalized for term in team_terms)
             and any(term in normalized for term in task_terms)
             and not explicit_status_request
         ):
-            _report_network_status(self.ui, "brain", "running", "AI Beyin Takımı görevi başlatılıyor")
+            _report_network_status(self.ui, "brain", "running", "AI Beyin TakÄ±mÄ± gÃ¶revi baÅŸlatÄ±lÄ±yor")
             try:
                 from jarvis.core.brain_orchestrator import brain_team_tool
                 goal = text.strip()
                 result = brain_team_tool({"action": "start", "goal": goal}, player=self)
-                _report_network_status(self.ui, "brain", "returned", "Görev başlatma yanıtı alındı")
+                _report_network_status(self.ui, "brain", "returned", "GÃ¶rev baÅŸlatma yanÄ±tÄ± alÄ±ndÄ±")
                 self.ui.write_log(f"[BRAIN_TEAM_START] {result}")
                 self.speak(
-                    f"[BRAIN_TEAM_START_SONUC] Gerçek AI Beyin Takımı görevi başlatıldı: "
-                    f"{result}. Kullanıcıya görevin arka planda çalıştığını ve sonucu "
-                    f"tamamlanınca bildireceğimi kısa Türkçe ile söyle; sonuç uydurma."
+                    f"[BRAIN_TEAM_START_SONUC] GerÃ§ek AI Beyin TakÄ±mÄ± gÃ¶revi baÅŸlatÄ±ldÄ±: "
+                    f"{result}. KullanÄ±cÄ±ya gÃ¶revin arka planda Ã§alÄ±ÅŸtÄ±ÄŸÄ±nÄ± ve sonucu "
+                    f"tamamlanÄ±nca bildireceÄŸimi kÄ±sa TÃ¼rkÃ§e ile sÃ¶yle; sonuÃ§ uydurma."
                 )
             except Exception as e:
-                _report_network_status(self.ui, "brain", "error", f"Görev başlatma: {type(e).__name__}")
-                error = f"AI Beyin Takımı görevi başlatılamadı: {e}"
+                _report_network_status(self.ui, "brain", "error", f"GÃ¶rev baÅŸlatma: {type(e).__name__}")
+                error = f"AI Beyin TakÄ±mÄ± gÃ¶revi baÅŸlatÄ±lamadÄ±: {e}"
                 self.ui.write_log(f"[BRAIN_TEAM_START_HATA] {error}")
                 self.speak(f"[BRAIN_TEAM_START_HATA] {error}")
             return
 
-        # Görev durumunu soran açık ifadeler de genel system_status'a değil,
-        # Brain Team'in kalıcı görev kuyruğuna yönlendirilsin.
+        # GÃ¶rev durumunu soran aÃ§Ä±k ifadeler de genel system_status'a deÄŸil,
+        # Brain Team'in kalÄ±cÄ± gÃ¶rev kuyruÄŸuna yÃ¶nlendirilsin.
         if any(term in normalized for term in status_terms):
-            _report_network_status(self.ui, "brain", "running", "AI Beyin Takımı görev durumu sorgulanıyor")
+            _report_network_status(self.ui, "brain", "running", "AI Beyin TakÄ±mÄ± gÃ¶rev durumu sorgulanÄ±yor")
             try:
                 from jarvis.core.brain_orchestrator import brain_team_tool
                 result = brain_team_tool({"action": "status"}, player=self)
-                _report_network_status(self.ui, "brain", "returned", "Görev durumu yanıtı alındı")
+                _report_network_status(self.ui, "brain", "returned", "GÃ¶rev durumu yanÄ±tÄ± alÄ±ndÄ±")
                 self.ui.write_log(f"[BRAIN_TEAM_STATUS] {result}")
-                self.speak(f"[BRAIN_TEAM_STATUS_SONUC] Gerçek görev kuyruğu sonucu: {result}. Bunu doğal Türkçe ile özetle.")
+                self.speak(f"[BRAIN_TEAM_STATUS_SONUC] GerÃ§ek gÃ¶rev kuyruÄŸu sonucu: {result}. Bunu doÄŸal TÃ¼rkÃ§e ile Ã¶zetle.")
             except Exception as e:
-                _report_network_status(self.ui, "brain", "error", f"Görev durumu: {type(e).__name__}")
-                error = f"AI Beyin Takımı görev durumu alınamadı: {e}"
+                _report_network_status(self.ui, "brain", "error", f"GÃ¶rev durumu: {type(e).__name__}")
+                error = f"AI Beyin TakÄ±mÄ± gÃ¶rev durumu alÄ±namadÄ±: {e}"
                 self.ui.write_log(f"[BRAIN_TEAM_STATUS_HATA] {error}")
                 self.speak(f"[BRAIN_TEAM_STATUS_HATA] {error}")
             return
 
         # TASK_ADD must precede deterministic system-read shortcuts. Otherwise
-        # a sentence such as "system statusu kontrol et ve sonucu görev
-        # kaydına yaz" is consumed as a direct read and the model may write a
+        # a sentence such as "system statusu kontrol et ve sonucu gÃ¶rev
+        # kaydÄ±na yaz" is consumed as a direct read and the model may write a
         # file instead of creating the requested background task.
         if _is_generic_task_request(text) and not explicit_task_request:
             try:
                 result = agent_loop_tool(parameters={"action": "add", "goal": text})
             except Exception as e:
-                result = f"Görev eklenirken hata oluştu: {e}"
+                result = f"GÃ¶rev eklenirken hata oluÅŸtu: {e}"
             self.ui.write_log(f"[AGENT_LOOP_EKLENDI] {result}")
             try:
                 log_turn("jarvis", result)
             except Exception as e:
-                print(f"[JARVIS] ⚠️ conversation_log (generic task priority): {e}")
+                print(f"[JARVIS] âš ï¸ conversation_log (generic task priority): {e}")
             self.speak(
-                f"[AGENT_LOOP_EKLENDI] Gerçek görev kuyruğu sonucu: {result}. "
-                "Görevin arka planda işleneceğini kısa ve doğal Türkçe ile bildir; "
-                "henüz sonuç uydurma ve dosyaya doğrudan yazma."
+                f"[AGENT_LOOP_EKLENDI] GerÃ§ek gÃ¶rev kuyruÄŸu sonucu: {result}. "
+                "GÃ¶revin arka planda iÅŸleneceÄŸini kÄ±sa ve doÄŸal TÃ¼rkÃ§e ile bildir; "
+                "henÃ¼z sonuÃ§ uydurma ve dosyaya doÄŸrudan yazma."
             )
             return
 
-        # SYSTEM_READ -> windows_system -> process_list (Aşama 2 / Adım 1):
-        # basit, deterministik bir eşleşme varsa Gemini'nin kendi araç
-        # seçimine (system_status vb.) HİÇ bırakmadan doğrudan mevcut
-        # tools_kopru.ALLOWED_TOOLS["windows_system"] üzerinden çalıştır.
+        # SYSTEM_READ -> windows_system -> process_list (AÅŸama 2 / AdÄ±m 1):
+        # basit, deterministik bir eÅŸleÅŸme varsa Gemini'nin kendi araÃ§
+        # seÃ§imine (system_status vb.) HÄ°Ã‡ bÄ±rakmadan doÄŸrudan mevcut
+        # tools_kopru.ALLOWED_TOOLS["windows_system"] Ã¼zerinden Ã§alÄ±ÅŸtÄ±r.
         # Salt-okunur, parametresiz, tek komut (process_list) - dosya
-        # değiştirme/işlem sonlandırma/admin yok. Brain Team/Agent Loop
-        # zincirine hiç girmez.
+        # deÄŸiÅŸtirme/iÅŸlem sonlandÄ±rma/admin yok. Brain Team/Agent Loop
+        # zincirine hiÃ§ girmez.
         matched_command = match_system_read(text)
         if matched_command:
             try:
@@ -1304,43 +1360,43 @@ class JarvisLive:
                 raw_result = None
                 error_text = f"{e}"
             if error_text:
-                summary_for_log = f"[SYSTEM_READ] {matched_command} çalıştırılırken hata: {error_text}"
+                summary_for_log = f"[SYSTEM_READ] {matched_command} Ã§alÄ±ÅŸtÄ±rÄ±lÄ±rken hata: {error_text}"
             else:
-                summary_for_log = f"[SYSTEM_READ] {matched_command} çalıştırıldı: {raw_result}"
+                summary_for_log = f"[SYSTEM_READ] {matched_command} Ã§alÄ±ÅŸtÄ±rÄ±ldÄ±: {raw_result}"
             self.ui.write_log(summary_for_log)
             try:
                 log_turn("jarvis", summary_for_log)
             except Exception as e:
-                print(f"[JARVIS] ⚠️ conversation_log (system_read short-circuit): {e}")
+                print(f"[JARVIS] âš ï¸ conversation_log (system_read short-circuit): {e}")
             if error_text:
                 prompt = (
-                    f"[SYSTEM_READ_HATA] Kullanıcı çalışan işlemleri (process_list) sordu, "
-                    f"ancak doğrudan çalıştırma hata verdi: \"{error_text}\". Bunu kullanıcıya "
-                    f"açıkça, sessiz kalmadan bildir - teknik ayrıntıyı kısaca özetle."
+                    f"[SYSTEM_READ_HATA] KullanÄ±cÄ± Ã§alÄ±ÅŸan iÅŸlemleri (process_list) sordu, "
+                    f"ancak doÄŸrudan Ã§alÄ±ÅŸtÄ±rma hata verdi: \"{error_text}\". Bunu kullanÄ±cÄ±ya "
+                    f"aÃ§Ä±kÃ§a, sessiz kalmadan bildir - teknik ayrÄ±ntÄ±yÄ± kÄ±saca Ã¶zetle."
                 )
             else:
                 prompt = (
-                    f"[SYSTEM_READ_SONUC] Kullanıcı çalışan işlemleri sordu. Bu istek, Gemini'nin "
-                    f"ayrı bir araç seçmesine gerek kalmadan doğrudan windows_system -> "
-                    f"process_list ile ÇALIŞTIRILDI. Gerçek JSON sonucu: {raw_result}. Bunu "
-                    f"kullanıcıya doğal, kısa bir dille özetle - varsa en çok CPU/RAM kullanan "
-                    f"birkaç süreci öne çıkar, ham JSON'u okuma. Sonuç ok:false ise hatayı açıkça "
-                    f"söyle, sessiz kalma."
+                    f"[SYSTEM_READ_SONUC] KullanÄ±cÄ± Ã§alÄ±ÅŸan iÅŸlemleri sordu. Bu istek, Gemini'nin "
+                    f"ayrÄ± bir araÃ§ seÃ§mesine gerek kalmadan doÄŸrudan windows_system -> "
+                    f"process_list ile Ã‡ALIÅTIRILDI. GerÃ§ek JSON sonucu: {raw_result}. Bunu "
+                    f"kullanÄ±cÄ±ya doÄŸal, kÄ±sa bir dille Ã¶zetle - varsa en Ã§ok CPU/RAM kullanan "
+                    f"birkaÃ§ sÃ¼reci Ã¶ne Ã§Ä±kar, ham JSON'u okuma. SonuÃ§ ok:false ise hatayÄ± aÃ§Ä±kÃ§a "
+                    f"sÃ¶yle, sessiz kalma."
                 )
             self.speak(prompt)
             return
 
         # FILE_ANALYSIS -> brain_team -> coder_ai -> operation=analyze
-        # (Aşama 2 / Adım 2): dosya yolu + analiz/inceleme/okuma/açıklama
-        # niyeti AÇIKÇA algılanıyorsa, Gemini'nin code_helper / self_improve /
-        # brain_team arasında serbestçe seçim yapmasına HİÇ bırakmadan,
-        # DOĞRUDAN ve DETERMİNİSTİK olarak coder_ai'ye operation="analyze"
-        # (dry_run - dosya ASLA değiştirilmez) ile bir görev oluştur. Planlama
-        # LLM'ine (planner_ai) HİÇ gidilmiyor - "operation" burada, planner'ın
-        # olası "modify" varsayılanına düşme riski OLMADAN, deterministik
-        # olarak sabitleniyor. Mevcut görev/adım motoru (task_manager,
+        # (AÅŸama 2 / AdÄ±m 2): dosya yolu + analiz/inceleme/okuma/aÃ§Ä±klama
+        # niyeti AÃ‡IKÃ‡A algÄ±lanÄ±yorsa, Gemini'nin code_helper / self_improve /
+        # brain_team arasÄ±nda serbestÃ§e seÃ§im yapmasÄ±na HÄ°Ã‡ bÄ±rakmadan,
+        # DOÄRUDAN ve DETERMÄ°NÄ°STÄ°K olarak coder_ai'ye operation="analyze"
+        # (dry_run - dosya ASLA deÄŸiÅŸtirilmez) ile bir gÃ¶rev oluÅŸtur. Planlama
+        # LLM'ine (planner_ai) HÄ°Ã‡ gidilmiyor - "operation" burada, planner'Ä±n
+        # olasÄ± "modify" varsayÄ±lanÄ±na dÃ¼ÅŸme riski OLMADAN, deterministik
+        # olarak sabitleniyor. Mevcut gÃ¶rev/adÄ±m motoru (task_manager,
         # _tick/_execute_step/_finish_step, Auditor, Security, _notify_result)
-        # HİÇ DEĞİŞTİRİLMEDEN aynen kullanılıyor.
+        # HÄ°Ã‡ DEÄÄ°ÅTÄ°RÄ°LMEDEN aynen kullanÄ±lÄ±yor.
         # FILE_MODIFICATION -> brain_team -> executor_ai -> file_controller
         # Acik dosya olusturma/yazma komutlarini Gemini'nin arac secimine
         # birakmadan deterministik olarak mevcut Brain Team gorev motoruna ver.
@@ -1453,51 +1509,51 @@ class JarvisLive:
                     },
                 )
                 summary_for_log = (
-                    f"[FILE_ANALYSIS] '{resolved_file_path}' için analiz görevi oluşturuldu "
+                    f"[FILE_ANALYSIS] '{resolved_file_path}' iÃ§in analiz gÃ¶revi oluÅŸturuldu "
                     f"(id={task['id']}) -> brain_team -> coder_ai -> operation=analyze."
                 )
                 error_text = None
             except Exception as e:
                 summary_for_log = None
                 error_text = f"{e}"
-            self.ui.write_log(summary_for_log if not error_text else f"[FILE_ANALYSIS] Görev oluşturulamadı: {error_text}")
+            self.ui.write_log(summary_for_log if not error_text else f"[FILE_ANALYSIS] GÃ¶rev oluÅŸturulamadÄ±: {error_text}")
             try:
                 log_turn("jarvis", summary_for_log or f"[FILE_ANALYSIS] hata: {error_text}")
             except Exception as e:
-                print(f"[JARVIS] ⚠️ conversation_log (file_analysis short-circuit): {e}")
+                print(f"[JARVIS] âš ï¸ conversation_log (file_analysis short-circuit): {e}")
             if error_text:
                 prompt = (
-                    f"[FILE_ANALYSIS_HATA] Kullanıcı '{resolved_file_path}' dosyasının analiz "
-                    f"edilmesini istedi, ancak görev oluşturulurken hata oluştu: \"{error_text}\". "
-                    f"Bunu kullanıcıya açıkça, sessiz kalmadan bildir."
+                    f"[FILE_ANALYSIS_HATA] KullanÄ±cÄ± '{resolved_file_path}' dosyasÄ±nÄ±n analiz "
+                    f"edilmesini istedi, ancak gÃ¶rev oluÅŸturulurken hata oluÅŸtu: \"{error_text}\". "
+                    f"Bunu kullanÄ±cÄ±ya aÃ§Ä±kÃ§a, sessiz kalmadan bildir."
                 )
             else:
                 prompt = (
-                    f"[FILE_ANALYSIS_BASLATILDI] Kullanıcının '{resolved_file_path}' dosyasını "
-                    f"analiz etme isteği AI Beyin Takımı'na (coder_ai, SADECE OKUMA/analiz - dosya "
-                    f"asla değiştirilmeyecek) gönderildi. Kullanıcıya kısaca, doğal bir dille, "
-                    f"analizin arka planda yapılacağını ve sonucun birazdan bildirileceğini söyle - "
-                    f"şimdi analiz sonucunu UYDURMA, henüz gelmedi."
+                    f"[FILE_ANALYSIS_BASLATILDI] KullanÄ±cÄ±nÄ±n '{resolved_file_path}' dosyasÄ±nÄ± "
+                    f"analiz etme isteÄŸi AI Beyin TakÄ±mÄ±'na (coder_ai, SADECE OKUMA/analiz - dosya "
+                    f"asla deÄŸiÅŸtirilmeyecek) gÃ¶nderildi. KullanÄ±cÄ±ya kÄ±saca, doÄŸal bir dille, "
+                    f"analizin arka planda yapÄ±lacaÄŸÄ±nÄ± ve sonucun birazdan bildirileceÄŸini sÃ¶yle - "
+                    f"ÅŸimdi analiz sonucunu UYDURMA, henÃ¼z gelmedi."
                 )
             self.speak(prompt)
             return
 
-        # GENEL TASK_ADD: açıkça görev ekleme istendiğinde Gemini'nin serbest
-        # araç seçimine bırakmadan gerçek Agent Loop kaydını hemen oluştur.
+        # GENEL TASK_ADD: aÃ§Ä±kÃ§a gÃ¶rev ekleme istendiÄŸinde Gemini'nin serbest
+        # araÃ§ seÃ§imine bÄ±rakmadan gerÃ§ek Agent Loop kaydÄ±nÄ± hemen oluÅŸtur.
         if _is_generic_task_request(text) and not explicit_task_request:
             try:
                 result = agent_loop_tool(parameters={"action": "add", "goal": text})
             except Exception as e:
-                result = f"Görev eklenirken hata oluştu: {e}"
+                result = f"GÃ¶rev eklenirken hata oluÅŸtu: {e}"
             self.ui.write_log(f"[AGENT_LOOP_EKLENDI] {result}")
             try:
                 log_turn("jarvis", result)
             except Exception as e:
-                print(f"[JARVIS] ⚠️ conversation_log (generic task): {e}")
+                print(f"[JARVIS] âš ï¸ conversation_log (generic task): {e}")
             self.speak(
-                f"[AGENT_LOOP_EKLENDI] Gerçek görev kuyruğu sonucu: {result}. "
-                "Görevin arka planda işleneceğini ve sonucu tamamlanınca bildireceğini "
-                "kısa, doğal Türkçe ile söyle; sonuç uydurma ve görevi ikinci kez ekleme."
+                f"[AGENT_LOOP_EKLENDI] GerÃ§ek gÃ¶rev kuyruÄŸu sonucu: {result}. "
+                "GÃ¶revin arka planda iÅŸleneceÄŸini ve sonucu tamamlanÄ±nca bildireceÄŸini "
+                "kÄ±sa, doÄŸal TÃ¼rkÃ§e ile sÃ¶yle; sonuÃ§ uydurma ve gÃ¶revi ikinci kez ekleme."
             )
             return
 
@@ -1507,19 +1563,19 @@ class JarvisLive:
             try:
                 result = agent_loop_tool(parameters={"action": "add", "goal": text})
             except Exception as e:
-                result = f"Görev eklenirken hata oluştu: {e}"
+                result = f"GÃ¶rev eklenirken hata oluÅŸtu: {e}"
             self.ui.write_log(f"[agent_loop] {result}")
             try:
                 log_turn("jarvis", result)
             except Exception as e:
-                print(f"[JARVIS] ⚠️ conversation_log (agent_loop short-circuit): {e}")
+                print(f"[JARVIS] âš ï¸ conversation_log (agent_loop short-circuit): {e}")
             notify = (
-                f"[AGENT_LOOP_EKLENDI] Kullanıcının GitHub'da kendisi için yeni bir yetenek "
-                f"aramasını istediği görev, arka plan görev listesine ZATEN eklendi (gerçek "
-                f"sonuç: \"{result}\"). Bunu kullanıcıya kısaca doğal bir dille onayla - arka "
-                f"planda arayacağını, bir şey bulursa entegre etmeden önce onayını isteyeceğini "
-                f"söyle. Bunun için web_search, github_arama veya başka bir araç ÇAĞIRMA - "
-                f"görev zaten eklendi, sadece bu sonucu bildir."
+                f"[AGENT_LOOP_EKLENDI] KullanÄ±cÄ±nÄ±n GitHub'da kendisi iÃ§in yeni bir yetenek "
+                f"aramasÄ±nÄ± istediÄŸi gÃ¶rev, arka plan gÃ¶rev listesine ZATEN eklendi (gerÃ§ek "
+                f"sonuÃ§: \"{result}\"). Bunu kullanÄ±cÄ±ya kÄ±saca doÄŸal bir dille onayla - arka "
+                f"planda arayacaÄŸÄ±nÄ±, bir ÅŸey bulursa entegre etmeden Ã¶nce onayÄ±nÄ± isteyeceÄŸini "
+                f"sÃ¶yle. Bunun iÃ§in web_search, github_arama veya baÅŸka bir araÃ§ Ã‡AÄIRMA - "
+                f"gÃ¶rev zaten eklendi, sadece bu sonucu bildir."
             )
             fut = asyncio.run_coroutine_threadsafe(
                 self.session.send_client_content(
@@ -1563,11 +1619,11 @@ class JarvisLive:
                 except Exception:
                     break
             if drained:
-                print(f"[JARVIS] ✋ Interrupted — {drained} audio chunks discarded")
+                print(f"[JARVIS] âœ‹ Interrupted â€” {drained} audio chunks discarded")
         self.set_speaking(False)
         if self._turn_done_event:
             self._turn_done_event.clear()
-        self.ui.write_log("SYS: Interrupted — listening...")
+        self.ui.write_log("SYS: Interrupted â€” listening...")
 
     def speak(self, text: str):
         if not self._loop or not self.session:
@@ -1583,7 +1639,7 @@ class JarvisLive:
 
     def speak_error(self, tool_name: str, error: str):
         short = str(error)[:120]
-        self.ui.write_log(f"ERR: {tool_name} — {short}")
+        self.ui.write_log(f"ERR: {tool_name} â€” {short}")
         self.speak(f"Sir, {tool_name} encountered an error. {short}")
 
     def _build_config(self) -> types.LiveConnectConfig:
@@ -1596,7 +1652,7 @@ class JarvisLive:
                 ui,
                 "memory",
                 "observed",
-                "Yerel hafıza verisi yüklendi",
+                "Yerel hafÄ±za verisi yÃ¼klendi",
             )
         mem_str = format_memory_for_prompt(memory)
         sys_prompt = _load_system_prompt()
@@ -1604,16 +1660,16 @@ class JarvisLive:
 
 
         now      = datetime.now()
-        time_str = now.strftime("%A, %B %d, %Y — %I:%M %p")
+        time_str = now.strftime("%A, %B %d, %Y â€” %I:%M %p")
         time_ctx = (
             f"[CURRENT DATE & TIME]\n"
             f"Right now it is: {time_str}\n"
             f"Use this to calculate exact times for reminders.\n\n"
         )
 
-        # HAFIZA (Murat@goxs 2026-09-30: "JARVIS unutuyor"): bağlantı koptuğunda ya da
-        # ~15 dk'lık oturum sınırında yeni oturum SIFIRDAN başlıyordu. Geçerli bir devam
-        # anahtarı varsa aynı konuşma sürdürülür; yoksa son konuşmalar talimata eklenir.
+        # HAFIZA (Murat@goxs 2026-09-30: "JARVIS unutuyor"): baÄŸlantÄ± koptuÄŸunda ya da
+        # ~15 dk'lÄ±k oturum sÄ±nÄ±rÄ±nda yeni oturum SIFIRDAN baÅŸlÄ±yordu. GeÃ§erli bir devam
+        # anahtarÄ± varsa aynÄ± konuÅŸma sÃ¼rdÃ¼rÃ¼lÃ¼r; yoksa son konuÅŸmalar talimata eklenir.
         resume = self._resume_handle if (self._resume_handle
                                          and time.time() - self._resume_time < 2 * 3600 - 300) else None
         self._using_resume = resume
@@ -1626,15 +1682,15 @@ class JarvisLive:
                 recent = recent_context()
                 if recent:
                     parts.append(recent)
-                    _report_network_status(self.ui, "history", "observed", "Son konuşma bağlamı okundu")
+                    _report_network_status(self.ui, "history", "observed", "Son konuÅŸma baÄŸlamÄ± okundu")
             except Exception as _e:  # noqa: BLE001
-                print(f"[Memory] ⚠️ Son konuşmalar eklenemedi: {_e}")
-        # SES ALGILAMA (Murat@goxs 2026-09-30): 'Miran' → 'Mira', 'Jarvis' → 'caiz', bir kez
+                print(f"[Memory] âš ï¸ Son konuÅŸmalar eklenemedi: {_e}")
+        # SES ALGILAMA (Murat@goxs 2026-09-30): 'Miran' â†’ 'Mira', 'Jarvis' â†’ 'caiz', bir kez
         # 'Emir' uyduruldu. Yerli modelde dil kodu sabitlenemiyor (Google: native audio
-        # modelleri dili kendisi seçer); bilinen isimler ve belirsizlikte sorma kuralı verilir.
-        # KENDİNİ TANIMA (Murat@goxs 2026-09-30): JARVIS "qwen2.5-coder:14b kullanıyorum",
-        # "tekrarlı hatırlatıcı kuramıyorum", "Ruff/Mypy'yi kendime entegre edeceğim" dedi —
-        # üçü de yanlıştı. Kendisi hakkındaki gerçekler talimata yazılır.
+        # modelleri dili kendisi seÃ§er); bilinen isimler ve belirsizlikte sorma kuralÄ± verilir.
+        # KENDÄ°NÄ° TANIMA (Murat@goxs 2026-09-30): JARVIS "qwen2.5-coder:14b kullanÄ±yorum",
+        # "tekrarlÄ± hatÄ±rlatÄ±cÄ± kuramÄ±yorum", "Ruff/Mypy'yi kendime entegre edeceÄŸim" dedi â€”
+        # Ã¼Ã§Ã¼ de yanlÄ±ÅŸtÄ±. Kendisi hakkÄ±ndaki gerÃ§ekler talimata yazÄ±lÄ±r.
         parts.append(
             "SELF-KNOWLEDGE (facts; never contradict or embellish them): "
             f"Your live voice/conversation model is Google Gemini '{getattr(self, '_live_model', LIVE_MODEL)}'. "
@@ -1652,7 +1708,7 @@ class JarvisLive:
             "HEARING GUARD: Speech recognition sometimes mishears Turkish words and names. "
             + (f"Known names in this user's life (prefer these spellings when a heard word sounds similar): "
                f"{', '.join(known)}. " if known else "")
-            + "The assistant's name 'Jarvis' may be heard as 'caiz', 'carvis', 'çarviz', 'j'ai' — treat these as "
+            + "The assistant's name 'Jarvis' may be heard as 'caiz', 'carvis', 'Ã§arviz', 'j'ai' â€” treat these as "
             "'Jarvis'. If a name, number, time or date in the request is unclear, ASK the user to repeat it "
             "instead of guessing; never invent a name the user did not say."
         )
@@ -1676,8 +1732,8 @@ class JarvisLive:
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": TOOL_DECLARATIONS}],
             max_output_tokens=16384,
-            # Konuşma algılama: kısa duraklamada cümle bölünmesin, başı kesilmesin
-            # (Google önerisi: sessizlik 500–800 ms).
+            # KonuÅŸma algÄ±lama: kÄ±sa duraklamada cÃ¼mle bÃ¶lÃ¼nmesin, baÅŸÄ± kesilmesin
+            # (Google Ã¶nerisi: sessizlik 500â€“800 ms).
             realtime_input_config=types.RealtimeInputConfig(
                 automatic_activity_detection=types.AutomaticActivityDetection(
                     end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
@@ -1686,7 +1742,7 @@ class JarvisLive:
                 )),
             session_resumption=(types.SessionResumptionConfig(handle=resume) if resume
                                 else types.SessionResumptionConfig()),
-            # Uzun konuşmada bağlam dolunca oturum kapanmasın: eski kısımlar kayar pencereyle atılır.
+            # Uzun konuÅŸmada baÄŸlam dolunca oturum kapanmasÄ±n: eski kÄ±sÄ±mlar kayar pencereyle atÄ±lÄ±r.
             context_window_compression=types.ContextWindowCompressionConfig(
                 sliding_window=types.SlidingWindow()),
             speech_config=types.SpeechConfig(
@@ -1705,13 +1761,13 @@ class JarvisLive:
         log_args = args
         if name == "powershell_control" and "command" in args:
             log_args = {**args, "command": f"<hidden: {len(str(args['command']))} chars>"}
-        print(f"[JARVIS] 🔧 {name}  {log_args}")
+        print(f"[JARVIS] ğŸ”§ {name}  {log_args}")
         self.ui.set_state("THINKING")
         _report_network_tool(self.ui, name, "running")
 
         if name == "forget_memory":
             result = _forget_memory(str(args.get("key", "")), str(args.get("category", "notes")))
-            print(f"[Memory] 🗑️ forget_memory: {result}")
+            print(f"[Memory] ğŸ—‘ï¸ forget_memory: {result}")
             _report_network_tool(self.ui, name, "returned")
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
@@ -1724,16 +1780,16 @@ class JarvisLive:
             unheard = _unheard_names(value, f"{self._heard_prev} {self._heard_now}") \
                 if category in ("identity", "relationships") else []
             if unheard:
-                # Daha önce kaydedilmiş bir isim (ör. Miran) yanlış duyulmuş olabilir ('Mira'):
-                # hafızada zaten olan ve duyulana benzeyen isimler kabul edilir.
+                # Daha Ã¶nce kaydedilmiÅŸ bir isim (Ã¶r. Miran) yanlÄ±ÅŸ duyulmuÅŸ olabilir ('Mira'):
+                # hafÄ±zada zaten olan ve duyulana benzeyen isimler kabul edilir.
                 known = set(_known_names(load_memory()))
                 heard = f"{self._heard_prev} {self._heard_now}"
                 unheard = [n for n in unheard if not (n in known and _sounds_like(n, heard))]
             if key and value and unheard:
-                # Murat@goxs 2026-09-30: 'Benim oğlum var' deyince hafızaya uydurma bir isim
-                # (son_name = Emir) yazıldı. Kullanıcının SÖYLEMEDİĞİ isim kaydedilmez.
-                print(f"[Memory] 🚫 save_memory reddedildi: {category}/{key} = {value} "
-                      f"(kullanıcı bu ismi söylemedi: {unheard})")
+                # Murat@goxs 2026-09-30: 'Benim oÄŸlum var' deyince hafÄ±zaya uydurma bir isim
+                # (son_name = Emir) yazÄ±ldÄ±. KullanÄ±cÄ±nÄ±n SÃ–YLEMEDÄ°ÄÄ° isim kaydedilmez.
+                print(f"[Memory] ğŸš« save_memory reddedildi: {category}/{key} = {value} "
+                      f"(kullanÄ±cÄ± bu ismi sÃ¶ylemedi: {unheard})")
                 if not self.ui.muted:
                     self.ui.set_state("LISTENING")
                 _report_network_tool(self.ui, name, "returned")
@@ -1742,7 +1798,7 @@ class JarvisLive:
                                "Ask the user for the exact name (in Turkish) and save only what they say.")})
             if key and value:
                 update_memory({category: {key: {"value": value}}})
-                print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
+                print(f"[Memory] ğŸ’¾ save_memory: {category}/{key} = {value}")
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             _report_network_tool(self.ui, name, "returned")
@@ -1768,7 +1824,7 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
                 result = r or "Done."
                 if str(args.get("action", "")).lower() == "get_text" and r:
-                    self.ui.show_content("JARVIS — PAGE TEXT", r)
+                    self.ui.show_content("JARVIS â€” PAGE TEXT", r)
 
             elif name == "powershell_control":
                 heard = self._heard_now.strip() or self._heard_prev.strip()
@@ -1801,7 +1857,7 @@ class JarvisLive:
                 _fc_action = str(args.get("action", "")).lower()
                 if r and _fc_action in ("list", "find", "largest", "disk_usage", "info"):
                     _fc_path = args.get("path", "")
-                    _fc_label = f"FILES — {_fc_action.upper()}" + (f" ({_fc_path})" if _fc_path else "")
+                    _fc_label = f"FILES â€” {_fc_action.upper()}" + (f" ({_fc_path})" if _fc_path else "")
                     self.ui.show_content(_fc_label, r)
                     # Ayrica log/gecmis paneline de yaz - kullanici sadece
                     # sesli/ozet yaniti degil, ham listeyi de metin olarak
@@ -1839,10 +1895,10 @@ class JarvisLive:
             elif name == "screen_process":
                 import time as _t_mod
                 _now = _t_mod.monotonic()
-                _cooldown = 4.0  # seconds — covers echo window after speaking ends
+                _cooldown = 4.0  # seconds â€” covers echo window after speaking ends
                 if self._vision_busy or (_now - self._vision_last_time) < _cooldown:
                     _wait = max(0, _cooldown - (_now - self._vision_last_time))
-                    print(f"[Vision] ⏳ Cooldown active ({_wait:.1f}s remaining) — ignoring duplicate call")
+                    print(f"[Vision] â³ Cooldown active ({_wait:.1f}s remaining) â€” ignoring duplicate call")
                     result = "Vision is still processing the previous request. I will not call this again."
                 else:
                     self._vision_busy      = True
@@ -1853,19 +1909,19 @@ class JarvisLive:
                         img_b, mime_t = await loop.run_in_executor(None, _capture_camera)
                         self.ui.start_camera_stream()
                         self._vision_cam_active = True
-                        print(f"[Vision] 📷 Camera: {len(img_b):,} bytes")
+                        print(f"[Vision] ğŸ“· Camera: {len(img_b):,} bytes")
                         _stall = "camera"
                     else:
                         img_b, mime_t = await loop.run_in_executor(None, _capture_screen)
-                        print(f"[Vision] 🖥️  Screen: {len(img_b):,} bytes")
+                        print(f"[Vision] ğŸ–¥ï¸  Screen: {len(img_b):,} bytes")
                         _stall = "screen"
                     self._pending_vision = (img_b, mime_t, user_text, angle)
                     result = (
                         f"[VISION_ACTIVE] {_stall.capitalize()} captured. "
                         f"Immediately say ONE natural sentence in the user's language "
                         f"(e.g. 'Looking at your {_stall} now, sir' / "
-                        f"'{'Kameraya' if _stall == 'camera' else 'Ekrana'} bakıyorum efendim'). "
-                        f"Do NOT describe or guess content — the actual image arrives in the NEXT message."
+                        f"'{'Kameraya' if _stall == 'camera' else 'Ekrana'} bakÄ±yorum efendim'). "
+                        f"Do NOT describe or guess content â€” the actual image arrives in the NEXT message."
                     )
 
             elif name == "close_camera":
@@ -1919,7 +1975,7 @@ class JarvisLive:
                 _mode = args.get("mode", "search")
                 if r and not r.startswith("No results") and not r.startswith("Search failed"):
                     _query = args.get("query") or ", ".join(args.get("items", []))
-                    _label = f"{_mode.upper()} — {_query[:38]}" if _query else _mode.upper()
+                    _label = f"{_mode.upper()} â€” {_query[:38]}" if _query else _mode.upper()
                     self.ui.show_content(_label, r)
             elif name == "file_processor":
                 if not args.get("file_path") and self.ui.current_file:
@@ -1952,17 +2008,17 @@ class JarvisLive:
                 result = str(r)
 
             elif name == "shutdown_jarvis" and not _asked_to_close(f"{self._heard_prev} {self._heard_now}"):
-                # Murat@goxs 2026-09-30: 'İyi günler' deyince JARVIS kendini kapattı.
-                print("[JARVIS] shutdown_jarvis reddedildi: kullanıcı açıkça 'kapat' demedi.")
+                # Murat@goxs 2026-09-30: 'Ä°yi gÃ¼nler' deyince JARVIS kendini kapattÄ±.
+                print("[JARVIS] shutdown_jarvis reddedildi: kullanÄ±cÄ± aÃ§Ä±kÃ§a 'kapat' demedi.")
                 result = ("NOT SHUT DOWN: the user only said goodbye, not 'close/shut down'. "
                           "Say goodbye briefly in Turkish and keep running.")
 
             elif name == "shutdown_jarvis":
                 self.ui.write_log("SYS: Shutdown requested.")
                 self.speak("Goodbye, sir.")
-                # os._exit() atexit'i atladığı için kapanma nedeni burada
-                # açıkça loglanıyor (bkz. __main__._setup_crash_logging).
-                print("[JARVIS] shutdown_jarvis aracı çağrıldı - Gemini kapatma istedi.", flush=True)
+                # os._exit() atexit'i atladÄ±ÄŸÄ± iÃ§in kapanma nedeni burada
+                # aÃ§Ä±kÃ§a loglanÄ±yor (bkz. __main__._setup_crash_logging).
+                print("[JARVIS] shutdown_jarvis aracÄ± Ã§aÄŸrÄ±ldÄ± - Gemini kapatma istedi.", flush=True)
                 def _shutdown():
                     import time
                     import os
@@ -1984,7 +2040,7 @@ class JarvisLive:
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
 
-        print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
+        print(f"[JARVIS] ğŸ“¤ {name} â†’ {str(result)[:80]}")
         return types.FunctionResponse(
             id=fc.id, name=name,
             response={"result": result}
@@ -2005,12 +2061,12 @@ class JarvisLive:
             pass
 
     async def _listen_audio(self):
-        print("[JARVIS] 🎤 Mic started")
+        print("[JARVIS] ğŸ¤ Mic started")
         loop = asyncio.get_event_loop()
-        # SES KAPISI (Murat@goxs 2026-09-30: "benim sesimi tanısın, her şeye cevap
-        # veriyor"): profil kayıtlıysa mikrofon sesi yalnız "Hey Jarvis" + ses izi
-        # doğrulamasından sonra Gemini'ye gider. Bir kez kurulur; yeniden bağlanmada
-        # yalnız olay döngüsü güncellenir.
+        # SES KAPISI (Murat@goxs 2026-09-30: "benim sesimi tanÄ±sÄ±n, her ÅŸeye cevap
+        # veriyor"): profil kayÄ±tlÄ±ysa mikrofon sesi yalnÄ±z "Hey Jarvis" + ses izi
+        # doÄŸrulamasÄ±ndan sonra Gemini'ye gider. Bir kez kurulur; yeniden baÄŸlanmada
+        # yalnÄ±z olay dÃ¶ngÃ¼sÃ¼ gÃ¼ncellenir.
         self._gate_loop = loop
         if not self._voice_gate_ready:
             self._voice_gate_ready = True
@@ -2020,7 +2076,7 @@ class JarvisLive:
                     lambda b: self._gate_loop.call_soon_threadsafe(self._gate_put, b),
                     log=lambda m: print(f"[JARVIS] {m}"))
             except Exception as _e:  # noqa: BLE001
-                print(f"[JARVIS] [SES] Ses kapısı yüklenemedi: {_e}")
+                print(f"[JARVIS] [SES] Ses kapÄ±sÄ± yÃ¼klenemedi: {_e}")
                 self._voice_gate = None
 
         import numpy as _np
@@ -2054,8 +2110,8 @@ class JarvisLive:
                 _level_state["last_print"] = now
                 peak = int(_np.abs(indata).max()) if indata.size else 0
                 rms = float(_np.sqrt(_np.mean(_np.square(indata.astype(_np.float32))))) if indata.size else 0.0
-                bar = "█" * min(50, peak // 200)
-                print(f"[JARVIS] 🎚️ Mikrofon seviyesi: {peak:5d} {bar}")
+                bar = "â–ˆ" * min(50, peak // 200)
+                print(f"[JARVIS] ğŸšï¸ Mikrofon seviyesi: {peak:5d} {bar}")
                 try:
                     self.ui.set_voice_volume(min(1.0, rms / 4500.0))
                 except Exception:
@@ -2064,11 +2120,11 @@ class JarvisLive:
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
             if not jarvis_speaking and not self.ui.muted and not self._phone_active:
-                # Bazı Windows sürücülerinde otomatik gain/kulaklık yankısı
-                # örnekleri 10k+ seviyesine taşıyor. Bu örnekleri olduğu gibi
-                # göndermek Live transkripsiyonunu parçalıyor ve yanlış komut
-                # üretiyor. Normal sinyale dokunma; yalnızca anormal peak'i
-                # yaklaşık 3000'e yumuşak biçimde indir.
+                # BazÄ± Windows sÃ¼rÃ¼cÃ¼lerinde otomatik gain/kulaklÄ±k yankÄ±sÄ±
+                # Ã¶rnekleri 10k+ seviyesine taÅŸÄ±yor. Bu Ã¶rnekleri olduÄŸu gibi
+                # gÃ¶ndermek Live transkripsiyonunu parÃ§alÄ±yor ve yanlÄ±ÅŸ komut
+                # Ã¼retiyor. Normal sinyale dokunma; yalnÄ±zca anormal peak'i
+                # yaklaÅŸÄ±k 3000'e yumuÅŸak biÃ§imde indir.
                 _peak = int(_np.abs(indata).max()) if indata.size else 0
                 if _peak > 6000:
                     _gain = 3000.0 / _peak
@@ -2102,7 +2158,7 @@ class JarvisLive:
         # RuntimeError firlatiliyordu - bu da main.py'deki TaskGroup'u
         # coturuyor, boylece calisan HOPARLOR ve Gemini oturumu da dahil
         # HER SEY yikilip 3 saniyede bir bastan kuruluyordu. Mikrofon
-        # surucusu kalici bir sorun yasiyorsa (ör. PortAudio'nun cihazi
+        # surucusu kalici bir sorun yasiyorsa (Ã¶r. PortAudio'nun cihazi
         # "Invalid device" ile reddetmesi) bu sonsuz bir cokme dongusune
         # donusuyor ve "Jarvis hicbir seye baglanamiyor" izlenimi veriyordu.
         # Artik mikrofon acilamazsa SADECE mikrofon devre disi kalir; metin/
@@ -2111,9 +2167,9 @@ class JarvisLive:
         RETRY_DELAY = 10.0
         while True:
             if _mic_breaker.is_open():
-                print("[JARVIS] ⏳ Mikrofon devre kesici açık, deneme atlanıyor.")
+                print("[JARVIS] â³ Mikrofon devre kesici aÃ§Ä±k, deneme atlanÄ±yor.")
                 try:
-                    self.ui.set_mic_device("devre kesici açık - bekleniyor")
+                    self.ui.set_mic_device("devre kesici aÃ§Ä±k - bekleniyor")
                 except Exception:
                     pass
                 await asyncio.sleep(RETRY_DELAY)
@@ -2140,12 +2196,12 @@ class JarvisLive:
                 )
                 if resolved is None:
                     last_err = RuntimeError("input device changed or is ambiguous")
-                    print(f"[JARVIS] ⚠️ Mikrofon adayi yeniden dogrulanamadi (device={cand})")
+                    print(f"[JARVIS] âš ï¸ Mikrofon adayi yeniden dogrulanamadi (device={cand})")
                     continue
                 try:
                     stream_rate = _input_rate(resolved)
                     if stream_rate != SEND_SAMPLE_RATE:
-                        print(f"[JARVIS] ℹ️ Mikrofon {stream_rate} Hz destekliyor; Gemini için 16 kHz'e dönüştürülüyor.")
+                        print(f"[JARVIS] â„¹ï¸ Mikrofon {stream_rate} Hz destekliyor; Gemini iÃ§in 16 kHz'e dÃ¶nÃ¼ÅŸtÃ¼rÃ¼lÃ¼yor.")
                     with sd.InputStream(
                         device=resolved,
                         samplerate=stream_rate,
@@ -2155,8 +2211,8 @@ class JarvisLive:
                         callback=callback,
                     ):
                         name = _audio_device_name(resolved, devices=_devices_snapshot)
-                        print(f"[JARVIS] 🎤 Mic stream open (device={resolved} - {name})")
-                        _report_network_status(self.ui, "audio", "connected", "Mikrofon akışı açık")
+                        print(f"[JARVIS] ğŸ¤ Mic stream open (device={resolved} - {name})")
+                        _report_network_status(self.ui, "audio", "connected", "Mikrofon akÄ±ÅŸÄ± aÃ§Ä±k")
                         _mic_breaker.record_success()
                         opened = True
                         try:
@@ -2166,22 +2222,22 @@ class JarvisLive:
                         while True:
                             await asyncio.sleep(0.1)
                 except asyncio.CancelledError:
-                    _report_network_status(self.ui, "audio", "disconnected", "Mikrofon akışı durdu")
+                    _report_network_status(self.ui, "audio", "disconnected", "Mikrofon akÄ±ÅŸÄ± durdu")
                     raise
                 except Exception as e:
                     _report_network_status(self.ui, "audio", "error", f"Mikrofon: {type(e).__name__}")
                     last_err = e
-                    print(f"[JARVIS] ⚠️ Mikrofon acilamadi (device={resolved}): {type(e).__name__}")
+                    print(f"[JARVIS] âš ï¸ Mikrofon acilamadi (device={resolved}): {type(e).__name__}")
                     continue
 
             if not opened:
                 _report_network_status(
                     self.ui, "audio", "error",
-                    f"Mikrofon akışı açılamadı: {type(last_err).__name__ if last_err else 'bilinmiyor'}",
+                    f"Mikrofon akÄ±ÅŸÄ± aÃ§Ä±lamadÄ±: {type(last_err).__name__ if last_err else 'bilinmiyor'}",
                 )
                 _mic_breaker.record_failure()
                 err_label = type(last_err).__name__ if last_err else "bilinmiyor"
-                print(f"[JARVIS] ❌ Mic: hiçbir giriş cihazı açılamadı ({last_err}) "
+                print(f"[JARVIS] âŒ Mic: hiÃ§bir giriÅŸ cihazÄ± aÃ§Ä±lamadÄ± ({last_err}) "
                       f"- {RETRY_DELAY:.0f}sn sonra tekrar denenecek")
                 try:
                     self.ui.set_mic_device(f"YOK ({err_label})")
@@ -2191,7 +2247,7 @@ class JarvisLive:
                 continue
 
     async def _receive_audio(self):
-        print("[JARVIS] 👂 Recv started")
+        print("[JARVIS] ğŸ‘‚ Recv started")
         out_buf, in_buf = [], []
 
         try:
@@ -2203,7 +2259,7 @@ class JarvisLive:
                         self._resume_handle = _upd.new_handle
                         self._resume_time = time.time()
                     if getattr(response, "go_away", None) is not None:
-                        print("[JARVIS] ↪️ Sunucu oturumu yeniliyor; konuşma kaldığı yerden sürecek.")
+                        print("[JARVIS] â†ªï¸ Sunucu oturumu yeniliyor; konuÅŸma kaldÄ±ÄŸÄ± yerden sÃ¼recek.")
 
                     _audio_data = _response_audio_data(response)
                     if _audio_data:
@@ -2213,10 +2269,10 @@ class JarvisLive:
                             if self._turn_done_event and self._turn_done_event.is_set():
                                 self._turn_done_event.clear()
                             # Split into ~50 ms chunks so interrupt() stops audio within 50 ms
-                            # (24000 Hz × 2 bytes/sample × 0.05 s = 2400 bytes per slice)
+                            # (24000 Hz Ã— 2 bytes/sample Ã— 0.05 s = 2400 bytes per slice)
                             _SLICE = 2400
                             if self._voice_gate is not None:
-                                self._voice_gate.touch()   # JARVIS cevap verirken kapı kapanmasın
+                                self._voice_gate.touch()   # JARVIS cevap verirken kapÄ± kapanmasÄ±n
                             for _i in range(0, len(_audio_data), _SLICE):
                                 self.audio_in_queue.put_nowait(_audio_data[_i : _i + _SLICE])
 
@@ -2250,7 +2306,7 @@ class JarvisLive:
                                 in_buf.append(_with_lead(sc.input_transcription.text, txt))
                                 self._heard_now = _join_transcript(in_buf)
                                 try:
-                                    self.ui.set_voice_state("USER_SPEAKING", "Canlı ses alınıyor")
+                                    self.ui.set_voice_state("USER_SPEAKING", "CanlÄ± ses alÄ±nÄ±yor")
                                     self.ui.set_voice_transcript(txt)
                                 except Exception:
                                     pass
@@ -2307,7 +2363,7 @@ class JarvisLive:
                                 try:
                                     log_turn("user", full_in)
                                 except Exception as e:
-                                    print(f"[JARVIS] ⚠️ conversation_log (voice in): {e}")
+                                    print(f"[JARVIS] âš ï¸ conversation_log (voice in): {e}")
                                 if self._dashboard:
                                     keep_task(asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "user",
@@ -2338,7 +2394,7 @@ class JarvisLive:
                                 try:
                                     log_turn("jarvis", full_out)
                                 except Exception as e:
-                                    print(f"[JARVIS] ⚠️ conversation_log (jarvis out): {e}")
+                                    print(f"[JARVIS] âš ï¸ conversation_log (jarvis out): {e}")
                                 if self._dashboard:
                                     keep_task(asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "jarvis",
@@ -2347,13 +2403,13 @@ class JarvisLive:
                                     })))
                             out_buf = []
 
-                            # Vision injection: model finished tool-response turn → now send the image
+                            # Vision injection: model finished tool-response turn â†’ now send the image
                             if self._pending_vision and self.session:
                                 import base64 as _b64
                                 img_b, mime_t, question, angle = self._pending_vision
                                 self._pending_vision = None
                                 b64 = _b64.b64encode(img_b).decode("ascii")
-                                print(f"[Vision] 📤 {len(img_b):,} bytes (angle={angle}) → main session")
+                                print(f"[Vision] ğŸ“¤ {len(img_b):,} bytes (angle={angle}) â†’ main session")
                                 await self.session.send_client_content(
                                     turns={"parts": [
                                         {"inline_data": {"mime_type": mime_t, "data": b64}},
@@ -2370,7 +2426,7 @@ class JarvisLive:
                                     # Screen-only: no camera to close; release busy flag now
                                     self._vision_busy = False
                             elif self._vision_close_pending:
-                                # This turn_complete IS the vision answer — close camera + release busy flag
+                                # This turn_complete IS the vision answer â€” close camera + release busy flag
                                 self._vision_close_pending = False
                                 self._vision_busy = False
                                 async def _cam_close():
@@ -2381,7 +2437,7 @@ class JarvisLive:
                     if response.tool_call:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
-                            print(f"[JARVIS] 📞 {fc.name}")
+                            print(f"[JARVIS] ğŸ“ {fc.name}")
                             log_tool_call(fc.name)
                             fr = await self._execute_tool(fc)
                             fn_responses.append(fr)
@@ -2389,12 +2445,12 @@ class JarvisLive:
                             function_responses=fn_responses
                         )
         except Exception as e:
-            print(f"[JARVIS] ❌ Recv: {e}")
+            print(f"[JARVIS] âŒ Recv: {e}")
             traceback.print_exc()
             raise
 
     async def _play_audio(self):
-        print("[JARVIS] 🔊 Play started")
+        print("[JARVIS] ğŸ”Š Play started")
         _played_chunks = 0
         _last_audio_at = time.monotonic()
 
@@ -2410,7 +2466,7 @@ class JarvisLive:
             last_out_err = None
             chosen_device = None
             if _speaker_breaker.is_open():
-                print("[JARVIS] ⏳ Hoparlör devre kesici açık, deneme atlanıyor.")
+                print("[JARVIS] â³ HoparlÃ¶r devre kesici aÃ§Ä±k, deneme atlanÄ±yor.")
             else:
                 for cand in out_candidates:
                     resolved = _resolve_audio_device(
@@ -2443,18 +2499,18 @@ class JarvisLive:
                         raise
                     except Exception as e:
                         last_out_err = e
-                        print(f"[JARVIS] ⚠️ Hoparlor acilamadi (device={resolved}): {type(e).__name__}")
+                        print(f"[JARVIS] âš ï¸ Hoparlor acilamadi (device={resolved}): {type(e).__name__}")
                         _close_audio_stream(locals().get("trial"))
                         continue
 
             if stream is None:
                 _report_network_status(
                     self.ui, "audio_output", "error",
-                    f"Hoparlör akışı açılamadı: {type(last_out_err).__name__ if last_out_err else 'cihaz yok'}",
+                    f"HoparlÃ¶r akÄ±ÅŸÄ± aÃ§Ä±lamadÄ±: {type(last_out_err).__name__ if last_out_err else 'cihaz yok'}",
                 )
                 _speaker_breaker.record_failure()
                 err_label = type(last_out_err).__name__ if last_out_err else "no_device"
-                print(f"[JARVIS] ❌ Play: kullanilabilir cikis yok ({err_label}); yeniden denenecek")
+                print(f"[JARVIS] âŒ Play: kullanilabilir cikis yok ({err_label}); yeniden denenecek")
                 try:
                     self.ui.set_speaker_device(f"YOK ({err_label})")
                 except Exception:
@@ -2464,8 +2520,8 @@ class JarvisLive:
 
             _speaker_breaker.record_success()
             name = _audio_device_name(chosen_device, devices=_devices_snapshot)
-            print(f"[JARVIS] 🔊 Hoparlor cihazi: {chosen_device} - {name}")
-            _report_network_status(self.ui, "audio_output", "connected", "Hoparlör akışı açık")
+            print(f"[JARVIS] ğŸ”Š Hoparlor cihazi: {chosen_device} - {name}")
+            _report_network_status(self.ui, "audio_output", "connected", "HoparlÃ¶r akÄ±ÅŸÄ± aÃ§Ä±k")
             try:
                 self.ui.set_speaker_device(name)
             except Exception:
@@ -2499,13 +2555,13 @@ class JarvisLive:
                         _last_audio_at = time.monotonic()
                         try:
                             self.ui.set_voice_volume(_pcm_rms_level(chunk))
-                            self.ui.set_voice_state("ASSISTANT_SPEAKING", "JARVIS yanıt veriyor")
+                            self.ui.set_voice_state("ASSISTANT_SPEAKING", "JARVIS yanÄ±t veriyor")
                         except Exception:
                             pass
                         if _played_chunks == 1:
-                            print("[AUDIO_DIAG] İlk Gemini ses paketi hoparlör stream'ine yazıldı.")
+                            print("[AUDIO_DIAG] Ä°lk Gemini ses paketi hoparlÃ¶r stream'ine yazÄ±ldÄ±.")
                         elif _played_chunks % 200 == 0:
-                            print(f"[AUDIO_DIAG] Hoparlöre yazılan ses paketi: {_played_chunks}")
+                            print(f"[AUDIO_DIAG] HoparlÃ¶re yazÄ±lan ses paketi: {_played_chunks}")
                     except asyncio.CancelledError:
                         raise
                     except RuntimeError:
@@ -2513,31 +2569,31 @@ class JarvisLive:
                     except Exception as write_error:
                         output_failed = True
                         _report_network_status(
-                            self.ui, "audio_output", "error", f"Ses yazımı: {type(write_error).__name__}"
+                            self.ui, "audio_output", "error", f"Ses yazÄ±mÄ±: {type(write_error).__name__}"
                         )
-                        print(f"[AUDIO_DIAG] Hoparlöre ses yazılamadı: {type(write_error).__name__}")
+                        print(f"[AUDIO_DIAG] HoparlÃ¶re ses yazÄ±lamadÄ±: {type(write_error).__name__}")
                         _speaker_breaker.record_failure()
                         break
             finally:
                 self.set_speaking(False)
                 if not output_failed:
-                    _report_network_status(self.ui, "audio_output", "disconnected", "Hoparlör akışı durdu")
+                    _report_network_status(self.ui, "audio_output", "disconnected", "HoparlÃ¶r akÄ±ÅŸÄ± durdu")
                 _close_audio_stream(stream)
 
             # A write failure should not tear down Gemini/text mode. Re-enumerate
             # and try a fresh stream after a short delay.
             await asyncio.sleep(1.0)
 
-    # ── Morning briefing ────────────────────────────────────────────────────────
+    # â”€â”€ Morning briefing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def _guarded_startup_briefing(self) -> None:
-        """Briefing hatası ana Live oturumunu ve bağlantıyı düşürmemeli."""
+        """Briefing hatasÄ± ana Live oturumunu ve baÄŸlantÄ±yÄ± dÃ¼ÅŸÃ¼rmemeli."""
         try:
             await self._send_startup_briefing()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f"[Briefing] Başlangıç özeti atlandı: {exc}")
+            print(f"[Briefing] BaÅŸlangÄ±Ã§ Ã¶zeti atlandÄ±: {exc}")
             try:
                 self.ui.write_log(f"SYS: Startup briefing skipped after error: {exc}")
             except Exception:
@@ -2546,14 +2602,14 @@ class JarvisLive:
     async def _send_startup_briefing(self) -> None:
         """
         Two-phase briefing for instant perceived response:
-          Phase 1 — immediate greeting (no tools, no fetch) → Jarvis speaks in <2s
-          Phase 2 — news fetched in background, injected after greeting finishes
+          Phase 1 â€” immediate greeting (no tools, no fetch) â†’ Jarvis speaks in <2s
+          Phase 2 â€” news fetched in background, injected after greeting finishes
         """
         await asyncio.sleep(0.3)
         if not self.session:
             return
 
-        # ── memory ───────────────────────────────────────────────────────────
+        # â”€â”€ memory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         memory   = load_memory()
         identity = memory.get("identity", {})
 
@@ -2567,10 +2623,10 @@ class JarvisLive:
         from datetime import datetime
         time_str = datetime.now().strftime("%H:%M")
 
-        # ── Phase 1: instant greeting — one simple sentence ──────────────────
-        # Açılışta otomatik haber çağrısı; kota/rate-limit durumunda her
-        # başlatmada aynı hatayı üretip kullanıcı komutlarını da geciktiriyordu.
-        # İsteyen kullanıcı JARVIS_STARTUP_NEWS=1 ile eski davranışı açabilir.
+        # â”€â”€ Phase 1: instant greeting â€” one simple sentence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # AÃ§Ä±lÄ±ÅŸta otomatik haber Ã§aÄŸrÄ±sÄ±; kota/rate-limit durumunda her
+        # baÅŸlatmada aynÄ± hatayÄ± Ã¼retip kullanÄ±cÄ± komutlarÄ±nÄ± da geciktiriyordu.
+        # Ä°steyen kullanÄ±cÄ± JARVIS_STARTUP_NEWS=1 ile eski davranÄ±ÅŸÄ± aÃ§abilir.
         startup_news = os.environ.get("JARVIS_STARTUP_NEWS", "0").strip().lower() in {
             "1", "true", "yes", "on"
         }
@@ -2593,7 +2649,7 @@ class JarvisLive:
         )
         self.ui.write_log("SYS: Briefing phase 1 (greeting) sent.")
 
-        # ── Phase 2: fetch news in background, deliver after greeting plays ───
+        # â”€â”€ Phase 2: fetch news in background, deliver after greeting plays â”€â”€â”€
         if not startup_news:
             self.ui.write_log("SYS: Startup news briefing skipped (JARVIS_STARTUP_NEWS=0).")
             return
@@ -2605,7 +2661,7 @@ class JarvisLive:
                 self.ui.write_log(f"SYS: Briefing news phase failed: {e}")
         keep_task(asyncio.create_task(_guarded_news()))
 
-        # ── Phase 3: mention a repeated-request pattern, if one was found ─────
+        # â”€â”€ Phase 3: mention a repeated-request pattern, if one was found â”€â”€â”€â”€â”€
         async def _guarded_pattern():
             try:
                 await self._briefing_pattern_phase(lang)
@@ -2628,7 +2684,7 @@ class JarvisLive:
             return
 
         p2 = (
-            "[BRIEFING] Call web_search with mode='news' and query='Türkiye güncel haberler bugün' "
+            "[BRIEFING] Call web_search with mode='news' and query='TÃ¼rkiye gÃ¼ncel haberler bugÃ¼n' "
             "to find actual recent Turkish news articles with real event headlines (not just website names). "
             "After the search, say ONE specific news event from the results in one sentence, "
             f"then say the full list is displayed on screen.{lang_str}"
@@ -2650,7 +2706,7 @@ class JarvisLive:
         """
         lang_str = f" Respond in {lang}." if lang else ""
 
-        await asyncio.sleep(3.0)  # phase 1 ve phase 2'nin arkasından gelsin
+        await asyncio.sleep(3.0)  # phase 1 ve phase 2'nin arkasÄ±ndan gelsin
 
         if not self.session:
             return
@@ -2661,10 +2717,10 @@ class JarvisLive:
 
         top = patterns[0]
         p3 = (
-            f"[BRIEFING] Kullanıcının tekrar eden bir alışkanlığını fark ettin: {top}. "
-            "Bunu kullanıcıya TEK, kısa ve doğal bir cümleyle, yapmacık olmadan hatırlat "
-            "(örn. 'Bu arada, genelde bu saatte ... sorduğunu fark ettim, hazırladım bile.'). "
-            f"Uzun açıklama yapma, sadece tek cümle.{lang_str}"
+            f"[BRIEFING] KullanÄ±cÄ±nÄ±n tekrar eden bir alÄ±ÅŸkanlÄ±ÄŸÄ±nÄ± fark ettin: {top}. "
+            "Bunu kullanÄ±cÄ±ya TEK, kÄ±sa ve doÄŸal bir cÃ¼mleyle, yapmacÄ±k olmadan hatÄ±rlat "
+            "(Ã¶rn. 'Bu arada, genelde bu saatte ... sorduÄŸunu fark ettim, hazÄ±rladÄ±m bile.'). "
+            f"Uzun aÃ§Ä±klama yapma, sadece tek cÃ¼mle.{lang_str}"
         )
 
         await self.session.send_client_content(
@@ -2673,7 +2729,7 @@ class JarvisLive:
         )
         self.ui.write_log(f"SYS: Briefing phase 3 (pattern): {top}")
 
-    # ── System monitor ──────────────────────────────────────────────────────────
+    # â”€â”€ System monitor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def _run_system_monitor(self) -> None:
         """Background task: voice alerts when metrics exceed thresholds."""
@@ -2687,15 +2743,15 @@ class JarvisLive:
                         turn_complete=True,
                     )
                 except Exception as e:
-                    print(f"[Monitor] ⚠️ Could not send alert: {e}")
+                    print(f"[Monitor] âš ï¸ Could not send alert: {e}")
 
-    # ── Proactive mode ──────────────────────────────────────────────────────────
+    # â”€â”€ Proactive mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def _run_scheduled_tasks(self) -> None:
         """
         Background task: periodically checks for due scheduled commands
         (added via task_manager) and, when a task's time comes, sends its
-        command text into the live session exactly like a real user turn —
+        command text into the live session exactly like a real user turn â€”
         using the same safe mechanism as _run_proactive_mode.
         """
         while True:
@@ -2707,31 +2763,31 @@ class JarvisLive:
             try:
                 due_tasks = await asyncio.to_thread(pop_due_tasks)
             except Exception as e:
-                print(f"[Automation] ⚠️ {e}")
+                print(f"[Automation] âš ï¸ {e}")
                 continue
 
             for task in due_tasks:
                 try:
-                    self.ui.write_log(f"SYS: ⏰ Zamanlanmış görev çalıştırılıyor: {task['command']}")
+                    self.ui.write_log(f"SYS: â° ZamanlanmÄ±ÅŸ gÃ¶rev Ã§alÄ±ÅŸtÄ±rÄ±lÄ±yor: {task['command']}")
                     scheduled_prompt = (
-                        f"[Zamanlanmış hatırlatma tetiklendi, kullanıcı şu an bunu söylemedi — "
-                        f"sen daha önce bunu ayarlamıştın] Şimdi kullanıcıya, doğal ve sıcak bir "
-                        f"cümleyle hatırlat: \"{task['command']}\". 'Komut çalıştırıldı' gibi robotik "
-                        f"bir rapor verme; sanki kendiliğinden hatırlıyormuşsun gibi doğal konuş, "
-                        f"gerekirse ilgili aracı da çağır."
+                        f"[ZamanlanmÄ±ÅŸ hatÄ±rlatma tetiklendi, kullanÄ±cÄ± ÅŸu an bunu sÃ¶ylemedi â€” "
+                        f"sen daha Ã¶nce bunu ayarlamÄ±ÅŸtÄ±n] Åimdi kullanÄ±cÄ±ya, doÄŸal ve sÄ±cak bir "
+                        f"cÃ¼mleyle hatÄ±rlat: \"{task['command']}\". 'Komut Ã§alÄ±ÅŸtÄ±rÄ±ldÄ±' gibi robotik "
+                        f"bir rapor verme; sanki kendiliÄŸinden hatÄ±rlÄ±yormuÅŸsun gibi doÄŸal konuÅŸ, "
+                        f"gerekirse ilgili aracÄ± da Ã§aÄŸÄ±r."
                     )
                     await self.session.send_client_content(
                         turns={"parts": [{"text": scheduled_prompt}]},
                         turn_complete=True,
                     )
                 except Exception as e:
-                    print(f"[Automation] ⚠️ görev çalıştırılamadı ({task.get('id')}): {e}")
+                    print(f"[Automation] âš ï¸ gÃ¶rev Ã§alÄ±ÅŸtÄ±rÄ±lamadÄ± ({task.get('id')}): {e}")
 
     async def _run_proactive_mode(self) -> None:
         """
         Background task: periodically checks if the user has been silent long enough,
         then hands time + memory context to Gemini so it can decide what (if anything)
-        to say proactively. No hardcoded rules — Gemini makes the call.
+        to say proactively. No hardcoded rules â€” Gemini makes the call.
         """
         while True:
             await asyncio.sleep(60)   # evaluate once per minute
@@ -2758,7 +2814,7 @@ class JarvisLive:
                 )
                 self.ui.write_log("SYS: Proactive check-in.")
             except Exception as e:
-                print(f"[Proactive] ⚠️ {e}")
+                print(f"[Proactive] âš ï¸ {e}")
 
     async def _monitor_brain_team(self, orchestrator) -> None:
         """Keep the architecture map tied to the real team worker/heartbeats."""
@@ -2771,11 +2827,11 @@ class JarvisLive:
                     self.ui,
                     "brain",
                     "error",
-                    f"Beyin Takımı sağlık ölçümü başarısız · {type(exc).__name__}",
+                    f"Beyin TakÄ±mÄ± saÄŸlÄ±k Ã¶lÃ§Ã¼mÃ¼ baÅŸarÄ±sÄ±z Â· {type(exc).__name__}",
                 )
             await asyncio.sleep(2)
 
-    # ── Phone audio relay ────────────────────────────────────────────────────────
+    # â”€â”€ Phone audio relay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def _relay_phone_audio(self) -> None:
         """Forward phone mic PCM chunks from dashboard queue into the Gemini Live session."""
@@ -2784,10 +2840,10 @@ class JarvisLive:
             try:
                 chunk = await asyncio.wait_for(q.get(), timeout=1.0)
             except TimeoutError:
-                # No audio for 1 s → phone mic inactive, give PC mic back
+                # No audio for 1 s â†’ phone mic inactive, give PC mic back
                 self._phone_active = False
                 continue
-            self._phone_active = True   # phone is streaming — silence PC mic
+            self._phone_active = True   # phone is streaming â€” silence PC mic
             with self._speaking_lock:
                 speaking = self._is_speaking
             if not speaking and not self.ui.muted:
@@ -2800,7 +2856,7 @@ class JarvisLive:
         self.ui.write_log("SYS: Phone connected via Remote Dashboard.")
         self.ui.notify_phone_connected()
 
-    # ── dashboard command relay ─────────────────────────────────────────────
+    # â”€â”€ dashboard command relay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def _process_dashboard_commands(self) -> None:
         while True:
@@ -2829,7 +2885,7 @@ class JarvisLive:
                 print(f"[Dashboard] Command error: {e}")
                 await asyncio.sleep(0.5)
 
-    # ── main loop ───────────────────────────────────────────────────────────
+    # â”€â”€ main loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def run(self):
         self._loop = asyncio.get_event_loop()
@@ -2855,7 +2911,7 @@ class JarvisLive:
                 self.ui.set_state("CONNECTING")
                 config = self._build_config()
 
-                # Fresh client on every reconnect — avoids stale HTTP session state
+                # Fresh client on every reconnect â€” avoids stale HTTP session state
                 client = genai.Client(
                     api_key=_get_api_key(),
                     http_options={"api_version": os.environ.get("JARVIS_LIVE_API_VERSION", "v1beta")}
@@ -2892,7 +2948,7 @@ class JarvisLive:
                             self.ui,
                             "brain",
                             "error",
-                            f"Beyin Takımı başlatılamadı · {type(exc).__name__}",
+                            f"Beyin TakÄ±mÄ± baÅŸlatÄ±lamadÄ± Â· {type(exc).__name__}",
                         )
                         print(f"[BrainTeam] Startup failed: {type(exc).__name__}")
 
@@ -2901,7 +2957,7 @@ class JarvisLive:
                     self.ui.write_log("SYS: JARVIS online.")
                     # GECICI TANI SATIRI - hangi kod surumunun gercekten calistigini
                     # dogrulamak icin eklendi (github-fix-v3). Dogrulama sonrasi kaldirilabilir.
-                    self.ui.write_log("SYS: [KOD-SÜRÜMÜ: github-fix-v3]")
+                    self.ui.write_log("SYS: [KOD-SÃœRÃœMÃœ: github-fix-v3]")
 
                     # Arka plan gorev dongusu - kendi thread'inde calisir,
                     # bir kere baslatilir (start_background_loop guard'li),
@@ -2909,7 +2965,7 @@ class JarvisLive:
                     try:
                         start_agent_loop()
                     except Exception as e:
-                        print(f"[JARVIS] ⚠️ agent_loop başlatılamadı: {e}")
+                        print(f"[JARVIS] âš ï¸ agent_loop baÅŸlatÄ±lamadÄ±: {e}")
 
                     if self._dashboard:
                         await self._dashboard.broadcast({"type": "status", "state": "active"})
@@ -2926,7 +2982,7 @@ class JarvisLive:
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 
-                    # Morning briefing — fires once per process launch
+                    # Morning briefing â€” fires once per process launch
                     if not self._briefing_sent:
                         self._briefing_sent = True
                         tg.create_task(self._guarded_startup_briefing())
@@ -2940,7 +2996,7 @@ class JarvisLive:
                 # TaskGroup raises BaseExceptionGroup when tasks are cancelled
                 # externally, which `except Exception` would miss, letting the
                 # exception escape the while-loop and causing asyncio.run() to
-                # start shutdown — resulting in "executor after shutdown" errors).
+                # start shutdown â€” resulting in "executor after shutdown" errors).
                 err_str = str(e)
                 auth_error = _is_auth_error(err_str)
                 # Do not echo exception text or traceback: SDK errors can carry
@@ -2948,7 +3004,7 @@ class JarvisLive:
                 # instead of retrying a known-invalid key.
                 if auth_error:
                     print("[JARVIS] Authentication requires user correction.")
-                    self.ui.write_log("ERR: API key invalid — please re-enter your key.")
+                    self.ui.write_log("ERR: API key invalid â€” please re-enter your key.")
                     self.ui.set_state("AUTH_REQUIRED")
                     self.ui.prompt_reconfig()
                     win = getattr(self.ui, "_win", None)
@@ -2961,16 +3017,16 @@ class JarvisLive:
                 if self._live_model != LIVE_MODEL and (
                         self.session is None or any(h.lower() in err_str.lower() for h in _FALLBACK_HINTS)):
                     why = re.sub(r"AIza[0-9A-Za-z_\-]{20,}", "***", err_str)[:200]
-                    print(f"[JARVIS] ↩️ {self._live_model} kullanılamadı ({type(e).__name__}: {why}); "
-                          f"eski modele dönülüyor: {LIVE_MODEL}")
-                    self.ui.write_log(f"SYS: {self._live_model} çalışmadı, eski sesli modele dönüldü.")
+                    print(f"[JARVIS] â†©ï¸ {self._live_model} kullanÄ±lamadÄ± ({type(e).__name__}: {why}); "
+                          f"eski modele dÃ¶nÃ¼lÃ¼yor: {LIVE_MODEL}")
+                    self.ui.write_log(f"SYS: {self._live_model} Ã§alÄ±ÅŸmadÄ±, eski sesli modele dÃ¶nÃ¼ldÃ¼.")
                     self._live_model = LIVE_MODEL
-                    self._resume_handle = None   # devam anahtarı modele özeldir
+                    self._resume_handle = None   # devam anahtarÄ± modele Ã¶zeldir
                 if getattr(self, "_using_resume", None) and self.session is None:
-                    # Devam anahtarıyla bağlanılamadı: bir sonraki denemede yeni oturum + son konuşmalar.
+                    # Devam anahtarÄ±yla baÄŸlanÄ±lamadÄ±: bir sonraki denemede yeni oturum + son konuÅŸmalar.
                     self._resume_handle = None
 
-                # Network / timeout errors — log clearly and back off
+                # Network / timeout errors â€” log clearly and back off
                 is_net_err = any(k in err_str for k in (
                     "TimeoutError", "timed out", "getaddrinfo", "CancelledError",
                     "ConnectionRefusedError", "OSError", "Cannot connect",
@@ -2979,7 +3035,7 @@ class JarvisLive:
                     _conn_backoff = min(getattr(self, "_conn_backoff", 3) * 2, 60)
                     self._conn_backoff = _conn_backoff
                     self.ui.write_log(
-                        f"NET: Bağlantı kurulamadı — {_conn_backoff}s sonra tekrar deneniyor. "
+                        f"NET: BaÄŸlantÄ± kurulamadÄ± â€” {_conn_backoff}s sonra tekrar deneniyor. "
                         "(VPN gerekiyor olabilir)"
                     )
                 else:
@@ -2998,9 +3054,9 @@ class JarvisLive:
             await asyncio.sleep(delay)
 
 def main():
-    # v25'te burada kökte olmayan bir "face.png" aranıyordu; HUD sessizce
-    # yüzsüz açılıyordu. Artık pakete gömülü ikon kullanılıyor, JARVIS_FACE
-    # ile kullanıcı kendi görselini verebiliyor.
+    # v25'te burada kÃ¶kte olmayan bir "face.png" aranÄ±yordu; HUD sessizce
+    # yÃ¼zsÃ¼z aÃ§Ä±lÄ±yordu. ArtÄ±k pakete gÃ¶mÃ¼lÃ¼ ikon kullanÄ±lÄ±yor, JARVIS_FACE
+    # ile kullanÄ±cÄ± kendi gÃ¶rselini verebiliyor.
     face = os.environ.get("JARVIS_FACE", "").strip() or str(asset("jarvis_icon.png"))
     ui = JarvisUI(face)
 
@@ -3010,10 +3066,11 @@ def main():
         try:
             asyncio.run(jarvis.run())
         except KeyboardInterrupt:
-            print("\n🔴 Shutting down...")
+            print("\nğŸ”´ Shutting down...")
 
     threading.Thread(target=runner, daemon=True).start()
     ui.root.mainloop()
 
 if __name__ == "__main__":
     main()
+

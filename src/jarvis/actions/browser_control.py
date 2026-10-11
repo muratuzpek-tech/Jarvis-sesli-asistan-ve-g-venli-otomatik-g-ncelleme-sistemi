@@ -19,10 +19,38 @@ from playwright.async_api import (
 )
 _OS = platform.system()   # "Windows" | "Darwin" | "Linux"
 
+
+def _downloads_dir() -> Path:
+    """Return and create the user's standard Downloads directory."""
+    configured = os.environ.get("XDG_DOWNLOAD_DIR", "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+    else:
+        path = Path.home() / "Downloads"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _safe_download_path(suggested_filename: str) -> Path:
+    """Create a collision-safe path strictly below Downloads."""
+    name = Path(suggested_filename or "download.bin").name
+    name = re.sub(r"[^A-Za-z0-9._()\[\] -]", "_", name).strip(" .")
+    if not name or name in {".", ".."}:
+        name = "download.bin"
+    directory = _downloads_dir().resolve()
+    candidate = directory / name
+    counter = 1
+    while candidate.exists():
+        stem = Path(name).stem
+        suffix = Path(name).suffix
+        candidate = directory / f"{stem} ({counter}){suffix}"
+        counter += 1
+    return candidate
+
 def _normalize_url(url: str) -> str:
     """
-    Bare words like "instagram" → "https://instagram.com"
-    Domains like "instagram.com" → "https://instagram.com"
+    Bare words like "instagram" â†’ "https://instagram.com"
+    Domains like "instagram.com" â†’ "https://instagram.com"
     Full URLs pass through unchanged.
     """
     url = url.strip()
@@ -30,7 +58,7 @@ def _normalize_url(url: str) -> str:
         return "about:blank"
     if "://" in url:
         return url
-    # No dot at all → assume .com  (e.g. "instagram" → "instagram.com")
+    # No dot at all â†’ assume .com  (e.g. "instagram" â†’ "instagram.com")
     if "." not in url:
         url = url + ".com"
     return "https://" + url
@@ -102,12 +130,12 @@ def _real_profile_dir(browser: str) -> str:
 
     for p in candidates:
         if p.exists():
-            print(f"[Browser] ✅ Real profile found for {browser}: {p}")
+            print(f"[Browser] âœ… Real profile found for {browser}: {p}")
             return str(p)
 
     fallback = home / ".jarvis_profiles" / browser
     fallback.mkdir(parents=True, exist_ok=True)
-    print(f"[Browser] ⚠️  Real profile not found for {browser}, using: {fallback}")
+    print(f"[Browser] âš ï¸  Real profile not found for {browser}, using: {fallback}")
     return str(fallback)
 
 def _firefox_profile_dir() -> str | None:
@@ -274,7 +302,7 @@ def _resolve_browser(name: str) -> dict | None:
     if spec.get("special") == "opera_windows":
         exe = _find_opera_windows()
         if not exe:
-            print("[Browser] ⚠️  Opera executable not found on Windows.")
+            print("[Browser] âš ï¸  Opera executable not found on Windows.")
         return {"engine": engine, "exe": exe, "channel": channel}
 
     for b in bins:
@@ -344,8 +372,8 @@ def _detect_default_browser() -> str:
 
 
 def _pid_alive(pid: int) -> bool:
-    """Süreç yaşıyor mu? Şüphede True (kilide dokunulmaz). Windows'ta os.kill(pid, 0)
-    yoklama DEĞİLDİR, süreci sonlandırır (Windows testi 2026-09-30) — psutil kullanılır."""
+    """SÃ¼reÃ§ yaÅŸÄ±yor mu? ÅÃ¼phede True (kilide dokunulmaz). Windows'ta os.kill(pid, 0)
+    yoklama DEÄÄ°LDÄ°R, sÃ¼reci sonlandÄ±rÄ±r (Windows testi 2026-09-30) â€” psutil kullanÄ±lÄ±r."""
     if os.name == "nt":
         try:
             import psutil
@@ -362,9 +390,9 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _clear_stale_chromium_lock(profile: Path) -> bool:
-    """Chromium 'SingletonLock' kilidi 'makine-PID' adlı bir sembolik bağlantıdır. Kilidi
-    tutan süreç artık YOKSA (JARVIS çöktü, bilgisayar kapandı) kilit dosyaları silinir.
-    Süreç yaşıyorsa hiçbir şeye dokunulmaz. Yalnız JARVIS'in KENDİ profilinde çağrılır."""
+    """Chromium 'SingletonLock' kilidi 'makine-PID' adlÄ± bir sembolik baÄŸlantÄ±dÄ±r. Kilidi
+    tutan sÃ¼reÃ§ artÄ±k YOKSA (JARVIS Ã§Ã¶ktÃ¼, bilgisayar kapandÄ±) kilit dosyalarÄ± silinir.
+    SÃ¼reÃ§ yaÅŸÄ±yorsa hiÃ§bir ÅŸeye dokunulmaz. YalnÄ±z JARVIS'in KENDÄ° profilinde Ã§aÄŸrÄ±lÄ±r."""
     lock = profile / "SingletonLock"
     if not lock.is_symlink():
         return False
@@ -373,20 +401,20 @@ def _clear_stale_chromium_lock(profile: Path) -> bool:
     except (OSError, ValueError):
         return False
     if _pid_alive(pid):
-        return False                      # süreç yaşıyor: profil gerçekten kullanımda
+        return False                      # sÃ¼reÃ§ yaÅŸÄ±yor: profil gerÃ§ekten kullanÄ±mda
     for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
         try:
             (profile / name).unlink()
         except OSError:
             pass
-    print(f"[Browser] 🔓 Stale profile lock removed (PID {pid} is gone): {profile}")
+    print(f"[Browser] ğŸ”“ Stale profile lock removed (PID {pid} is gone): {profile}")
     return True
 
 
 class _BrowserSession:
     """
-    Bir tarayıcı örneği için tam oturum.
-    Tüm tarayıcılar launch_persistent_context ile gerçek profil üzerinde açılır.
+    Bir tarayÄ±cÄ± Ã¶rneÄŸi iÃ§in tam oturum.
+    TÃ¼m tarayÄ±cÄ±lar launch_persistent_context ile gerÃ§ek profil Ã¼zerinde aÃ§Ä±lÄ±r.
     """
 
     def __init__(self, browser_name: str):
@@ -447,8 +475,8 @@ class _BrowserSession:
 
     async def _launch(self):
         """
-        Tarayıcıyı gerçek kullanıcı profiliyle başlatır.
-        Context zaten açıksa hiçbir şey yapmaz.
+        TarayÄ±cÄ±yÄ± gerÃ§ek kullanÄ±cÄ± profiliyle baÅŸlatÄ±r.
+        Context zaten aÃ§Ä±ksa hiÃ§bir ÅŸey yapmaz.
         """
         if self._context is not None:
             return
@@ -485,7 +513,7 @@ class _BrowserSession:
 
             await asyncio.sleep(0.5)  
             self._page = await self._context.new_page()
-            print("[Browser] ✅ Firefox launched")
+            print("[Browser] âœ… Firefox launched")
             return
 
         if engine_name == "webkit":
@@ -500,7 +528,7 @@ class _BrowserSession:
             self._context = await engine_obj.launch_persistent_context(safari_profile, **kwargs)
             await asyncio.sleep(0.5)
             self._page = await self._context.new_page()
-            print("[Browser] ✅ Safari launched")
+            print("[Browser] âœ… Safari launched")
             return
 
         profile = _real_profile_dir(self.browser_name)
@@ -534,10 +562,10 @@ class _BrowserSession:
             self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
             await asyncio.sleep(0.5) 
             self._page = await self._context.new_page()
-            print(f"[Browser] ✅ Launched [{label}] profile={profile}")
+            print(f"[Browser] âœ… Launched [{label}] profile={profile}")
             return
         except Exception as e:
-            print(f"[Browser] ⚠️  Real profile failed for {label}: {e}")
+            print(f"[Browser] âš ï¸  Real profile failed for {label}: {e}")
 
         jarvis_profile = str(Path.home() / ".jarvis_profiles" / self.browser_name)
         Path(jarvis_profile).mkdir(parents=True, exist_ok=True)
@@ -547,23 +575,23 @@ class _BrowserSession:
             self._context = await engine_obj.launch_persistent_context(jarvis_profile, **kwargs)
             await asyncio.sleep(0.5)
             self._page = await self._context.new_page()
-            print(f"[Browser] ✅ Launched [{label}] with JARVIS profile")
+            print(f"[Browser] âœ… Launched [{label}] with JARVIS profile")
             return
         except Exception as e2:
-            print(f"[Browser] ⚠️  JARVIS profile failed for {label}: {e2}")
-            # Murat@goxs 2026-09-30: 'profile in use' — önceki JARVIS oturumundan kalan
-            # kilit (süreç ölmüş) ya da profil gerçekten başka pencerede açık.
+            print(f"[Browser] âš ï¸  JARVIS profile failed for {label}: {e2}")
+            # Murat@goxs 2026-09-30: 'profile in use' â€” Ã¶nceki JARVIS oturumundan kalan
+            # kilit (sÃ¼reÃ§ Ã¶lmÃ¼ÅŸ) ya da profil gerÃ§ekten baÅŸka pencerede aÃ§Ä±k.
             if _clear_stale_chromium_lock(Path(jarvis_profile)):
                 try:
                     self._context = await engine_obj.launch_persistent_context(jarvis_profile, **kwargs)
                     await asyncio.sleep(0.5)
                     self._page = await self._context.new_page()
-                    print(f"[Browser] ✅ Launched [{label}] after clearing a stale profile lock")
+                    print(f"[Browser] âœ… Launched [{label}] after clearing a stale profile lock")
                     return
                 except Exception as e3:
-                    print(f"[Browser] ⚠️  Still failing after clearing lock: {e3}")
+                    print(f"[Browser] âš ï¸  Still failing after clearing lock: {e3}")
 
-        # Son çare: geçici, boş profil (oturum açık gelmez ama sayfa açılır).
+        # Son Ã§are: geÃ§ici, boÅŸ profil (oturum aÃ§Ä±k gelmez ama sayfa aÃ§Ä±lÄ±r).
         import tempfile
         temp_profile = tempfile.mkdtemp(prefix=f"jarvis-{self.browser_name}-")
         print(f"[Browser] Retrying with a temporary profile: {temp_profile}")
@@ -571,7 +599,7 @@ class _BrowserSession:
             self._context = await engine_obj.launch_persistent_context(temp_profile, **kwargs)
             await asyncio.sleep(0.5)
             self._page = await self._context.new_page()
-            print(f"[Browser] ✅ Launched [{label}] with a temporary profile")
+            print(f"[Browser] âœ… Launched [{label}] with a temporary profile")
         except Exception as e4:
             raise RuntimeError(f"Could not launch {self.browser_name}: {e4}") from e4
 
@@ -596,7 +624,7 @@ class _BrowserSession:
                 await p.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 await asyncio.sleep(0.3)
             except PlaywrightTimeout:
-                pass   # page may have partially loaded — check URL below
+                pass   # page may have partially loaded â€” check URL below
             except Exception as e:
                 print(f"[Browser] goto exception (non-fatal): {e}")
             return p.url
@@ -604,7 +632,7 @@ class _BrowserSession:
         result_url = await _do_goto(page)
 
         if result_url in ("about:blank", "", None, prev_url) and prev_url in ("about:blank", "", None):
-            print(f"[Browser] Still blank after goto — retrying on new tab: {url}")
+            print(f"[Browser] Still blank after goto â€” retrying on new tab: {url}")
             try:
                 new_page   = await self._context.new_page()
                 self._page = new_page
@@ -690,9 +718,9 @@ class _BrowserSession:
                 el = page.locator(selector).first
                 await el.clear()
                 await el.type(str(value), delay=40)
-                results.append(f"✓ {selector}")
+                results.append(f"âœ“ {selector}")
             except Exception as e:
-                results.append(f"✗ {selector}: {e}")
+                results.append(f"âœ— {selector}: {e}")
         return "Form filled: " + ", ".join(results)
 
     async def smart_click(self, description: str) -> str:
@@ -798,7 +826,7 @@ class _BrowserSession:
         return f"{self.browser_name} closed."
 
 class _SessionRegistry:
-    """Tüm aktif tarayıcı oturumlarını yönetir."""
+    """TÃ¼m aktif tarayÄ±cÄ± oturumlarÄ±nÄ± yÃ¶netir."""
 
     def __init__(self):
         self._sessions:       dict[str, _BrowserSession] = {}
@@ -826,7 +854,7 @@ class _SessionRegistry:
         browser_name = _ALIASES.get(browser_name.lower().strip(), browser_name.lower().strip())
         self._get_or_create(browser_name)
         self._active_browser = browser_name
-        return f"Active browser → {browser_name}"
+        return f"Active browser â†’ {browser_name}"
 
     def close_one(self, browser_name: str) -> str:
         with self._lock:
@@ -857,8 +885,8 @@ class _SessionRegistry:
                 return "No active browser sessions."
             lines = []
             for name in self._sessions:
-                marker = " ◀ active" if name == self._active_browser else ""
-                lines.append(f"  • {name}{marker}")
+                marker = " â—€ active" if name == self._active_browser else ""
+                lines.append(f"  â€¢ {name}{marker}")
             return "Open browsers:\n" + "\n".join(lines)
 
 
