@@ -78,7 +78,7 @@ def _run_ui_only() -> None:
     # it owns audio, Gemini, and the backend task loop.
     from jarvis.ui import JarvisUI
 
-    ui = JarvisUI(_face_path())
+    ui = JarvisUI(_face_path(), backend_enabled=False)
     ui.root.mainloop()
 
 

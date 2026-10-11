@@ -1,8 +1,8 @@
 """Safe local plugin registry.
 
-Plugins are explicit Python modules placed under ``plugins/``. A plugin must
-export ``register()`` returning a list of tool descriptors. No arbitrary paths
-are imported, and failures in one plugin do not stop Jarvis.
+Plugins are explicit Python modules placed under ``plugins/`` in the user data
+area. A plugin must export ``register()`` returning a list of tool descriptors.
+No arbitrary paths are imported, and failures in one plugin do not stop Jarvis.
 """
 from __future__ import annotations
 
@@ -12,11 +12,15 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Callable
 
+from jarvis.paths import data_dir
+
 BASE_DIR = Path(__file__).resolve().parent.parent
-PLUGIN_DIR = BASE_DIR / "plugins"
+LEGACY_PLUGIN_DIR = BASE_DIR / "plugins"
+DEFAULT_PLUGIN_DIR = data_dir() / "plugins"
+
 
 class PluginManager:
-    def __init__(self, plugin_dir: Path = PLUGIN_DIR) -> None:
+    def __init__(self, plugin_dir: Path = DEFAULT_PLUGIN_DIR) -> None:
         self.plugin_dir = plugin_dir.resolve()
         self.tools: dict[str, tuple[dict[str, Any], Callable[[dict], Any], str]] = {}
         self.errors: dict[str, str] = {}
@@ -68,9 +72,13 @@ class PluginManager:
         return {"plugin_dir": str(self.plugin_dir), "tools": {name: source for name, (_, _, source) in self.tools.items()}, "errors": self.errors}
 
 
-def create_example_plugin(plugin_dir: Path = PLUGIN_DIR) -> Path:
+def create_example_plugin(plugin_dir: Path = DEFAULT_PLUGIN_DIR) -> Path:
     plugin_dir.mkdir(parents=True, exist_ok=True)
     path = plugin_dir / "example_tools.py"
     if not path.exists():
-        path.write_text('''def register():\n    def hello(args):\n        return {"message": "Merhaba " + str(args.get("name", "efendim"))}\n    return [{"name": "plugin_hello", "description": "Örnek eklenti selamı.", "handler": hello, "schema": {"type": "object", "properties": {"name": {"type": "string"}}}}]\n''', encoding="utf-8")
+        path.write_text('''def register():
+    def hello(args):
+        return {"message": "Merhaba " + str(args.get("name", "efendim"))}
+    return [{"name": "plugin_hello", "description": "Örnek yerel eklenti aracı", "handler": hello, "schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}]
+''', encoding="utf-8")
     return path

@@ -47,12 +47,31 @@ class MessageBus:
     def register(self, brain) -> None:
         self._agents[brain.NAME] = brain
 
+    @staticmethod
+    def _masked(entry: dict) -> dict:
+        """Diske yazilacak kopya: istek payload'i ve yanit sonucu
+        core/audit_log.mask_params ile maskelenir (password/token/key/
+        secret/parola ... "***", icerik alanlari yalnizca uzunluk). Bellekteki
+        mesaj DEGISMEZ; yurutme gercek degerleri kullanir."""
+        from jarvis.core.audit_log import mask_params, redact_text
+        out = dict(entry)
+        if isinstance(out.get("payload"), dict):
+            out["payload"] = mask_params(out["payload"], limit=500)
+        result = out.get("result")
+        if isinstance(result, dict):
+            out["result"] = mask_params(result, limit=500)
+        elif isinstance(result, (list, tuple)):
+            out["result"] = mask_params({"result": result}, limit=500)["result"]
+        elif isinstance(result, str):
+            out["result"] = redact_text(result)
+        return out
+
     def _log(self, entry: dict) -> None:
         try:
             with _write_lock:
                 LOGS_DIR.mkdir(parents=True, exist_ok=True)
                 with open(BUS_LOG_PATH, "a", encoding="utf-8") as f:
-                    entry = {"timestamp": datetime.now().isoformat(), **entry}
+                    entry = {"timestamp": datetime.now().isoformat(), **self._masked(entry)}
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception as e:
             print(f"[MessageBus] ⚠️ message_bus.jsonl yazılamadı: {e}")

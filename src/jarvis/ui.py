@@ -2914,6 +2914,7 @@ class MainWindow(QMainWindow):
 
     def _on_file_selected(self, path: str):
         self._toast_sig.emit("Dosya seçildi", "info")
+        self._toast_sig.emit("Dosya seçildi", "info")
         self._current_file = path
         p = Path(path)
         cat  = _file_category(p)

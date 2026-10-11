@@ -115,6 +115,42 @@ def _is_safe_path(target: Path) -> bool:
     except Exception:
         return False
 
+# Yazma/silme yalnızca kullanıcı içerik klasörlerinde yapılabilir.
+def _write_roots() -> list[Path]:
+    roots = [_get_desktop(), _get_documents(), _get_downloads(),
+             _get_pictures(), _get_music(), _get_videos(),
+             # English Desktop remains a supported explicit target even when
+             # Linux user-dirs redirects the visible desktop elsewhere.
+             Path.home() / "Desktop", Path.home() / "jarvis_programs"]
+    return [r.resolve() for r in roots]
+
+
+def _is_safe_write_path(target: Path) -> bool:
+    try:
+        if target.name in ("", ".", ".."):
+            return False
+        entry = target.parent.resolve() / target.name
+        for root in _write_roots():
+            try:
+                relative = entry.relative_to(root)
+            except ValueError:
+                continue
+            return not any(part.startswith(".") for part in relative.parts)
+        return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _is_safe_write_file(target: Path) -> bool:
+    return _is_safe_write_path(target) and not target.is_symlink()
+
+
+def _open_for_write(target: Path, append: bool = False):
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    flags |= os.O_APPEND if append else os.O_TRUNC
+    fd = os.open(target, flags, 0o644)
+    return os.fdopen(fd, "a" if append else "w", encoding="utf-8")
+
 # Linux'ta "İndirilenler", "Masaüstü" gibi YERELLEŞTİRİLMİŞ klasör adları
 # ~/.config/user-dirs.dirs dosyasında durur; XDG_*_DIR ortam değişkenleri
 # normalde TANIMLI DEĞİLDİR. Murat@goxs 2026-09-29: "İndirilenler klasörümde
@@ -146,10 +182,17 @@ def _xdg_user_dir(key: str, home: "Path | None" = None) -> "Path | None":
         for line in cfg.read_text(encoding="utf-8").splitlines():
             m = re.match(rf'\s*{var}\s*=\s*"([^"]*)"', line)
             if m:
-                value = m.group(1).replace("$HOME", str(home))
+                value = m.group(1).replace("${HOME}", str(home)).replace("$HOME", str(home))
                 p = Path(value).expanduser()
-                # Ev klasörünün kendisine işaret ediyorsa (kullanıcı klasörü kapatmış) yok say.
-                if p.is_dir() and p != home:
+                try:
+                    resolved = p.resolve()
+                    home_resolved = home.resolve()
+                    if (resolved == home_resolved or home_resolved.is_relative_to(resolved)
+                            or any(part.startswith(".") for part in resolved.parts)):
+                        continue
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                if p.is_dir():
                     return p
     except OSError:
         pass
@@ -582,7 +625,7 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
             return "Could not create file: dosya adı belirtilmedi (isim boş olduğu için işlem güvenlik amacıyla durduruldu, hedef klasörün kendisine dokunulmadı)."
         base   = _resolve_path(path)
         target = base / name
-        if not _is_safe_path(target):
+        if not _is_safe_write_file(target):
             return f"Access denied: {target}"
 
         def _do_write():
@@ -619,7 +662,7 @@ def create_folder(path: str, name: str = "") -> str:
             return "Could not create folder: klasör adı belirtilmedi (isim boş olduğu için işlem güvenlik amacıyla durduruldu, mevcut klasöre dokunulmadı)."
         base   = _resolve_path(path)
         target = base / name
-        if not _is_safe_path(target):
+        if not _is_safe_write_file(target):
             return f"Access denied: {target}"
 
         _with_lock_retry(lambda: target.mkdir(parents=True, exist_ok=True), target)
@@ -881,7 +924,7 @@ def write_file(path: str, name: str = "", content: str = "",
             return "Could not write file: dosya adı belirtilmedi (isim boş olduğu için işlem güvenlik amacıyla durduruldu, hedef klasörün kendisine yazılmadı)."
         base   = _resolve_path(path)
         target = base / name
-        if not _is_safe_path(target):
+        if not _is_safe_write_file(target):
             return f"Access denied: {target}"
 
         def _do_write():
@@ -921,7 +964,7 @@ def find_replace_in_file(path: str, name: str = "", old_text: str = "", new_text
             return "Could not edit file: değiştirilecek metin (old_text) boş olamaz."
         base = _resolve_path(path)
         target = base / name
-        if not _is_safe_path(target):
+        if not _is_safe_write_file(target):
             return f"Access denied: {target}"
         if not target.is_file():
             return f"File not found: {target.name}"

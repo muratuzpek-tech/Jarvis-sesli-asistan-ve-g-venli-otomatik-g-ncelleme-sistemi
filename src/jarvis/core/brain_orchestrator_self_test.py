@@ -182,7 +182,7 @@ def run() -> bool:
 
         # ── 7) DÜZELTME: _risk_of_step() artık file_controller'ın GERÇEK iç
         #    eylemini security_ai'ye soruyor - önceden HER ZAMAN "info"
-        #    (LOW) hardcode ediliyordu, create_file/create_folder (MEDIUM
+        #    (LOW) hardcode ediliyordu, create_file/create_folder (HIGH
         #    olması gerekirken) hep LOW'a düşüyordu. security_ai'nin
         #    KENDİ (Gemini'siz, saf) classify_risk() tablosunu kullanan
         #    sahte bir bus.send ile - gerçek bir LLM çağrısı YAPILMADAN -
@@ -202,9 +202,9 @@ def run() -> bool:
         risk, _ = orch._risk_of_step({"agent": "executor_ai", "description": "`test.txt` adlı bir dosya oluşturmak."})
         assert captured == {"tool": "file_controller", "action": "create_file"}, \
             f"security_ai'ye YANLIŞ (tool, action) gönderildi: {captured}"
-        assert risk == "medium", f"'dosya oluştur' artık MEDIUM risk olmalı (security_ai.py'nin kendi tablosu) - geldi: {risk}"
+        assert risk == "high", f"'dosya oluştur' HIGH risk olmalı (file_controller salt-okunur değil, fail-closed) - geldi: {risk}"
         print("[OK] _risk_of_step(): security_ai'ye artık GERÇEK iç eylem (create_file) gönderiliyor, "
-              "sonuç doğru şekilde MEDIUM risk.")
+              "sonuç doğru şekilde HIGH risk.")
 
         risk, _ = orch._risk_of_step({"agent": "executor_ai", "description": "Masaüstündeki bir dosyayı sil."})
         assert risk == "high", f"'sil' hâlâ HIGH risk olmalı (anahtar kelime eskalasyonu) - geldi: {risk}"

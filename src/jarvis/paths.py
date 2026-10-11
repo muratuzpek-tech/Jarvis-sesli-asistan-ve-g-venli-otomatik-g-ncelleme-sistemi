@@ -1,19 +1,8 @@
 """Tek kaynak: kod nerede, KULLANICI VERİSİ nerede.
 
-v25 paketinde her modül kendi `BASE_DIR`ini `Path(__file__).parent...` ile
-hesaplıyor ve `memory/`, `logs/`, `tasks/` klasörlerini KOD KLASÖRÜNÜN İÇİNE
-yazıyordu. Sonuçları: (1) kullanıcının konuşma geçmişi ve görev kayıtları
-dağıtım zip'ine sızıyordu, (2) uygulama "Program Files" gibi yazma izni
-olmayan bir yere kurulduğunda çöküyordu, (3) güncelleme = kullanıcı verisinin
-üzerine yazmak demekti.
-
-Burada kod dizini (salt okunur) ile veri dizini (yazılabilir) ayrılır.
-
-Veri dizini önceliği:
-  1. ``JARVIS_HOME`` ortam değişkeni
-  2. ``JARVIS_USE_LEGACY_DATA=1`` ile açıkça istenirse proje kökündeki eski veri
-  3. Windows: %LOCALAPPDATA%\\MuratJARVIS | macOS: ~/Library/Application Support/MuratJARVIS
-     | Linux: $XDG_DATA_HOME/MuratJARVIS (yoksa ~/.local/share/MuratJARVIS)
+Kod dizini salt-okunur kabul edilir; tüm çalışma verileri, sırlar, loglar,
+görevler, eklentiler ve üretim çalışma alanları kullanıcı veri dizinine gider.
+``JARVIS_HOME`` test ve portable kurulumlar için açık bir izolasyon sınırıdır.
 """
 from __future__ import annotations
 
@@ -63,8 +52,6 @@ def data_dir() -> Path:
         legacy = project_root() / "memory"
         if legacy.is_dir():
             return project_root()
-    # Selecting a location is read-only.  Concrete subdirectory helpers create
-    # storage directories when they are actually used.
     return _platform_data_dir()
 
 
@@ -87,9 +74,27 @@ def tasks_dir() -> Path:
 
 
 def config_dir() -> Path:
-    """Kullanıcıya ait yapılandırma (api_keys.json, certs/) — kod dizininde DEĞİL."""
     return _sub("config")
 
 
 def certs_dir() -> Path:
     return _sub("config/certs")
+
+
+def plugins_dir() -> Path:
+    return _sub("plugins")
+
+
+def dev_projects_dir() -> Path:
+    """Workspace for generated projects; never place these under package code."""
+    return _sub("dev_agent/projects")
+
+
+def dev_cache_dir() -> Path:
+    """Non-secret temporary/cache artifacts for development tools."""
+    return _sub("dev_agent/cache")
+
+
+def sandbox_dir() -> Path:
+    """User-data sandbox root for self-improvement experiments."""
+    return _sub("sandbox")

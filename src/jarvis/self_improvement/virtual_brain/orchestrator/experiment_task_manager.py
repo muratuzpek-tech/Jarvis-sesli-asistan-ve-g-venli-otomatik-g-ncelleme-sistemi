@@ -34,14 +34,16 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+from jarvis.core.p0_critical_fixes import VirtualBrainStateManager
+
 VALID_STATUSES = {
     "pending", "running", "waiting_approval", "completed",
     "failed", "cancelled", "rollback",
 }
 
 _HERE = Path(__file__).resolve().parent
-EXPERIMENTS_PATH = _HERE / "experiments.json"
-LOGS_DIR = _HERE.parent.parent / "sandbox" / "logs"
+EXPERIMENTS_PATH = VirtualBrainStateManager.get_experiments_path()
+LOGS_DIR = VirtualBrainStateManager.get_experiments_path().parent / "logs"
 _lock = threading.RLock()
 
 
@@ -82,8 +84,8 @@ class ExperimentTaskManager:
     AYNI atomik-yazma deseni - ama tamamen ayrı bir dosyada. Gerçek
     Orchestrator/TaskManager bundan haberdar değildir."""
 
-    def __init__(self, path: Path = EXPERIMENTS_PATH) -> None:
-        self.path = path
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or VirtualBrainStateManager.get_experiments_path()
 
     def _load(self) -> list[dict]:
         try:

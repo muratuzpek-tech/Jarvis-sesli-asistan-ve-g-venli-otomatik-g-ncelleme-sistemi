@@ -1,0 +1,55 @@
+# MuratJARVIS — Bağımlılık Listesi
+# Kurulum: pip install -r requirements.txt
+#
+# NOT: pyproject.toml ana kaynaktır (pip install -e . tercih edilir).
+# Bu dosya sadece "pip install -r requirements.txt" ile hızlı kurulum içindir.
+
+# ── Core AI ────────────────────────────────────────────
+google-genai>=1.0
+google-generativeai>=0.8
+
+# ── Web + Dashboard ────────────────────────────────────
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+requests>=2.31
+
+# ── Güvenlik ───────────────────────────────────────────
+cryptography>=42.0
+
+# ── Ses + GUI ──────────────────────────────────────────
+sounddevice>=0.4.6
+PyQt6>=6.6
+
+# ── Bilgisayar Kontrolü ────────────────────────────────
+pyautogui>=0.9.54
+pyperclip>=1.8
+pygetwindow>=0.0.9
+mss>=9.0
+opencv-python>=4.9
+pillow>=10.0
+numpy>=1.26,<2.5
+
+# ── Veri + Araçlar ─────────────────────────────────────
+psutil>=5.9
+beautifulsoup4>=4.12
+ddgs>=9.0
+playwright>=1.44
+send2trash>=1.8
+youtube-transcript-api>=0.6
+python-pptx>=0.6
+qrcode[pil]>=7.4
+jc>=1.25
+
+# ── Platform-specific ──────────────────────────────────
+comtypes>=1.2; sys_platform == "win32"
+pycaw>=20240210; sys_platform == "win32"
+win10toast>=0.9; sys_platform == "win32"
+pywinauto>=0.6.8; sys_platform == "win32"
+jeepney>=0.8; sys_platform == "linux"
+
+# ── Development (isteğe bağlı) ─────────────────────────
+# pip install -r requirements-dev.txt
+# pytest>=8.0
+# ruff>=0.6
+# pyright>=1.1

@@ -44,7 +44,7 @@ OLLAMA_BASE = "http://localhost:11434"
 # bir makinede yapildi - GPU'suz/zayif bir makinede 7B model 30sn'yi asabilir,
 # boyle bir ortamda bu sira tekrar gozden gecirilmeli.
 _PREFERRED_MODELS = (
-    "qwen2.5-coder:7b", "qwen2.5-coder",
+    "qwen2.5-coder:14b", "qwen2.5-coder:7b", "qwen2.5-coder",
     "qwen3.5:0.8b", "qwen3.5:2b", "qwen3.5:4b", "llama3.1", "llama3",
 )
 

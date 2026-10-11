@@ -54,6 +54,26 @@ def _extract_status_code(exc: Exception) -> int | None:
     return None
 
 
+_RETRY_DELAY_RE = re.compile(r"retryDelay['\"]?\s*:\s*['\"]?(\d+(?:\.\d+)?)s", re.IGNORECASE)
+
+# Bundan uzun bir retryDelay icin hic tekrar denenmez; devre bu sure kadar
+# acik tutulur ve cagiran hemen yedege (Ollama) gecer.
+QUOTA_FAIL_FAST_SECONDS = 60.0
+DAILY_QUOTA_DEFAULT_SECONDS = 3600.0
+
+
+def quota_retry_after(exc: Exception) -> float | None:
+    """429 hatasindaki RetryInfo.retryDelay degerini saniye olarak dondurur
+    (ör. "'retryDelay': '3626s'" -> 3626.0); bulunamazsa None."""
+    match = _RETRY_DELAY_RE.search(str(exc))
+    return float(match.group(1)) if match else None
+
+
+def is_daily_quota(exc: Exception) -> bool:
+    """Gunluk kota mi (ör. GenerateRequestsPerDayPerProjectPerModel)?"""
+    return "perday" in str(exc).lower()
+
+
 def classify_error(exc: Exception) -> str:
     """'terminal' | 'retryable' | 'quota' | 'fallback' | 'unknown' dondurur."""
     code = _extract_status_code(exc)
@@ -80,8 +100,21 @@ class CircuitBreaker:
     cooldown_seconds: float = 60.0
     _consecutive_failures: int = field(default=0, init=False)
     _opened_at: float | None = field(default=None, init=False)
+    _forced_until: float | None = field(default=None, init=False)
+
+    def open_for(self, seconds: float, reason: str = "") -> None:
+        """Devreyi normal cooldown'dan bagimsiz olarak `seconds` boyunca acik
+        tutar (ör. gunluk kota: API'nin verdigi retryDelay kadar)."""
+        self._forced_until = time.monotonic() + max(0.0, float(seconds))
+        self._opened_at = time.monotonic()
+        why = f" ({reason})" if reason else ""
+        print(f"[Resilience] ⛔ Devre kesici '{self.name}' {seconds:.0f}sn kapalı tutulacak{why}.")
 
     def is_open(self) -> bool:
+        if self._forced_until is not None:
+            if time.monotonic() < self._forced_until:
+                return True
+            self._forced_until = None
         if self._opened_at is None:
             return False
         if time.monotonic() - self._opened_at >= self.cooldown_seconds:
@@ -92,6 +125,7 @@ class CircuitBreaker:
     def record_success(self) -> None:
         self._consecutive_failures = 0
         self._opened_at = None
+        self._forced_until = None
 
     def record_failure(self) -> None:
         self._consecutive_failures += 1
@@ -338,8 +372,27 @@ def call_with_resilience(
             # 'retryable', 'quota' veya 'unknown': jitter'li backoff ile tekrar dene
             if breaker is not None:
                 breaker.record_failure()
+
+            retry_after = quota_retry_after(exc) if kind == "quota" else None
+            if kind == "quota" and (
+                is_daily_quota(exc)
+                or (retry_after is not None and retry_after > QUOTA_FAIL_FAST_SECONDS)
+            ):
+                # Gunluk kota / uzun retryDelay: 20-45sn sonra tekrar denemek
+                # asla basarili olmaz, sadece zaman kaybettirir (ve bu bekleme
+                # cagiranin tuttugu kilitleri de bekletir). API'nin soyledigi
+                # sure kadar devreyi kapali tut ve hemen basarisiz don ki
+                # cagiran yerel yedege gecsin.
+                wait = retry_after if retry_after is not None else DAILY_QUOTA_DEFAULT_SECONDS
+                if breaker is not None:
+                    breaker.open_for(wait, reason="kota doldu")
+                raise AllAttemptsFailed(exc) from exc
+
             if attempt < max_attempts - 1:
-                if kind == "quota":
+                if kind == "quota" and retry_after is not None:
+                    # Kisa (dakikalik) kota: API'nin istedigi kadar bekle.
+                    delay = retry_after + random.uniform(0.5, 2.0)
+                elif kind == "quota":
                     # 429 RESOURCE_EXHAUSTED saniyeler icinde duzelmez -
                     # kisa backoff'la hemen tekrar vurmak sadece ayni kotayi
                     # (ve canli sesli oturumun payini) bosa harcar. En az

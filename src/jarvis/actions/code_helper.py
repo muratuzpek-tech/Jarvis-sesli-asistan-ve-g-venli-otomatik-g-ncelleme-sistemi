@@ -3,7 +3,10 @@ import sys
 import re
 import time
 import secrets
+import shlex
 from pathlib import Path
+from jarvis.core.audit_log import log_action
+from jarvis.core.backup_manager import safe_modify
 
 
 def get_base_dir():
@@ -13,7 +16,6 @@ def get_base_dir():
 
 BASE_DIR           = get_base_dir()
 API_CONFIG_PATH    = BASE_DIR / "config" / "api_keys.json"
-DESKTOP            = Path.home() / "Desktop"
 MAX_BUILD_ATTEMPTS = 3
 GEMINI_MODEL       = "gemini-flash-latest"
 
@@ -92,9 +94,56 @@ def _get_gemini_breaker():
 
 
 def _clean_code(text: str) -> str:
+    """Markdown icindeki kod bloklarini dogru sekilde cikarir.
+
+    Gorsel LLM'ler (Gemini, Ollama) farkli markdown formatlari
+    uretebilir.  Bu fonksiyon tum varyasyonlari yakalar:
+
+    ```python
+    code
+    ```
+    ```python
+    code
+    ```
+    veya aciklama metni arasinda sikismis bloklar.
+    """
     text = text.strip()
-    text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-    text = re.sub(r"\n?```$", "", text)
+    # 1. Tur: Standart ``` fences (dil etiketi opsiyonel, bosluk toleransli)
+    blocks = re.findall(
+        r"```\s*(?:\w+)?\s*\n(.*?)\s*```",
+        text, re.DOTALL,
+    )
+    if blocks:
+        return "\n".join(b.strip() for b in blocks if b.strip())
+
+    # 2. Tur: Dil etiketi VAR ama \n SONRA boşluk/tablo geciriyor
+    blocks = re.findall(
+        r"```\s*[a-zA-Z0-9_+-]*\s+(.*?)(?=```|$)",
+        text, re.DOTALL,
+    )
+    if blocks:
+        cleaned = [b.strip() for b in blocks if b.strip() and not b.strip().startswith("-")]
+        if cleaned:
+            return "\n".join(cleaned)
+
+    # 3. Tur: Fence icermiyor → markdown bullet/bold'li metinden
+    # gercek kod satirlarini cikar
+    code_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        # Markdown format belirteclerini temizle
+        if stripped.startswith(("```", "**", "- ", "* ", "# ", "> ")):
+            continue
+        if stripped.startswith(("\n", "|")):
+            continue
+        code_lines.append(line)
+
+    if code_lines:
+        return "\n".join(code_lines).strip()
+
+    # 4. Tur: Son care — eskisi gibi sadece cevreleyen fence'leri temizle
+    text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
     return text.strip()
 
 
@@ -108,76 +157,90 @@ def _resolve_save_path(output_path: str, language: str) -> Path:
         "bash": ".sh", "shell": ".sh", "powershell": ".ps1",
         "sql": ".sql", "json": ".json", "rust": ".rs", "go": ".go",
     }
+    # Gercek Masaustu (Linux'ta user-dirs.dirs, ör. ~/Masaüstü; Windows'ta
+    # OneDrive yonlendirmesi dahil) - yazma politikasinin kabul ettigi klasor.
+    from jarvis.actions.file_controller import _get_desktop
+    desktop = _get_desktop()
     if output_path:
         p = Path(output_path)
-        return p if p.is_absolute() else DESKTOP / p
+        return p if p.is_absolute() else desktop / p
     ext = ext_map.get((language or "python").lower(), ".py")
-    return DESKTOP / f"jarvis_code{ext}"
+    return desktop / f"jarvis_code{ext}"
 
 
 # --- Yazma hedefi guvenlik politikasi -------------------------------------
 #
-# GERCEK RISK (denetim bulgusu F-01): _resolve_save_path() mutlak bir
-# output_path'i (ör. "/etc/cron.d/x", "C:\\Program Files\\...") OLDUGU GIBI
-# donduruyordu - hicbir izin kokune bagli degildi. code_helper "guvenilir ic
-# bilesen" sayilmisti ama yol/model ciktisi aslinda kullanici/model girdisi.
-# Asagidaki tek politika noktasi, file_controller._is_safe_path ile AYNI
-# kurali (kullanici ev dizini disina cikma yasagi, sembolik link ile disari
-# tasma REDDEDILIR) kod yazma yollarina da uygular.
-def _is_within_home(path: Path) -> bool:
-    try:
-        resolved = path.resolve()
-        home = Path.home().resolve()
-        return resolved == home or resolved.is_relative_to(home)
-    except Exception:
-        return False
-
-
+# GERCEK RISK (denetim bulgusu F-01 + guvenlik denetimi): _resolve_save_path()
+# mutlak bir output_path'i OLDUGU GIBI donduruyordu; edit/optimize'in mevcut
+# dosya dali (file_path) ise HICBIR kontrol yapmadan ~/.bashrc,
+# ~/.ssh/authorized_keys veya ~/.config/autostart/ dosyalarini okuyup uzerine
+# yazabiliyordu. Yol model ciktisidir ve model web icerigi de okuyor.
+# Asagidaki TEK politika noktasi yeni dosya ve mevcut dosya dallarinin ikisine
+# de file_controller ile AYNI kurali uygular: yalnizca kullanici icerik
+# klasorleri (Masaustu, Belgeler, Indirilenler, Resimler, Muzik, Videolar,
+# jarvis_programs), gizli (nokta ile baslayan) bilesen yok, son bilesen
+# sembolik link degil.
 class UnsafeWriteTarget(Exception):
-    """resolve_write_target() hedefin kullanici ev dizini disinda oldugunu
-    tespit ettiginde firlatilir - diske HICBIR yazma yapilmadan."""
+    """Hedef yazma politikasinin disinda - diske HICBIR yazma yapilmadan
+    firlatilir."""
+
+
+def check_write_target(target: Path) -> Path:
+    """TUM kod yazma hedeflerinin GECTIGI tek politika noktasi."""
+    from jarvis.actions.file_controller import _is_safe_write_file
+    if not _is_safe_write_file(Path(target)):
+        raise UnsafeWriteTarget(
+            f"Güvenlik: '{target}' kod yazma hedefi olamaz. Yalnızca Masaüstü, "
+            f"Belgeler, İndirilenler, Resimler, Müzik, Videolar, ~/Desktop veya "
+            f"jarvis_programs içine; gizli (nokta ile başlayan) dosya/klasör ve "
+            f"sembolik link olmadan yazılabilir."
+        )
+    return Path(target)
 
 
 def resolve_write_target(output_path: str, language: str) -> Path:
-    """TUM kod-yazma yollarinin (write/optimize'in yeni-dosya dali) GECTIGI
-    TEK politika noktasi. Hedef kullanici ev dizini disindaysa YAZMADAN
-    ONCE reddeder."""
-    target = _resolve_save_path(output_path, language)
-    if not _is_within_home(target):
-        raise UnsafeWriteTarget(
-            f"Güvenlik: '{target}' kullanıcı ana dizini dışında olduğu için "
-            f"buraya yazma reddedildi. Lütfen Masaüstü, Belgeler veya proje "
-            f"klasörünüz gibi ana dizin içinde bir konum belirtin."
-        )
-    return target
+    """Yeni dosya dali (write/optimize): hedefi cozer ve politikadan gecirir."""
+    return check_write_target(_resolve_save_path(output_path, language))
 
 
 # Var olan bir dosyanin UZERINE YAZILMASI (edit/optimize), acik kullanici
-# onayi olmadan otomatik yapilmaz (F-01: "code_helper ... mevcut dosyaları
-# değiştirebiliyor"). Iki adimli onay, file_controller.move_file ile AYNI
-# desendedir: ilk cagri hicbir dosyaya dokunmaz, onaylanmis icerigi saklayip
-# kisa omurlu bir kod doner; gercek yazma SADECE dogru kodla olur.
+# onayi olmadan yapilmaz. Ilk cagri hicbir dosyaya dokunmaz: uretilen icerigi
+# saklayip onizleme ve kisa omurlu bir kod doner. Bu kod MODELE GOSTERILMEZ;
+# main.py onu saklar ve yalnizca gercek kullanici onayindan sonra
+# (_consume_dangerous_confirmation) geri iletir. Onaylanan cagri kodu yeniden
+# URETMEZ - kullanicinin gordugu onizleme oldugu gibi kaydedilir.
 _pending_code_edits: dict[str, tuple[Path, str]] = {}
 
 
-def _confirm_and_save(path: Path, content: str, confirm_code: str = "") -> str:
+def _confirm_and_save(path: Path, content: str) -> str:
+    try:
+        check_write_target(path)
+    except UnsafeWriteTarget as e:
+        return str(e)
     if not path.exists():
         # Yeni dosya - uzerine yazilacak mevcut icerik yok, dogrudan kaydet.
         return _save_file(path, content)
-    if not confirm_code:
-        code = secrets.token_hex(3)
-        _pending_code_edits[code] = (path, content)
-        return (
-            f"ONAY GEREKLİ (henüz kaydedilmedi): '{path}' zaten var, üzerine "
-            f"yazılacak. Kullanıcı SESLİ/YAZILI olarak açıkça onaylarsa, aynı "
-            f"eylemi confirm_code='{code}' parametresiyle TEKRAR çağırın. "
-            f"Kullanıcı onaylamadan bu kodu kendi kendine kullanma.\n\n"
-            f"Önizleme:\n{_preview(content)}"
-        )
+    code = secrets.token_hex(3)
+    _pending_code_edits[code] = (path, content)
+    return (
+        f"ONAY GEREKLİ (henüz kaydedilmedi): '{path}' zaten var, üzerine "
+        f"yazılacak. Kullanıcı SESLİ/YAZILI olarak açıkça onaylarsa, aynı "
+        f"eylemi confirm_code='{code}' parametresiyle TEKRAR çağırın. "
+        f"Kullanıcı onaylamadan bu kodu kendi kendine kullanma.\n\n"
+        f"Önizleme:\n{_preview(content)}"
+    )
+
+
+def _apply_confirmed_edit(path: Path, confirm_code: str) -> str:
+    """Onaylanmis, onizlenmis icerigi kaydeder (yeniden uretmez)."""
     pending = _pending_code_edits.pop(confirm_code, None)
-    if pending is None or pending[0] != path or pending[1] != content:
+    if pending is None or pending[0] != path:
         return "Onay kodu geçersiz veya süresi dolmuş. Önce confirm_code vermeden çağırıp yeni önizleme/kod alın."
-    return _save_file(path, content)
+    try:
+        check_write_target(path)
+    except UnsafeWriteTarget as e:
+        return str(e)
+    return _save_file(path, pending[1])
 
 
 _RETRYABLE_WINERRORS = (32, 33)  # ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
@@ -227,26 +290,24 @@ def _read_file(file_path: str) -> tuple[str, str]:
 def _save_file(path: Path, content: str) -> str:
     try:
         print(f"[Code] 🔍 TEŞHİS: path={path!r}  path.exists()={path.exists()}")
-        backup_note = ""
-        if path.exists():
-            from datetime import datetime
-            stamp  = datetime.now().strftime("%Y%m%d-%H%M%S")
-            backup = path.with_name(f"{path.stem}.{stamp}.bak{path.suffix}")
-            # DUZELTME (denetim bulgusu F-10): yedek artik BYTE duzeyinde
-            # aliniyor (read_bytes/write_bytes) - eskiden read_text(errors=
-            # "replace") kullanildigi icin bozuk/farkli kodlamali dosyalarda
-            # yedek, ORIJINALIN birebir kopyasi OLMUYORDU (sessiz veri kaybi).
-            _write_bytes_with_retry(backup, path.read_bytes())
-            backup_note = f" (yedek: {backup.name})"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _write_bytes_with_retry(path, content.encode("utf-8"))
+        # GUVENLIK (2026-10-03): Merkezi backup_manager.safe_modify() kullanilir.
+        # - Otomatik yedek (byte duzeyinde, F-10 korumasi)
+        # - Basarisiz yazmada otomatik rollback
+        # - Merkezi index + audit log
+        bm_result = safe_modify(path, content.encode("utf-8"))
+        backup_note = f" (yedek id: {bm_result['backup_id']})"
+        log_action(module="code_helper", action="save_file",
+                   detail=f"path={path} backup_id={bm_result['backup_id']}",
+                   risk="medium", result="SUCCESS")
         return f"Saved to: {path}{backup_note}"
     except Exception as e:
+        log_action(module="code_helper", action="save_file",
+                   detail=f"path={path} err={e}", risk="medium", result="FAILED")
         print(f"[Code] 🔍 TEŞHİS hata: {type(e).__name__}: {e}")
         return f"Could not save: {e}"
 
 
-def _preview(code: str, lines: int = 10) -> str:
+def _preview(code: str, lines: int = 25) -> str:
     all_lines = code.splitlines()
     preview   = "\n".join(all_lines[:lines])
     suffix    = f"\n... ({len(all_lines) - lines} more lines)" if len(all_lines) > lines else ""
@@ -316,6 +377,68 @@ def _detect_intent(description: str, file_path: str, code: str) -> str:
 
     return "write"
 
+def _open_in_editor(path: Path) -> str:
+    """Yazilan dosyayi varsayilan uygulamayla ac."""
+    import subprocess
+    import shutil
+    cmd = shutil.which("xdg-open") or shutil.which("open")
+    if not cmd:
+        return ""
+    try:
+        subprocess.Popen([cmd, str(path)],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        return f"[EDITOR] {path.name} acildi"
+    except Exception:
+        return ""
+
+
+def _try_run_simple(path: Path) -> str:
+    """Guvenli basit CLI scriptlerini calistir ve ciktisi goster."""
+    import subprocess
+    import ast
+    import sys
+    if path.suffix != ".py":
+        return ""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+
+    GUARD = {"tkinter","PyQt5","PySide6","pygame","kivy","turtle",
+             "flask","django","fastapi","http","socketserver",
+             "subprocess","ctypes","socket","requests","urllib"}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(a.name.split(".")[0] in GUARD for a in node.names):
+                return "[GUVENLIK] Agir kutuphane - elle calistirin"
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.split(".")[0] in GUARD:
+                return "[GUVENLIK] Agir kutuphane - elle calistirin"
+        if isinstance(node, ast.Call):
+            fn = getattr(node.func, "id", "") or getattr(node.func, "attr", "")
+            if fn in ("exec", "eval", "system", "popen", "execv", "input"):
+                return f"[ELLE] Tehlikeli/interaktif ({fn}) - elle calistirin"
+
+    try:
+        r = subprocess.run([sys.executable, str(path)],
+                           capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL,
+                           timeout=10, cwd=str(path.parent))
+        out = r.stdout.strip()
+        if r.returncode == 0 and out:
+            cap = out[:800] + ("... (devam)" if len(out) > 800 else "")
+            return f">> CALISTI! Cikti:\n{cap}"
+        if r.stderr:
+            return f"HATA: {r.stderr.strip()[:300]}"
+        return ">> Calisti (cikti bos)"
+    except subprocess.TimeoutExpired:
+        return "TIMEOUT: 10sn asildi"
+    except Exception as e:
+        return f"(calistirma hatasi: {e})"
+
+
 def _write(description: str, language: str, output_path: str, player=None) -> tuple[str, Path]:
     lang  = language or "python"
     model = _get_gemini()
@@ -360,6 +483,20 @@ Fixed code:"""
     return _clean_code(response.text)
 
 
+def _cli_args(raw) -> list[str]:
+    """TOOL_DECLARATIONS'ta 'args' STRING beyan edilir; model "a 'b c'" gibi
+    tek bir metin gönderir. Kabuk gibi bölünür (kabuk çalıştırılmaz); liste
+    gelirse elemanlar aynen kalır."""
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        try:
+            return shlex.split(raw, posix=(sys.platform != "win32"))
+        except ValueError:          # kapanmamış tırnak
+            return raw.split()
+    return [str(a) for a in raw]
+
+
 def _run_file(path: Path, args: list, timeout: int) -> str:
     interpreters = {
         ".py":  [sys.executable],
@@ -378,6 +515,7 @@ def _run_file(path: Path, args: list, timeout: int) -> str:
         result = subprocess.run(
             interp + [str(path)] + (args or []),
             capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
             encoding="utf-8", errors="replace",
             timeout=timeout, cwd=str(path.parent)
         )
@@ -422,6 +560,9 @@ def _build(description, language, output_path, args, timeout, speak=None, player
         last_output = _run_file(path, args, timeout)
 
         if not _has_error(last_output):
+            log_action(module="code_helper", action="build_success",
+                       detail=f"path={path} attempts={attempt}",
+                       risk="medium", result="SUCCESS")
             msg = (
                 f"Build complete, sir. "
                 f"The code is working after {attempt} attempt{'s' if attempt > 1 else ''}. "
@@ -457,7 +598,13 @@ def _write_action(description, language, output_path, player) -> str:
     try:
         code, path = _write(description, language, output_path, player)
         print(f"[Code] ✅ Written: {path}")
-        return f"Code written. Saved to: {path}\n\nPreview:\n{_preview(code)}"
+        _post = []
+        _ed = _open_in_editor(path)
+        if _ed: _post.append(_ed)
+        _rn = _try_run_simple(path)
+        if _rn: _post.append(_rn)
+        _extra = ("\n" + "\n".join(_post)) if _post else ""
+        return f"Code written. Saved to: {path}{_extra}\n\nKOD INCELEME (ilk 25 satir):\n{_preview(code)}"
     except Exception as e:
         return f"Could not generate code: {e}"
 
@@ -467,6 +614,15 @@ def _edit_action(file_path, instruction, player, confirm_code: str = "") -> str:
         return "Please provide a file path to edit, sir."
     if not instruction:
         return "Please describe what change to make, sir."
+
+    # Politika kontrolu OKUMADAN once: hassas bir dosyanin icerigi Gemini'ye
+    # de gonderilmemeli.
+    try:
+        target = check_write_target(Path(file_path))
+    except UnsafeWriteTarget as e:
+        return str(e)
+    if confirm_code:
+        return _apply_confirmed_edit(target, confirm_code)
 
     content, err = _read_file(file_path)
     if err:
@@ -497,7 +653,9 @@ Updated code:"""
     # DUZELTME (denetim bulgusu F-01): mevcut bir dosyanin uzerine yazmak
     # ACIK kullanici onayi gerektirir - _confirm_and_save ilk cagrida hicbir
     # seye dokunmaz, sadece onizleme + onay kodu doner.
-    status = _confirm_and_save(Path(file_path), edited, confirm_code)
+    status = _confirm_and_save(target, edited)
+    if status.startswith(("ONAY GEREKL", "Güvenlik")):
+        return status
     print(f"[Code] ✅ Edited: {file_path}")
     return f"File edited. {status}\n\nPreview:\n{_preview(edited)}"
 
@@ -543,6 +701,14 @@ def _run_action(file_path, args, timeout, player) -> str:
 
 def _optimize_action(file_path, code, language, output_path, player, confirm_code: str = "") -> str:
 
+    if file_path:
+        try:
+            check_write_target(Path(file_path))
+        except UnsafeWriteTarget as e:
+            return str(e)
+        if confirm_code:
+            return _apply_confirmed_edit(Path(file_path), confirm_code)
+
     if file_path and not code:
         code, err = _read_file(file_path)
         if err:
@@ -577,11 +743,13 @@ Optimized code:"""
         return f"Could not optimize code: {e}"
 
     # Kaydet. Mevcut bir dosyanin (file_path) uzerine yazmak ACIK kullanici
-    # onayi gerektirir (F-01); yeni bir dosya (output_path) ev dizini disina
-    # cikamaz (resolve_write_target).
+    # onayi gerektirir; iki dal da ayni yazma politikasindan gecer
+    # (check_write_target / resolve_write_target).
     if file_path:
         save_path = Path(file_path)
-        status = _confirm_and_save(save_path, optimized, confirm_code)
+        status = _confirm_and_save(save_path, optimized)
+        if status.startswith(("ONAY GEREKL", "Güvenlik")):
+            return status
     else:
         try:
             save_path = resolve_write_target(output_path, lang)
@@ -720,7 +888,7 @@ def code_helper(
     output_path = p.get("output_path", "").strip()
     file_path   = p.get("file_path", "").strip()
     code        = p.get("code", "").strip()
-    args        = p.get("args", [])
+    args        = _cli_args(p.get("args"))
     timeout     = int(p.get("timeout", 30))
     confirm_code = str(p.get("confirm_code", "")).strip()
 
