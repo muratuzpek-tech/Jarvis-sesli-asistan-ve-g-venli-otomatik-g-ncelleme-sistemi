@@ -17,7 +17,6 @@ Kullananlar (bu arayüz KORUNDU, imzalar değişmedi):
 from __future__ import annotations
 
 import ast
-import functools
 import importlib.util
 import sys
 from pathlib import Path
@@ -40,19 +39,19 @@ TOOLS_KOPRU_PATH = BASE_DIR / "actions" / "tools_kopru.py"
 # aittir - burası SADECE Gemini'ye gösterilecek kısa bir etiket):
 #   - her zaman onay isteyen araçlar (send_message, discovery_register,
 #     entegrasyon_uygula - bkz. tools_kopru.is_destructive())
-_ALWAYS_HIGH_RISK = frozenset({"send_message", "discovery_register", "entegrasyon_uygula"})
+_ALWAYS_HIGH_RISK = {"send_message", "discovery_register", "entegrasyon_uygula"}
 #   - riski action/parametreye göre değişen araçlar (file_controller,
 #     computer_settings - bkz. file_controller.READONLY_ACTIONS ve
 #     tools_kopru._DESTRUCTIVE_SETTINGS_ACTIONS)
 #     + salt-okunur olsa da sistem/ağ bilgisi ifşa eden windows_system
 #     (bkz. windows_shell.py ekleme planı - bilinçli olarak "conditional").
-_CONDITIONAL_RISK = frozenset({"file_controller", "computer_settings", "windows_system"})
+_CONDITIONAL_RISK = {"file_controller", "computer_settings", "windows_system"}
 
 # discovered_*.py dosyalarında sık görülen ama standart kütüphanede OLMAYAN
 # paket adları - guess_missing_deps() yanlış-pozitif üretmemek için SADECE
 # bu bilinen üçüncü-parti adlarını kontrol eder, tanımadığı bir importu
 # hiç raporlamaz.
-_KNOWN_THIRD_PARTY_IMPORTS = frozenset({
+_KNOWN_THIRD_PARTY_IMPORTS = {
     "requests", "psutil", "PySide6", "PyQt6", "numpy", "pandas",
     "bs4", "yaml", "PIL", "cv2", "sounddevice", "pyaudio",
     # discovered_*.py taramasinda GERCEKTEN karsilasilan, ortamda kurulu
@@ -61,13 +60,13 @@ _KNOWN_THIRD_PARTY_IMPORTS = frozenset({
     # BILEREK eklenmedi - AWS Secrets Manager'a bagli, bu proje kapsami
     # disinda, "eksik bagimlilik" olarak DOGRU raporlanmasi gerekiyor).
     "jc", "boto3",
-})
+}
 
 
 def _read_source(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except OSError:
         return ""
 
 
@@ -102,7 +101,7 @@ def _extract_literal(source: str, literal_name: str) -> Any:
         return None
     try:
         return ast.literal_eval(node)
-    except (ValueError, TypeError, MemoryError, RecursionError):
+    except (ValueError, TypeError):
         return None
 
 
@@ -126,14 +125,14 @@ def _extract_dict_keys(source: str, dict_name: str) -> list[str]:
             continue
         try:
             key = ast.literal_eval(key_node)
-        except (ValueError, TypeError, MemoryError, RecursionError):
+        except (ValueError, TypeError):
             continue
         if isinstance(key, str):
             keys.append(key)
     return keys
 
 
-def _risk_for_tool(name: str, allowed_keys: frozenset[str] | set[str] | list[str]) -> str:
+def _risk_for_tool(name: str, allowed_keys: list[str]) -> str:
     if name in _ALWAYS_HIGH_RISK:
         return "high"
     if name in _CONDITIONAL_RISK:
@@ -146,14 +145,13 @@ def _risk_for_tool(name: str, allowed_keys: frozenset[str] | set[str] | list[str
     return "unknown"
 
 
-@functools.lru_cache(maxsize=128)
 def _third_party_available(module_name: str) -> bool:
     """Bir üçüncü parti paketin şu an kurulu (import edilebilir) olup
     olmadığını, GERÇEKTEN import ETMEDEN kontrol eder (find_spec yan
     etkisiz bir arama yapar, modülün kendisini çalıştırmaz)."""
     try:
         return importlib.util.find_spec(module_name) is not None
-    except (ImportError, ValueError, AttributeError):
+    except (ImportError, ValueError):
         return False
 
 
@@ -170,18 +168,16 @@ def guess_missing_deps(mod_path: Path) -> list[str]:
     except SyntaxError:
         return []
     missing: list[str] = []
-    seen: set[str] = set()
     for node in ast.walk(tree):
         names: list[str] = []
         if isinstance(node, ast.Import):
-            names = [alias.name.split(".", 1)[0] for alias in node.names]
+            names = [alias.name.split(".")[0] for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
             if node.module and node.level == 0:
-                names = [node.module.split(".", 1)[0]]
+                names = [node.module.split(".")[0]]
         for name in names:
-            if name in _KNOWN_THIRD_PARTY_IMPORTS and name not in seen:
-                seen.add(name)
-                if not _third_party_available(name):
+            if name in _KNOWN_THIRD_PARTY_IMPORTS and not _third_party_available(name):
+                if name not in missing:
                     missing.append(name)
     return missing
 
@@ -211,13 +207,12 @@ def get_capabilities() -> list[dict[str, Any]]:
             }
 
     tk_source = _read_source(TOOLS_KOPRU_PATH)
-    allowed_keys_list = _extract_dict_keys(tk_source, "ALLOWED_TOOLS")
-    allowed_keys_set = set(allowed_keys_list)
+    allowed_keys = _extract_dict_keys(tk_source, "ALLOWED_TOOLS")
     descriptions = _extract_literal(tk_source, "TOOL_DESCRIPTIONS")
     if not isinstance(descriptions, dict):
         descriptions = {}
 
-    for name in allowed_keys_list:
+    for name in allowed_keys:
         if name in capabilities:
             capabilities[name]["source"] = "main.py+tools_kopru.py"
             if not capabilities[name]["description"]:
@@ -233,14 +228,14 @@ def get_capabilities() -> list[dict[str, Any]]:
             }
 
     for name, entry in capabilities.items():
-        entry["risk"] = _risk_for_tool(name, allowed_keys_set)
+        entry["risk"] = _risk_for_tool(name, allowed_keys)
 
     actions_dir = BASE_DIR / "actions"
     for name, entry in capabilities.items():
         if not name.startswith("discovered_"):
             continue
         mod_path = actions_dir / f"{name}.py"
-        if not mod_path.is_file():
+        if not mod_path.exists():
             entry["available"] = False
             entry["missing_deps"] = [f"<dosya bulunamadi: actions/{name}.py>"]
             continue
@@ -266,9 +261,8 @@ def get_capability_summary(max_chars: int = 12000) -> str:
     last_newline = truncated.rfind("\n")
     if last_newline > 0:
         truncated = truncated[:last_newline]
-    shown_count = truncated.count("\n") + 1 if truncated else 0
-    remaining = max(len(caps) - shown_count, 0)
-    return truncated + f"\n... (+{remaining} yetenek daha, yer sinirindan kesildi)"
+    remaining = len(caps) - truncated.count("\n") - 1
+    return truncated + f"\n... (+{max(remaining, 0)} yetenek daha, yer sinirindan kesildi)"
 
 
 if __name__ == "__main__":

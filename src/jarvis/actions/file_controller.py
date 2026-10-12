@@ -115,42 +115,6 @@ def _is_safe_path(target: Path) -> bool:
     except Exception:
         return False
 
-# Yazma/silme yalnızca kullanıcı içerik klasörlerinde yapılabilir.
-def _write_roots() -> list[Path]:
-    roots = [_get_desktop(), _get_documents(), _get_downloads(),
-             _get_pictures(), _get_music(), _get_videos(),
-             # English Desktop remains a supported explicit target even when
-             # Linux user-dirs redirects the visible desktop elsewhere.
-             Path.home() / "Desktop", Path.home() / "jarvis_programs"]
-    return [r.resolve() for r in roots]
-
-
-def _is_safe_write_path(target: Path) -> bool:
-    try:
-        if target.name in ("", ".", ".."):
-            return False
-        entry = target.parent.resolve() / target.name
-        for root in _write_roots():
-            try:
-                relative = entry.relative_to(root)
-            except ValueError:
-                continue
-            return not any(part.startswith(".") for part in relative.parts)
-        return False
-    except (OSError, RuntimeError, ValueError):
-        return False
-
-
-def _is_safe_write_file(target: Path) -> bool:
-    return _is_safe_write_path(target) and not target.is_symlink()
-
-
-def _open_for_write(target: Path, append: bool = False):
-    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    flags |= os.O_APPEND if append else os.O_TRUNC
-    fd = os.open(target, flags, 0o644)
-    return os.fdopen(fd, "a" if append else "w", encoding="utf-8")
-
 # Linux'ta "İndirilenler", "Masaüstü" gibi YERELLEŞTİRİLMİŞ klasör adları
 # ~/.config/user-dirs.dirs dosyasında durur; XDG_*_DIR ortam değişkenleri
 # normalde TANIMLI DEĞİLDİR. Murat@goxs 2026-09-29: "İndirilenler klasörümde
@@ -171,29 +135,44 @@ _LOCAL_NAMES = {
 }
 
 
+def _valid_xdg_candidate(candidate: Path, home: Path, raw: str = "") -> Path | None:
+    """Return a real, non-sensitive XDG directory or None (fail closed)."""
+    try:
+        p = candidate.expanduser().resolve()
+        h = home.resolve()
+        if not p.is_dir() or p == h or p == Path("/"):
+            return None
+        # Do not allow traversal or configuration/persistence directories as a
+        # known user folder, even when the resulting path happens to exist.
+        if ".." in Path(raw.replace("\\", "/")).parts:
+            return None
+        if any(part.startswith(".") for part in p.parts if part not in (".", "..")):
+            return None
+        if p == h.parent:
+            return None
+        return p
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def _xdg_user_dir(key: str, home: "Path | None" = None) -> "Path | None":
     home = home or Path.home()
     var = _XDG_KEYS[key]
     env = os.environ.get(var, "")
-    if env and Path(env).is_dir():
-        return Path(env)
+    if env:
+        found = _valid_xdg_candidate(Path(env), home, env)
+        if found is not None:
+            return found
     cfg = Path(os.environ.get("XDG_CONFIG_HOME", "") or home / ".config") / "user-dirs.dirs"
     try:
         for line in cfg.read_text(encoding="utf-8").splitlines():
-            m = re.match(rf'\s*{var}\s*=\s*"([^"]*)"', line)
+            m = re.match(rf'\s*{var}\s*=\s*"([^"]*)"', line.split("#", 1)[0])
             if m:
-                value = m.group(1).replace("${HOME}", str(home)).replace("$HOME", str(home))
-                p = Path(value).expanduser()
-                try:
-                    resolved = p.resolve()
-                    home_resolved = home.resolve()
-                    if (resolved == home_resolved or home_resolved.is_relative_to(resolved)
-                            or any(part.startswith(".") for part in resolved.parts)):
-                        continue
-                except (OSError, RuntimeError, ValueError):
-                    continue
-                if p.is_dir():
-                    return p
+                raw = m.group(1)
+                value = raw.replace("${HOME}", str(home)).replace("$HOME", str(home))
+                found = _valid_xdg_candidate(Path(value), home, raw)
+                if found is not None:
+                    return found
     except OSError:
         pass
     return None
@@ -241,6 +220,49 @@ def _get_videos() -> Path:
     return _user_folder("videos")
 
 
+def _write_roots() -> tuple[Path, ...]:
+    """Known user-content roots permitted for file mutations."""
+    roots: list[Path] = []
+    for key in ("desktop", "downloads", "documents", "pictures", "music", "videos"):
+        try:
+            root = _user_folder(key).resolve()
+            if root.is_dir() and root not in roots:
+                roots.append(root)
+        except (OSError, RuntimeError):
+            continue
+    # Backward-compatible English Desktop: Windows/Linux users may have both
+    # Desktop and a localized XDG desktop; only this English root is allowed.
+    english_desktop = (Path.home() / "Desktop").resolve()
+    if english_desktop.is_dir() and english_desktop not in roots:
+        roots.append(english_desktop)
+    return tuple(roots)
+
+
+def _is_safe_write_path(target: Path) -> bool:
+    """Allow only non-hidden descendants of real known user-content roots."""
+    try:
+        original = Path(target).expanduser()
+        resolved = original.resolve()
+        if original.exists() and original.is_symlink():
+            return False
+        for root in _write_roots():
+            if resolved == root:
+                return False
+            if resolved.is_relative_to(root):
+                rel = resolved.relative_to(root)
+                if any(part.startswith(".") for part in rel.parts):
+                    return False
+                return True
+        return False
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _is_safe_write_file(target: Path) -> bool:
+    """Compatibility API used by code_helper; same fail-closed policy."""
+    return _is_safe_write_path(target)
+
+
 _SHORTCUT_DIRS: tuple[str, ...] = (
     "desktop", "downloads", "documents", "pictures", "music", "videos", "home",
 )
@@ -276,13 +298,6 @@ def _normalize_path_name(path: str, name: str) -> tuple[str, str]:
     kisayolsa, path'i kisayol + kalan kismi isim olarak boluyoruz."""
     if name:
         return path, name
-
-    # Mutlak dosya yolu geldiyse klasör ve dosya adını ayır.
-    raw_path = Path(str(path).strip()).expanduser()
-    if (raw_path.is_absolute() and raw_path.name not in {"", ".", ".."}
-            and not raw_path.is_dir()):
-        return str(raw_path.parent), raw_path.name
-
     raw = path.strip()
     for sep in ("/", "\\"):
         if sep in raw:
@@ -625,7 +640,7 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
             return "Could not create file: dosya adı belirtilmedi (isim boş olduğu için işlem güvenlik amacıyla durduruldu, hedef klasörün kendisine dokunulmadı)."
         base   = _resolve_path(path)
         target = base / name
-        if not _is_safe_write_file(target):
+        if not _is_safe_write_path(target):
             return f"Access denied: {target}"
 
         def _do_write():
@@ -662,7 +677,7 @@ def create_folder(path: str, name: str = "") -> str:
             return "Could not create folder: klasör adı belirtilmedi (isim boş olduğu için işlem güvenlik amacıyla durduruldu, mevcut klasöre dokunulmadı)."
         base   = _resolve_path(path)
         target = base / name
-        if not _is_safe_write_file(target):
+        if not _is_safe_write_path(target):
             return f"Access denied: {target}"
 
         _with_lock_retry(lambda: target.mkdir(parents=True, exist_ok=True), target)
@@ -686,7 +701,7 @@ def delete_file(path: str, name: str = "") -> str:
                 return ambiguous
         else:
             target = base
-        if not _is_safe_path(target):
+        if not _is_safe_write_path(target):
             return f"Access denied: {target}"
         if not target.exists():
             return f"Not found: {target.name}"
@@ -717,7 +732,7 @@ def delete_all_files(path: str = "downloads", confirm_code: str = "") -> str:
     """
     try:
         base = _resolve_path(path)
-        if not _is_safe_path(base):
+        if not _is_safe_write_path(base):
             return f"Access denied: {base}"
         if not base.is_dir():
             return f"Not a directory: {base}"
@@ -767,9 +782,9 @@ def move_file(path: str, name: str = "", destination: str = "", confirm_code: st
             return f"Source not found: {src.name}"
         if dst is None:
             return "No destination specified."
-        if not _is_safe_path(src):
+        if not _is_safe_write_path(src):
             return f"Access denied (source): {src}"
-        if not _is_safe_path(dst):
+        if not _is_safe_write_path(dst):
             return f"Access denied (destination): {dst}"
 
         if dst.is_dir():
@@ -818,9 +833,9 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
             return f"Source not found: {src.name}"
         if dst is None:
             return "No destination specified."
-        if not _is_safe_path(src):
+        if not _is_safe_write_path(src):
             return f"Access denied (source): {src}"
-        if not _is_safe_path(dst):
+        if not _is_safe_write_path(dst):
             return f"Access denied (destination): {dst}"
 
         if dst.is_dir():
@@ -924,7 +939,7 @@ def write_file(path: str, name: str = "", content: str = "",
             return "Could not write file: dosya adı belirtilmedi (isim boş olduğu için işlem güvenlik amacıyla durduruldu, hedef klasörün kendisine yazılmadı)."
         base   = _resolve_path(path)
         target = base / name
-        if not _is_safe_write_file(target):
+        if not _is_safe_write_path(target):
             return f"Access denied: {target}"
 
         def _do_write():
@@ -964,7 +979,7 @@ def find_replace_in_file(path: str, name: str = "", old_text: str = "", new_text
             return "Could not edit file: değiştirilecek metin (old_text) boş olamaz."
         base = _resolve_path(path)
         target = base / name
-        if not _is_safe_write_file(target):
+        if not _is_safe_write_path(target):
             return f"Access denied: {target}"
         if not target.is_file():
             return f"File not found: {target.name}"
@@ -1334,6 +1349,25 @@ def get_file_info(path: str, name: str = "") -> str:
     except Exception as e:
         return f"Could not get file info: {e}"
 
+_ACTION_ALIASES = {
+    "sil": "delete", "sil_file": "delete", "delete_file": "delete",
+    "remove": "delete", "trash": "delete", "delete_all": "delete_all_files",
+    "bulk_delete": "delete_all_files", "tümünü sil": "delete_all_files",
+    "tumunu sil": "delete_all_files", "oluştur": "create_file", "olustur": "create_file",
+    "get_info": "info", "list_files": "list", "read_file": "read",
+    "search": "find", "du": "disk_usage",
+}
+_READONLY_ACTIONS = frozenset({"list", "read", "find", "info", "stats", "disk_usage", "largest", "current_wallpaper"})
+
+def normalize_action(action: str | None) -> str:
+    """Normalize file-controller aliases without changing the operation class."""
+    value = str(action or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return _ACTION_ALIASES.get(value, value)
+
+def is_readonly_action(action: str | None) -> bool:
+    """Return True only for file-controller operations that do not mutate files."""
+    return normalize_action(action) in _READONLY_ACTIONS
+
 def file_controller(
     parameters: dict = None,
     response=None,
@@ -1346,20 +1380,7 @@ def file_controller(
     # gönderebiliyor. Güvenli silme yolu yine yalnızca delete_file üzerinden
     # geçtiği için bu aliaslar davranışı genişletmez; sadece doğru dispatcher
     # dalına ulaşmayı sağlar.
-    action = {
-        "sil": "delete",
-        "sil_file": "delete",
-        "delete_file": "delete",
-        "remove": "delete",
-        "trash": "delete",
-        "delete_all": "delete_all_files",
-        "delete_all_files": "delete_all_files",
-        "bulk_delete": "delete_all_files",
-        "tümünü sil": "delete_all_files",
-        "tumunu sil": "delete_all_files",
-        "oluştur": "create_file",
-        "olustur": "create_file",
-    }.get(action, action)
+    action = normalize_action(action)
     path   = params.get("path", "desktop")
     name   = _normalize_file_name(params.get("name", ""))
     path, name = _normalize_path_name(path, name)
