@@ -77,6 +77,7 @@ from jarvis.actions.discovered_jc import run as discovered_jc_run
 from jarvis.actions.intent_router import match_system_read, match_file_analysis, match_file_modification
 from jarvis.core.secure_config import api_keys_path
 from jarvis.paths import asset
+from jarvis.core.update_manager import start_background_update_check
 
 
 # --- GitHub-uzerinden-kendini-gelistir icin DETERMINISTIK kisa devre ------
@@ -3061,6 +3062,7 @@ def main():
     # ile kullanÄ±cÄ± kendi gÃ¶rselini verebiliyor.
     face = os.environ.get("JARVIS_FACE", "").strip() or str(asset("jarvis_icon.png"))
     ui = JarvisUI(face)
+    start_background_update_check(ui.write_log, ui.request_update_approval)
 
     def runner():
         ui.wait_for_api_key()
@@ -3075,4 +3077,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

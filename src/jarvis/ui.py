@@ -30,7 +30,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
+    QMessageBox, QMainWindow, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
     QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -1985,6 +1985,7 @@ class LanScanWorker(QThread):
 
 class MainWindow(QMainWindow):
     _log_sig     = pyqtSignal(str)
+    _update_approval_sig = pyqtSignal(object)
     _state_sig   = pyqtSignal(str)
     _voice_state_sig = pyqtSignal(str, str)
     _voice_transcript_sig = pyqtSignal(str)
@@ -2120,6 +2121,7 @@ class MainWindow(QMainWindow):
         self._refresh_task_center()
 
         self._log_sig.connect(self._on_log)
+        self._update_approval_sig.connect(self._show_update_approval)
         self._state_sig.connect(self._apply_state)
         self._voice_state_sig.connect(self._apply_voice_state)
         self._voice_transcript_sig.connect(self._apply_voice_transcript)
@@ -3973,6 +3975,36 @@ class MainWindow(QMainWindow):
 
         return w
 
+    def _show_update_approval(self, payload):
+        offer, waiter, decision = payload
+        try:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setWindowTitle("JARVIS güncelleme onayı")
+            box.setText(f"İmzalı {offer.version} güncellemesi staging alanında hazır.")
+            notes = offer.release_notes or "Sürüm notu yok."
+            box.setInformativeText(
+                f"Tür: {offer.artifact_type}\n"
+                f"Dosya: {offer.filename}\n"
+                f"Boyut: {offer.size_bytes:,} bayt\n"
+                f"SHA-256: {offer.sha256}\n"
+                f"Staging: {offer.staged_path}\n\n"
+                f"{notes}\n\n"
+                "Onay yalnızca kullanıcı kararını kaydeder. Bu bileşen güncellemeyi kurmaz, "
+                "patch uygulamaz ve uygulama dosyalarını değiştirmez."
+            )
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            box.button(QMessageBox.StandardButton.Yes).setText("Onayla")
+            box.button(QMessageBox.StandardButton.No).setText("Daha sonra")
+            box.setDefaultButton(QMessageBox.StandardButton.No)
+            decision["approved"] = box.exec() == QMessageBox.StandardButton.Yes
+        except Exception:
+            decision["approved"] = False
+        finally:
+            waiter.set()
+
     def _on_log(self, text: str):
         self._log.append_log(text)
         # Task flow is driven only by the persisted task records in
@@ -4385,6 +4417,15 @@ class JarvisUI:
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)
+
+    def request_update_approval(self, offer) -> bool:
+        """Ask on the Qt thread; timeout/closed UI means defer, never approve."""
+        waiter = threading.Event()
+        decision = {"approved": False}
+        self._win._update_approval_sig.emit((offer, waiter, decision))
+        if not waiter.wait(timeout=300):
+            return False
+        return bool(decision.get("approved", False))
 
     def set_mic_device(self, name: str):
         """Thread-safe: sol panelde aktif mikrofon adini gunceller."""
