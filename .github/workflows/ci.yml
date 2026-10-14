@@ -28,6 +28,7 @@ jobs:
       - run: python -m compileall -q src/jarvis
       - env:
           QT_QPA_PLATFORM: offscreen
+          JARVIS_SANDBOX: off
         run: pytest
 
   audit:

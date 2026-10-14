@@ -132,7 +132,8 @@ def _tail_lines(text: str, n: int) -> str:
 
 
 def _task_id(text: str) -> str:
-    return hashlib.sha1(" ".join(text.split()).encode("utf-8")).hexdigest()[:10]
+    # This is an identifier, not a signature; use SHA256 to avoid collision-prone SHA1.
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()[:10]
 
 
 def _fmt_secs(sec: float) -> str:
