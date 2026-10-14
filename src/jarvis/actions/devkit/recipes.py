@@ -88,7 +88,7 @@ def fetch(url: str) -> BeautifulSoup:
 def parse_price(text: str) -> float:
     """'£51.77', 'Â£51.77', '1.299,90 TL' → sayı. ONDALIK NOKTASINI KORU:
     ''.join(filter(str.isdigit, ...)) '51.77'yi 5177 yapar — KULLANMA."""
-    m = re.search(r"\d+(?:[.,]\d+)*", text)
+    m = re.search(r"\\d+(?:[.,]\\d+)*", text)
     if not m:
         raise ValueError(f"fiyat yok: {text!r}")
     num = m.group(0)

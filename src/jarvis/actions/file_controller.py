@@ -49,7 +49,7 @@ _FOLDERID_GUIDS: dict[str, str] = {
 }
 
 
-def _known_folder_path(key: str) -> "Path | None":
+def _known_folder_path(key: str, home: "Path | None" = None) -> "Path | None":
     """Windows Shell API ile GERCEK bilinen klasor yolunu doner (OneDrive
     yonlendirmesi dahil). Windows disinda, API yoksa veya sonuc gecersizse
     None doner - cagiran taraf eski davranisa (Path.home()/<isim>) duser."""
@@ -93,7 +93,15 @@ def _known_folder_path(key: str) -> "Path | None":
         except Exception:
             pass
         p = Path(path_str)
-        return p if p.is_dir() else None
+        if not p.is_dir():
+            return None
+        # Test and embedded environments may replace HOME/USERPROFILE while
+        # the Windows Shell API still reports the real user's folders. Never
+        # let that OS-level path escape the effective home used by Jarvis.
+        effective_home = (home or Path.home()).resolve()
+        if not p.resolve().is_relative_to(effective_home):
+            return None
+        return p
     except Exception:
         return None
 
@@ -185,7 +193,7 @@ def _user_folder(key: str, home: "Path | None" = None) -> Path:
         if p:
             return p
     else:
-        kf = _known_folder_path(key)
+        kf = _known_folder_path(key, home)
         if kf:
             return kf
     english = home / _ENGLISH_NAMES[key]
