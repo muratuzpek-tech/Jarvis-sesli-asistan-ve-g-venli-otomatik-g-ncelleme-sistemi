@@ -39,6 +39,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:
     import fcntl
@@ -281,8 +282,13 @@ def ollama_reachable() -> bool:
     base = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
     if not base.startswith("http"):
         base = f"http://{base}"
+    parsed = urlparse(base)
+    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return False
     try:
-        with urllib.request.urlopen(f"{base}/api/tags", timeout=3) as resp:  # noqa: S310 - yerel Ollama
+        with urllib.request.urlopen(  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- validated loopback Ollama endpoint
+            f"{base}/api/tags", timeout=3
+        ) as resp:
             return resp.status == 200
     except Exception:
         return False
