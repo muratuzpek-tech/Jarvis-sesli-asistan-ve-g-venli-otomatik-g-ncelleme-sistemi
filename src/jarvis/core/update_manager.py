@@ -48,7 +48,7 @@ _SIGNED_FIELDS = (
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_last_check = 0.0
+_last_check: float | None = None
 _check_lock = threading.Lock()
 
 
@@ -339,7 +339,7 @@ def check_and_stage_update(*, force: bool = False) -> UpdateCheckResult:
 
     with _check_lock:
         now = time.monotonic()
-        if not force and now - _last_check < 6 * 60 * 60:
+        if not force and _last_check is not None and now - _last_check < 6 * 60 * 60:
             return UpdateCheckResult("recent-check", "Güncelleme denetimi bu oturumda yakın zamanda yapıldı.")
         _last_check = now
 

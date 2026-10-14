@@ -64,7 +64,7 @@ def _signed_manifest(artifact: bytes = ARTIFACT):
 
 
 def _setup(monkeypatch, tmp_path: Path, artifact: bytes = ARTIFACT):
-    monkeypatch.setattr(updates, "_last_check", 0.0)
+    monkeypatch.setattr(updates, "_last_check", None)
     public_key, manifest = _signed_manifest(artifact)
     monkeypatch.setenv(updates.MANIFEST_ENV, MANIFEST_URL)
     monkeypatch.setenv(updates.ORIGIN_ENV, ORIGIN)
@@ -224,6 +224,8 @@ def test_missing_trust_configuration_does_not_make_a_network_request(monkeypatch
 
 def test_background_startup_records_only_explicit_user_decision(monkeypatch, tmp_path):
     _setup(monkeypatch, tmp_path)
+    # Windows may have less than six hours of monotonic uptime at first launch.
+    monkeypatch.setattr(updates.time, "monotonic", lambda: 1.0)
     real_thread = updates.threading.Thread
 
     class ImmediateThread:
