@@ -12,9 +12,6 @@ import platform
 import shutil
 import subprocess
 import time
-import base64
-import hashlib
-import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -33,8 +30,6 @@ MAX_FILE_READ_BYTES = MAX_OUTPUT * 4
 # Autonomous repair is deliberately limited to this module. It is not permission
 # to edit arbitrary files in the user's home directory.
 SELF_REPAIR_TARGET = Path(__file__).resolve()
-UPDATE_MAX_BYTES = 2 * 1024 * 1024
-_last_update_check = 0.0
 
 
 def _safe_path(raw: str) -> Path:
@@ -89,71 +84,17 @@ def _atomic_self_repair(path: Path, content: str) -> Path:
     return backup
 
 
-def _download_update(url: str, expected_origin: str, limit: int = UPDATE_MAX_BYTES) -> bytes:
-    parsed = urllib.parse.urlsplit(url)
-    origin = f"{parsed.scheme}://{parsed.netloc}".lower()
-    if parsed.scheme != "https" or origin != expected_origin.lower():
-        raise ValueError("Güncelleme yalnızca yapılandırılmış HTTPS kaynağından alınabilir.")
-    import requests
-    response = requests.get(
-        url, headers={"User-Agent": "Jarvis-Signed-Updater/1.0"},
-        timeout=15, allow_redirects=False, stream=True,
-    )
-    response.raise_for_status()
-    size = response.headers.get("Content-Length")
-    if size and int(size) > limit:
-        raise ValueError("Güncelleme boyut sınırını aşıyor.")
-    content = bytearray()
-    with response:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            content.extend(chunk)
-            if len(content) > limit:
-                raise ValueError("Güncelleme boyut sınırını aşıyor.")
-    return bytes(content)
-
-
 def _check_signed_self_update(force: bool = False) -> str:
-    """Install a signed replacement for this module when update settings exist.
+    """Legacy entry point; verify and stage only, never replace agent.py."""
+    from jarvis.core.update_manager import check_and_stage_update
 
-    Required environment variables: JARVIS_UPDATE_MANIFEST_URL,
-    JARVIS_UPDATE_ORIGIN and JARVIS_UPDATE_PUBLIC_KEY_B64 (Ed25519 public key).
-    """
-    global _last_update_check
-    if not force and time.monotonic() - _last_update_check < 6 * 60 * 60:
-        return "Güncelleme denetimi henüz gerekli değil."
-    _last_update_check = time.monotonic()
-    manifest_url = os.getenv("JARVIS_UPDATE_MANIFEST_URL", "")
-    origin = os.getenv("JARVIS_UPDATE_ORIGIN", "")
-    public_key = os.getenv("JARVIS_UPDATE_PUBLIC_KEY_B64", "")
-    if not (manifest_url and origin and public_key):
-        return "Otomatik güncelleme yapılandırılmamış."
-    try:
-        manifest = json.loads(_download_update(manifest_url, origin, 128 * 1024).decode("utf-8"))
-        required = ("version", "source_url", "sha256", "signature")
-        if not isinstance(manifest, dict) or any(not isinstance(manifest.get(key), str) for key in required):
-            raise ValueError("Güncelleme bildirimi eksik veya geçersiz.")
-        canonical = json.dumps(
-            {key: manifest[key] for key in ("version", "source_url", "sha256")},
-            ensure_ascii=False, separators=(",", ":"), sort_keys=True,
-        ).encode("utf-8")
-        try:
-            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-            key = base64.b64decode(public_key, validate=True)
-            signature = base64.b64decode(manifest["signature"], validate=True)
-            Ed25519PublicKey.from_public_bytes(key).verify(signature, canonical)
-        except ImportError as exc:
-            raise ValueError("İmzalı güncelleme için 'cryptography' paketi gerekli.") from exc
-        except Exception as exc:
-            raise ValueError("Güncelleme bildiriminin imzası doğrulanamadı.") from exc
-        source = _download_update(manifest["source_url"], origin)
-        if hashlib.sha256(source).hexdigest().lower() != manifest["sha256"].lower():
-            raise ValueError("İndirilen güncellemenin SHA-256 özeti uyuşmuyor.")
-        code = source.decode("utf-8")
-        compile(code, str(SELF_REPAIR_TARGET), "exec")
-        backup = _atomic_self_repair(SELF_REPAIR_TARGET, code)
-        return f"Sürüm {manifest['version']} kuruldu. Yedek: {backup}. Yeniden başlatma gerekli."
-    except Exception as exc:
-        return f"Otomatik güncelleme uygulanmadı: {exc}"
+    result = check_and_stage_update(force=force)
+    if result.offer is not None:
+        return (
+            f"Sürüm {result.offer.version} staging alanında hazır; "
+            "kullanıcı onayı olmadan hiçbir dosya değiştirilmez."
+        )
+    return result.message
 
 
 def _system_status(_: dict) -> dict:
