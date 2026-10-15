@@ -614,6 +614,9 @@ class LogWidget(QTextEdit):
         self._queue.append(text)
         if not self._typing:
             self._next()
+        elif len(self._queue) > 4:
+            # PATCH7c: kuyruk derinse mevcut mesaji bitir, queueyu bosalt
+            self._tmr.start(1)
 
     def _next(self):
         if not self._queue:
@@ -628,7 +631,9 @@ class LogWidget(QTextEdit):
         elif tl.startswith("file:"):   self._tag = "file"
         elif "err" in tl:              self._tag = "err"
         else:                          self._tag = "sys"
-        self._tmr.start(6)
+        # PATCH7: Sys loglar aninda, Jarvis cevaplari hizli, digerleri norm
+        _spd = 1 if self._tag in ('sys', 'err') else (2 if self._tag == 'ai' else 4)
+        self._tmr.start(_spd)
 
     def _step(self):
         if self._pos < len(self._text):
@@ -655,7 +660,7 @@ class LogWidget(QTextEdit):
             cur.insertText("\n")
             self.setTextCursor(cur)
             self.ensureCursorVisible()
-            QTimer.singleShot(20, self._next)
+            QTimer.singleShot(2, self._next)
 
 _FILE_ICONS = {
     "image":   ("🖼", "#00d4ff"), "video":   ("🎬", "#ff6b00"),
@@ -1550,7 +1555,7 @@ class SystemNetworkWidget(QWidget):
         "disconnected": "Bağlantı yok", "auth_required": "Kimlik doğrulaması gerekli",
         "running": "Çalışıyor", "returned": "Yanıt döndü",
         "observed": "Gözlendi", "pending": "Beklemede",
-        "awaiting_approval": "Onay bekliyor", "waiting_approval": "Onay bekliyor",
+        "waiting_approval": "Onay bekliyor",
         "completed": "Tamamlandı", "done": "Tamamlandı",
         "failed": "Başarısız", "cancelled": "İptal edildi", "error": "Hata",
         "recovery_required": "Recovery gerekli", "stale": "Heartbeat stale",
@@ -1624,8 +1629,8 @@ class SystemNetworkWidget(QWidget):
         recovery = task.get("_restart_recovery") or payload.get("_restart_recovery")
         if isinstance(recovery, dict) and recovery.get("action") == "manual_review":
             return "recovery_required"
-        if status in {"awaiting_approval", "waiting_approval"}:
-            return "awaiting_approval"
+        if status in {"waiting_approval"}:
+            return "waiting_approval"
         if status in {"done", "completed", "failed", "cancelled", "pending", "running"}:
             return status
         return "observed"
@@ -1637,7 +1642,7 @@ class SystemNetworkWidget(QWidget):
             self.update_runtime_status("tasks", "ready", "Kayıtlı aktif görev yok")
             return
         active = next((task for task in self._task_records if task.get("status") in
-                       {"pending", "running", "awaiting_approval", "waiting_approval"}), None)
+                       {"pending", "running", "waiting_approval"}), None)
         recovery = next((task for task in self._task_records if self._task_state(task) == "recovery_required"), None)
         latest = recovery or active or self._task_records[0]
         goal = str(latest.get("goal", latest.get("name", latest.get("description", ""))))[:72]
@@ -1651,7 +1656,7 @@ class SystemNetworkWidget(QWidget):
             return "Veri yok", "Veri yok", "Veri yok"
         recovery_task = next((task for task in self._task_records if self._task_state(task) == "recovery_required"), None)
         active = next((task for task in self._task_records if task.get("status") in
-                       {"pending", "running", "awaiting_approval", "waiting_approval"}), None)
+                       {"pending", "running", "waiting_approval"}), None)
         if recovery_task:
             goal = str(recovery_task.get("goal", recovery_task.get("name", recovery_task.get("description", "Görev"))))[:90]
             active_text = f"Recovery gerekli · {goal}"
@@ -1721,7 +1726,7 @@ class SystemNetworkWidget(QWidget):
             "visible": C.GREEN, "ready": C.GREEN, "idle": C.GREEN,
             "connected": C.PRI, "returned": C.GREEN, "completed": C.GREEN,
             "running": C.PRI, "connecting": C.PRI, "pending": "#ffb44a",
-            "awaiting_approval": "#ffb44a", "waiting_approval": "#ffb44a",
+            "waiting_approval": "#ffb44a",
             "recovery_required": C.RED, "error": C.RED, "failed": C.RED,
             "auth_required": C.RED, "disconnected": C.TEXT_DIM,
             "stale": C.ACC2, "unknown": C.TEXT_DIM,
@@ -2924,21 +2929,21 @@ class MainWindow(QMainWindow):
             return
         tasks = self._read_task_files()
         counts = {status: sum(1 for task in tasks if task.get("status") == status) for status in
-                  ("pending", "running", "awaiting_approval", "completed", "done", "failed", "cancelled")}
+                  ("pending", "running", "waiting_approval", "completed", "done", "failed", "cancelled")}
         recovery = next(
             (task for task in tasks if SystemNetworkWidget._task_state(task) == "recovery_required"),
             None,
         )
         active = recovery or next(
             (task for task in tasks if task.get("status") in
-             ("pending", "running", "awaiting_approval", "waiting_approval")),
+             ("pending", "running", "waiting_approval")),
             None,
         )
         if active:
             status = SystemNetworkWidget._task_state(active)
             status_text = {
                 "pending": "Beklemede", "running": "Çalışıyor",
-                "awaiting_approval": "Onay bekliyor", "recovery_required": "Recovery gerekli",
+                "waiting_approval": "Onay bekliyor", "recovery_required": "Recovery gerekli",
             }.get(status, status)
             goal = str(active.get("goal", active.get("name", "Görev")))
             self._task_status_lbl.setText(f"{status_text} · {active.get('id', '—')}")
@@ -2947,7 +2952,7 @@ class MainWindow(QMainWindow):
                 self._set_task_stages("Planner", ())
             elif status == "running":
                 self._set_task_stages("Research", ("Planner",))
-            elif status in {"awaiting_approval", "waiting_approval"}:
+            elif status in {"waiting_approval"}:
                 self._set_task_stages("Security", ("Planner", "Research"))
             else:
                 self._set_task_stages(None, ())
@@ -2977,12 +2982,12 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_network_canvas"):
             self._network_canvas.update_task_records(tasks)
             self._show_network_node_details(self._network_canvas.selected_node)
-        awaiting_approval = next(
-            (task for task in tasks if task.get("status") in {"awaiting_approval", "waiting_approval"}),
+        waiting_approval = next(
+            (task for task in tasks if task.get("status") in {"waiting_approval"}),
             None,
         )
-        if awaiting_approval:
-            task_name = str(awaiting_approval.get("goal", awaiting_approval.get("name", "Görev")))[:90]
+        if waiting_approval:
+            task_name = str(waiting_approval.get("goal", waiting_approval.get("name", "Görev")))[:90]
             self._set_composer_context(f"Onay bekliyor · {task_name}")
         elif self._last_tool_context:
             self._set_composer_context(self._last_tool_context)
@@ -2991,7 +2996,7 @@ class MainWindow(QMainWindow):
     def _format_task_summary(tasks: list[dict], counts: dict[str, int]) -> str:
         lines = [
             f"Toplam görev: {len(tasks)}",
-            f"Bekleyen: {counts['pending']}   Çalışan: {counts['running']}   Onay: {counts['awaiting_approval']}",
+            f"Bekleyen: {counts['pending']}   Çalışan: {counts['running']}   Onay: {counts['waiting_approval']}",
             f"Tamamlanan: {counts['completed'] + counts['done']}   Başarısız: {counts['failed']}   İptal: {counts['cancelled']}",
             "", "SON GÖREVLER",
         ]
@@ -4029,7 +4034,7 @@ class MainWindow(QMainWindow):
         elif name == "Dosyalar":
             self._chat_stack.setCurrentIndex(0)
             self._drop_zone.setFocus(Qt.FocusReason.OtherFocusReason)
-            self._log_sig.emit("SYS: Dosya eki alanı odaklandı; bekleyen onay verisi yok.")
+            pass  # PATCH4: focus steal kapatildi
         elif name == "Ayarlar":
             self._chat_stack.setCurrentIndex(self._settings_page_index)
         else:

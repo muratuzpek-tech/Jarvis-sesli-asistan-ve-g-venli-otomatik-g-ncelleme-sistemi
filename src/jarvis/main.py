@@ -76,6 +76,7 @@ from jarvis.actions.discovered_topydo import run as discovered_topydo_run
 from jarvis.actions.discovered_jc import run as discovered_jc_run
 from jarvis.actions.intent_router import match_system_read, match_file_analysis, match_file_modification
 from jarvis.core.secure_config import api_keys_path
+from jarvis import security_gate as _gate
 from jarvis.paths import asset
 
 
@@ -1153,6 +1154,331 @@ class JarvisLive:
         self._sys_monitor      = SystemMonitor()  # persistent cooldown state
         self._proactive        = ProactiveEngine()
         self._last_user_speech = time.monotonic()  # updated on every user utterance
+        # Canonical approval state.  Brain Team and Agent Loop share the
+        # store, but each request has its own kind/task/fingerprint.
+        self._approvals = _gate.MultiApprovalStore()
+        self._pending_dangerous_action = None
+        self._pending_dangerous_call = None
+        self._brain_pending_task_id = None
+        self._agent_pending_task_id = None
+        self._dangerous_confirmation_granted = False
+
+    # ── Canonical user approval bridge ─────────────────────────────────
+    def _ensure_approval_state(self) -> None:
+        """Initialize approval state for lightweight test/mocked instances."""
+        if not hasattr(self, "_approvals") or self._approvals is None:
+            self._approvals = _gate.MultiApprovalStore()
+        for name, value in (
+            ("_pending_dangerous_action", None),
+            ("_pending_dangerous_call", None),
+            ("_brain_pending_task_id", None),
+            ("_agent_pending_task_id", None),
+            ("_dangerous_confirmation_granted", False),
+        ):
+            if not hasattr(self, name):
+                setattr(self, name, value)
+
+    def _set_pending_dangerous(self, action, fingerprint=None, task_id=None,
+                               call=None, message=None, kind=None):
+        """Compatibility bridge for old callers; storage is MultiApprovalStore."""
+        self._ensure_approval_state()
+        if action is None:
+            self._approvals.cancel()
+            self._pending_dangerous_action = None
+            self._pending_dangerous_call = None
+            self._brain_pending_task_id = None
+            self._agent_pending_task_id = None
+            self._dangerous_confirmation_granted = False
+            return
+        # A legacy caller may reserve another protocol (for example
+        # agentic_code). Do not let a background approval overwrite it.
+        if action not in ("brain_team", "agent_loop"):
+            if self._pending_dangerous_action is None:
+                self._pending_dangerous_action = action
+                self._pending_dangerous_call = call
+            return
+        self._pending_dangerous_action = action
+        self._pending_dangerous_call = call
+        if action == "brain_team":
+            self._brain_pending_task_id = task_id
+        else:
+            self._agent_pending_task_id = task_id
+        self._dangerous_confirmation_granted = False
+
+    @staticmethod
+    def _is_confirmation(text: str) -> bool:
+        normalized = " ".join(str(text or "").casefold().split())
+        return normalized in {
+            "evet", "evet yap", "tamam", "tamam onayla", "onaylıyorum",
+            "onayliyorum", "devam et", "approve", "approve it", "yes do it",
+        } or normalized.startswith(("evet ", "onaylıyorum ", "onayliyorum ", "tamam "))
+
+    @staticmethod
+    def _is_rejection(text: str) -> bool:
+        normalized = " ".join(str(text or "").casefold().split())
+        return normalized in {
+            "hayır", "hayir", "vazgeç", "vazgec", "iptal", "iptal et",
+            "no", "don't", "dont", "cancel", "decline",
+        } or normalized.startswith(("hayır ", "hayir ", "iptal ", "vazgeç ", "vazgec "))
+
+    def _announce_pending_record(self, rec, *, queued: bool = False) -> None:
+        # Do not overwrite an older compatibility protocol (e.g. agentic_code).
+        if (self._pending_dangerous_action not in (None, "brain_team", "agent_loop", "voice")
+                and rec.kind != _gate.KIND_BRAIN_TEAM):
+            return
+        action = {
+            _gate.KIND_BRAIN_TEAM: "brain_team",
+            _gate.KIND_AGENT_LOOP: "agent_loop",
+            _gate.KIND_VOICE: "voice",
+        }.get(rec.kind, rec.kind)
+        self._set_pending_dangerous(action, task_id=rec.task_id,
+                                    call=rec.call, message=rec.message)
+        if rec.message:
+            try:
+                self.ui.write_log(rec.message)
+            except Exception:
+                pass
+            try:
+                self.speak(f"[{'ONAY_SIRADA' if queued else 'ONAY_ISTEGI'}] {rec.message}")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _approval_step_binding(task_id: str, step: dict) -> str:
+        import hashlib
+        import json
+        payload = json.dumps(step or {}, sort_keys=True, ensure_ascii=False, default=str)
+        return f"{task_id}:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+    def request_brain_team_approval(self, task_id: str, step: dict,
+                                    message: str, *, call=None) -> bool:
+        self._ensure_approval_state()
+        if call is None:
+            call = _gate.ResolvedCall.for_pending("brain_team", {
+                "task_id": task_id, "step": step.get("description", ""),
+            })
+        rid = self._approvals.request(
+            call, background=True, task_id=task_id,
+            kind=_gate.KIND_BRAIN_TEAM, message=message,
+            binding=self._approval_step_binding(task_id, step),
+        )
+        rec = self._approvals.get(rid)
+        if rec:
+            self._announce_pending_record(rec)
+        return rec is not None
+
+    def request_agent_loop_approval(self, task_id: str, pending: dict,
+                                    message: str, *, call=None) -> bool:
+        self._ensure_approval_state()
+        params = pending.get("parameters") or {}
+        tool = str(pending.get("tool") or "")
+        if call is None:
+            call = _gate.resolve(tool, params, _gate.Source.AGENT_LOOP)
+        rid = self._approvals.request(
+            call, background=True, task_id=task_id,
+            kind=_gate.KIND_AGENT_LOOP, message=message,
+            binding=f"{task_id}:{call.fingerprint}",
+        )
+        rec = self._approvals.get(rid)
+        if rec:
+            self._announce_pending_record(rec)
+        return rec is not None
+
+    def _clear_voice_pending(self) -> None:
+        self._ensure_approval_state()
+        self._approvals.drop_kind(_gate.KIND_VOICE)
+        if self._pending_dangerous_action == "voice":
+            self._pending_dangerous_action = None
+            self._pending_dangerous_call = None
+            self._dangerous_confirmation_granted = False
+        latest = self._approvals.latest_record()
+        if latest is not None:
+            self._announce_pending_record(latest)
+
+    def _clear_pending_record(self, rec) -> None:
+        if rec.kind == _gate.KIND_BRAIN_TEAM:
+            if self._brain_pending_task_id == rec.task_id:
+                self._brain_pending_task_id = None
+        elif self._agent_pending_task_id == rec.task_id:
+            self._agent_pending_task_id = None
+        latest = self._approvals.latest_record()
+        if latest is not None:
+            self._announce_pending_record(latest, queued=True)
+        else:
+            self._set_pending_dangerous(None)
+
+    def _handle_brain_team_reply(self, text: str) -> bool:
+        self._ensure_approval_state()
+        recs = self._approvals.records(_gate.KIND_BRAIN_TEAM)
+        rec = recs[-1] if recs else None
+        if rec is None or not (self._is_confirmation(text) or self._is_rejection(text)):
+            return False
+        if self._is_rejection(text):
+            self._approvals.deny(rec.request_id)
+            try:
+                from jarvis.core.brain_orchestrator import get_orchestrator
+                result = get_orchestrator().deny(rec.task_id)
+            except Exception as exc:
+                result = f"Onay reddedildi: {exc}"
+        else:
+            if not self._dangerous_confirmation_granted:
+                self._approvals.grant(rec.request_id)
+            # Re-resolve the current Brain Team step before consuming the grant.
+            # A changed target/description must never inherit the old approval.
+            try:
+                from jarvis.core.brain_orchestrator import get_orchestrator
+                orch = get_orchestrator()
+                current_task = orch.tasks.get(rec.task_id) if hasattr(orch, "tasks") else None
+                current_step = (current_task or {}).get("payload", {}).get("pending_step") if isinstance(current_task, dict) else None
+                current_call = orch._approval_call(current_task, current_step) if current_step is not None and hasattr(orch, "_approval_call") else rec.call
+            except Exception:
+                current_call = rec.call
+            current_binding = self._approval_step_binding(rec.task_id, current_step or {})
+            if (rec.binding and current_binding != rec.binding) or current_call.fingerprint != rec.call.fingerprint:
+                self._dangerous_confirmation_granted = False
+                self._approvals.reannounce()
+                return True
+            grant_rec = self._approvals.consume_request(rec.request_id, rec.call)
+            if grant_rec is None:
+                self._dangerous_confirmation_granted = False
+                self._approvals.reannounce()
+                return True
+            self._dangerous_confirmation_granted = False
+            try:
+                from jarvis.core.brain_orchestrator import get_orchestrator
+                result = get_orchestrator().approve(rec.task_id, approved_call=rec.call)
+            except Exception as exc:
+                result = f"Onaylı görev çalıştırılamadı: {exc}"
+        try:
+            self.ui.write_log(f"[BRAIN_TEAM_SONUC] {result}")
+            self.speak(f"[BRAIN_TEAM_SONUC] {result}")
+        except Exception:
+            pass
+        self._clear_pending_record(rec)
+        return True
+
+    def _agent_loop_fingerprint_args(self, task_id: str, pending: dict) -> dict:
+        return {"task_id": task_id, "tool": pending.get("tool", ""),
+                "parameters": pending.get("parameters") or {}}
+
+    def _consume_dangerous_confirmation(self, action: str, args: dict) -> bool:
+        self._ensure_approval_state()
+        rec = self._approvals.latest_record()
+        if rec is None or rec.kind != action:
+            return False
+        call = rec.call
+        if action == _gate.KIND_AGENT_LOOP:
+            call = _gate.resolve(args.get("tool", rec.call.tool),
+                                 args.get("parameters") or rec.call.params,
+                                 _gate.Source.AGENT_LOOP)
+        consumed = self._approvals.consume_request(rec.request_id, call)
+        return consumed is not None
+
+    def _grant_dangerous_confirmation(self) -> bool:
+        self._ensure_approval_state()
+        rec = self._approvals.latest_record()
+        if rec is None:
+            return False
+        ok = self._approvals.grant(rec.request_id)
+        self._dangerous_confirmation_granted = ok
+        return ok
+
+    def _handle_agent_loop_reply(self, text: str) -> bool:
+        self._ensure_approval_state()
+        if self._pending_dangerous_action not in (None, "agent_loop"):
+            return False
+        recs = self._approvals.records(_gate.KIND_AGENT_LOOP)
+        rec = recs[-1] if recs else None
+        if rec is None or not (self._is_confirmation(text) or self._is_rejection(text)):
+            return False
+        from jarvis.actions import agent_loop as al
+        pending = al.get_pending_action(rec.task_id)
+        if pending is None:
+            self._approvals.cancel(rec.request_id)
+            self._clear_pending_record(rec)
+            return False
+        if self._is_rejection(text):
+            self._approvals.deny(rec.request_id)
+            result = al.deny_task(rec.task_id)
+        else:
+            self._approvals.grant(rec.request_id)
+            grant_rec = self._approvals.consume_request(rec.request_id, rec.call)
+            if grant_rec is None:
+                self._approvals.reannounce()
+                return True
+            result = al.approve_task(
+                rec.task_id, expected_action=pending,
+                grant=_gate.Grant(rec.call.fingerprint),
+            )
+        try:
+            self.ui.write_log(f"[AGENT_LOOP_SONUC] {result}")
+            self.speak(f"[AGENT_LOOP_SONUC] {result}")
+        except Exception:
+            pass
+        self._clear_pending_record(rec)
+        try:
+            al.announce_next_pending()
+        except Exception:
+            pass
+        return True
+
+    def _apply_spoken_confirmation(self, text: str) -> None:
+        """Record one voice transcript; execution is deferred to turn completion."""
+        self._ensure_approval_state()
+        rec = self._approvals.latest_record()
+        if rec is None or rec.kind != _gate.KIND_VOICE:
+            return
+        if self._is_confirmation(text):
+            self._approvals.grant(rec.request_id)
+        elif self._is_rejection(text):
+            self._approvals.deny(rec.request_id)
+
+    def _voice_turn_reply_handler(self, text: str):
+        """Return a one-shot callback for a completed voice turn."""
+        self._ensure_approval_state()
+        rec = self._approvals.latest_record()
+        if rec is None:
+            return None
+        if rec.kind != _gate.KIND_VOICE:
+            if rec.kind == _gate.KIND_BRAIN_TEAM and self._is_confirmation(text):
+                return lambda: self._handle_brain_team_reply(text)
+            return None
+        if self._is_confirmation(text):
+            self._approvals.grant(rec.request_id)
+            return lambda: None
+        if self._is_rejection(text):
+            self._approvals.deny(rec.request_id)
+            self._clear_voice_pending()
+            return None
+        return None
+
+    def _handle_voice_text_reply(self, text: str) -> bool:
+        self._ensure_approval_state()
+        rec = self._approvals.latest_record()
+        if rec is None or rec.kind != _gate.KIND_VOICE:
+            return False
+        if self._is_confirmation(text):
+            self._approvals.grant(rec.request_id)
+            self._dangerous_confirmation_granted = True
+            return True
+        if self._is_rejection(text):
+            self._approvals.deny(rec.request_id)
+            self._clear_voice_pending()
+            return True
+        # An unrelated user turn ends all foreground voice requests but never
+        # touches Brain Team or Agent Loop approvals.
+        self._clear_voice_pending()
+        return False
+
+    def _handle_any_approval_reply(self, text: str) -> bool:
+        latest = self._approvals.latest_record()
+        if latest is None:
+            return False
+        if latest.kind == _gate.KIND_BRAIN_TEAM:
+            return self._handle_brain_team_reply(text)
+        if latest.kind == _gate.KIND_AGENT_LOOP:
+            return self._handle_agent_loop_reply(text)
+        return self._handle_voice_text_reply(text)
 
     def _make_remote_key(self):
         """Called from Qt main thread when user presses Remote Control."""
@@ -1197,9 +1523,13 @@ class JarvisLive:
         istegin kendisi gecikmeli olarak "onay" sayilabilirdi."""
         note_user_turn(text=text)  # dev_agent onay kapisi: gercek kullanici girdisi
         self._on_text_command(text)
-        self.ui.notify_task_changed()  # event-driven: komut sonrası gorev merkezini guncelle
 
     def _on_text_command(self, text: str):
+        self._ensure_approval_state()
+        if not self._is_confirmation(text) and not self._is_rejection(text):
+            self._approvals.clear_denials()
+        if self._handle_any_approval_reply(text):
+            return
         if not self._loop or not self.session:
             return
         try:
@@ -1766,6 +2096,41 @@ class JarvisLive:
         self.ui.set_state("THINKING")
         _report_network_tool(self.ui, name, "running")
 
+        # Every model-live tool call must pass the canonical gate. A pending
+        # voice request is stored without executing the tool; the next model
+        # call with the exact same fingerprint consumes the user grant.
+        decision = _gate.authorize(name, args, _gate.Source.MODEL_LIVE)
+        if decision.verdict is _gate.Verdict.DENY:
+            result = decision.model_message or f"BLOCKED: {name}"
+            _report_network_tool(self.ui, name, "returned")
+            return types.FunctionResponse(id=fc.id, name=name, response={"result": result})
+        grant = None
+        if decision.verdict is _gate.Verdict.NEEDS_APPROVAL:
+            rec = self._approvals.latest_record()
+            if rec is not None and rec.kind == _gate.KIND_VOICE and rec.call.fingerprint == decision.call.fingerprint:
+                consumed = self._approvals.consume_record(decision.call)
+                if consumed is not None:
+                    grant = _gate.Grant(decision.call.fingerprint, consumed.code)
+            if grant is None:
+                if self._approvals.is_denied(decision.call):
+                    result = _gate.rejected_message(decision.call)
+                else:
+                    rid = self._approvals.request(
+                        decision.call, background=False, kind=_gate.KIND_VOICE,
+                        message=decision.user_prompt or decision.model_message,
+                    )
+                    rec = self._approvals.get(rid)
+                    if rec:
+                        self._announce_pending_record(rec)
+                    result = "CONFIRMATION_REQUIRED: Kullanıcıya işlemi açıkla ve evet/hayır bekle."
+                _report_network_tool(self.ui, name, "returned")
+                return types.FunctionResponse(id=fc.id, name=name, response={"result": result})
+        try:
+            args = _gate.prepare(decision, grant)
+        except PermissionError as exc:
+            _report_network_tool(self.ui, name, "returned")
+            return types.FunctionResponse(id=fc.id, name=name, response={"result": f"BLOCKED: {exc}"})
+
         if name == "forget_memory":
             result = _forget_memory(str(args.get("key", "")), str(args.get("category", "notes")))
             print(f"[Memory] ğŸ—‘ï¸ forget_memory: {result}")
@@ -1867,7 +2232,6 @@ class JarvisLive:
 
             elif name == "task_manager":
                 r = await loop.run_in_executor(None, lambda: task_manager(parameters=args, player=self.ui))
-                self.ui.notify_task_changed()  # event-driven UI refresh
                 result = r or "Done."
 
             elif name == "health_check":
@@ -2943,7 +3307,7 @@ class JarvisLive:
                         brain_orchestrator = get_orchestrator()
                         brain_orchestrator._last_player = self
                         _report_brain_health(
-                            self.ui, brain_orchestrator.get_team_health_snapshot()
+                            self.ui, brain_orchestrator.get_team_health()
                         )
                     except Exception as exc:
                         _report_network_status(

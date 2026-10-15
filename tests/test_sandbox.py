@@ -16,10 +16,7 @@ import pytest
 from jarvis.actions.devkit import sandbox
 
 WORKS, WHY = sandbox.sandbox_works()
-needs_bwrap = pytest.mark.skipif(
-    not WORKS or sandbox.mode() == "off",
-    reason=f"kafes yok veya CI’de kapalı: {WHY}",
-)
+needs_bwrap = pytest.mark.skipif(not WORKS, reason=f"kafes yok: {WHY}")
 
 
 def _run(tmp_path: Path, code: str, *args: str, monkeypatch=None) -> subprocess.CompletedProcess:
