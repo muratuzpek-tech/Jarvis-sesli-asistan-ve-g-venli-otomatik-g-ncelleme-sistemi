@@ -188,7 +188,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "weather_report":    "city: string",
     "system_status":     "parametre gerekmez - CPU/RAM/GPU/sicaklik bilgisi doner",
 "system_scan_and_repair": "parametre gerekmez - projenin tum python dosyalarini gercekten import ederek calisma zamani hatalarini tarar, pyproject.toml bagimliliklarinin surum uyumunu kontrol eder ve (yalnizca JARVIS_ALLOW_DEP_INSTALL=1 ise) eksik/uyumsuz olanlari kurar - kullanici onayi ister",
-    "computer_settings": "action: volume/brightness/wifi gibi TEK bir OS ayari; description; value (opsiyonel). shutdown/restart/lock_screen YIKICI sayilir.",
+    "computer_settings": "action: volume/brightness/wifi gibi TEK bir OS ayari; task_manager, open_settings veya windows_update yalnizca ilgili pencereyi acar; windows_update guncelleme yuklemez. Sonuc yalniz surecin calistigini dogrular, pencerenin gorundugunu degil. description; value (opsiyonel). shutdown/restart/lock_screen YIKICI sayilir.",
     "send_message":      "receiver; message_text; platform (whatsapp/telegram/vb.) - kullanici adina disariya mesaj gittigi icin HER ZAMAN once onay ister.",
     "github_arama":      "query: string; min_stars (opsiyonel); max_results (opsiyonel) - GitHub'da salt-okunur depo arar, hicbir sey indirmez.",
     "github_arac_bul_ve_degerlendir": "query: string; min_stars (opsiyonel). GitHub'da Jarvis icin YENI bir arac arar, karantinada indirip analiz eder - Jarvis'in koduna hicbir sey YAZMAZ. 'ARAÇ' bulursa sonucta source_name doner; bir sonraki adimda entegrasyon_uygula(source_name=...) cagirilmali. Yeni aday kalmadiysa done=true say.",
@@ -227,6 +227,7 @@ _SAFE_SETTINGS_ACTIONS = frozenset({
     "volume", "volume_up", "volume_down", "volume_set",
     "mute", "unmute", "toggle_mute",
     "brightness", "brightness_up", "brightness_down",
+    "task_manager", "open_settings", "windows_update",
 })
 
 

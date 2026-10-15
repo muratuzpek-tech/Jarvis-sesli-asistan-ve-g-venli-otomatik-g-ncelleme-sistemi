@@ -185,8 +185,11 @@ _WINDOWS_SYSTEM_TRIGGERS: dict[str, tuple[str, ...]] = {
     "process_list": (
         "calisan islem", "calisan surec", "islemleri listele",
         "surecleri listele", "process list", "process'leri",
-        "process listesi", "gorev yoneticisi", "task manager",
-        "hangi islemler calisiyor",
+        "process listesi", "gorev yoneticisindeki islemler",
+        "task manager process list", "hangi islemler calisiyor",
+        "ram kullanan uygulamalar", "en cok ram kullanan",
+        "bellek kullanan uygulamalar", "bellek kullanan islemler",
+        "hangi programlar ram kullaniyor", "hangi uygulamalar bellek kullaniyor",
     ),
     "service_list": (
         "servis durum", "servisleri goster", "servis listesi",

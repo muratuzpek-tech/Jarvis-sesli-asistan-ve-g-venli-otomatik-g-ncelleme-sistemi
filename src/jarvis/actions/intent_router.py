@@ -43,6 +43,14 @@ _PROCESS_LIST_PATTERNS = [
     r"hangi\s+programlar\s+calisiyor",
     r"işlemleri\s+(göster|listele)",
     r"islemleri\s+(goster|listele)",
+    r"(hangi|en\s+çok|en\s+cok)\s+(uygulamalar?\s+)?(ram|bellek)\s+kullanan\s+(uygulamalar?|programlar?|işlemler?|islemler?)",
+    r"(hangi|en\s+çok|en\s+cok)\s+(uygulamalar?|programlar?|işlemler?|islemler?)\s+(ram|bellek)\s+kullanıyor",
+    r"(ram|bellek)\s+kullanan\s+(uygulamalar?|programlar?|işlemler?|islemler?)",
+    r"(ram|bellek)\s+(kullanımını|kullanimini|tüketimini|tuketimini)\s+(hangi\s+)?(uygulamalar?|programlar?|işlemler?|islemler?)",
+    r"bellek\s+bölümündeki\s+(uygulamalar?|programlar?|işlemler?)",
+    r"bellek\s+bolumundeki\s+(uygulamalar?|programlar?|islemler?)",
+    r"ram\s+(kullanan|tüketen|tuketen)\s+uygulamalar?",
+    r"ram\s+(kullanan|tüketen|tuketen)\s+programlar?",
 ]
 
 _COMPILED = [re.compile(p, re.IGNORECASE) for p in _PROCESS_LIST_PATTERNS]

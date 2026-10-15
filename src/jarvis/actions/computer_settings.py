@@ -1,5 +1,6 @@
 #computer_settings.py
 import json
+import os
 import re
 import sys
 import time
@@ -246,9 +247,62 @@ def show_desktop():
     elif _OS == "Windows": pyautogui.hotkey("win", "d")
     else:                  pyautogui.hotkey("super", "d")
 
+
+def _windows_process_running(process_name: str) -> bool:
+    """Return whether a named Windows process is currently visible to psutil."""
+    try:
+        import psutil
+    except ImportError:
+        return False
+    expected = process_name.casefold()
+    try:
+        for process in psutil.process_iter(["name"]):
+            try:
+                if str(process.info.get("name") or "").casefold() == expected:
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+    except Exception:
+        return False
+    return False
+
+
+def _wait_for_windows_process(process_name: str, timeout: float = 8.0) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if _windows_process_running(process_name):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
+def _open_windows_settings_uri(uri: str) -> None:
+    startfile = getattr(os, "startfile", None)
+    if not callable(startfile):
+        raise RuntimeError("Windows URI launch is unavailable in this environment.")
+    startfile(uri)
+    if not _wait_for_windows_process("SystemSettings.exe"):
+        raise RuntimeError(
+            "Windows accepted the Settings launch request, but SystemSettings.exe was not observed."
+        )
+
+
 def open_task_manager():
     if _OS == "Windows":
-        pyautogui.hotkey("ctrl", "shift", "esc")
+        if _PYAUTOGUI and pyautogui is not None:
+            try:
+                pyautogui.hotkey("ctrl", "shift", "esc")
+            except Exception as e:
+                print(f"[Settings] Task Manager shortcut failed: {e}")
+        if _wait_for_windows_process("taskmgr.exe", timeout=2.0):
+            return
+        try:
+            subprocess.Popen(["taskmgr.exe"], **_WIN_HIDE)
+        except Exception as e:
+            raise RuntimeError(f"Could not start Task Manager: {e}") from e
+        if not _wait_for_windows_process("taskmgr.exe"):
+            raise RuntimeError("Task Manager was requested but its process did not appear.")
     elif _OS == "Darwin":
         subprocess.Popen(["open", "-a", "Activity Monitor"])
     else:
@@ -403,7 +457,7 @@ def lock_screen():
 
 def open_system_settings():
     if _OS == "Windows":
-        pyautogui.hotkey("win", "i")
+        _open_windows_settings_uri("ms-settings:")
     elif _OS == "Darwin":
         subprocess.Popen(["open", "-a", "System Preferences"])
     else:
@@ -411,6 +465,13 @@ def open_system_settings():
             if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
                 subprocess.Popen(cmd)
                 return
+
+
+def open_windows_update():
+    """Open the Windows Update page; does not download or install updates."""
+    if _OS != "Windows":
+        raise RuntimeError("Windows Update settings are only available on Windows.")
+    _open_windows_settings_uri("ms-settings:windowsupdate")
 
 def open_file_explorer():
     if _OS == "Windows":
@@ -575,6 +636,7 @@ ACTION_MAP: dict[str, callable] = {
     "screenshot":          take_screenshot,
     "lock_screen":         lock_screen,
     "open_settings":       open_system_settings,
+    "windows_update":      open_windows_update,
     "file_explorer":       open_file_explorer,
     "open_run":            open_run,
     "dark_mode":           dark_mode,
@@ -610,6 +672,9 @@ Return ONLY a valid JSON object:
 
 Rules:
 - Pick the single best matching action from the available list.
+- When asked to open Task Manager, use task_manager (not a process-list query).
+- When asked to check/open Windows Update, use windows_update; it only opens Settings and never installs updates.
+- Use open_settings only for the general Windows Settings home page.
 - For volume_set: value is an integer 0-100.
 - For type_text: value is the exact text to type.
 - For press_key: value is the key name (e.g. "f5", "tab", "enter").
@@ -700,6 +765,20 @@ def computer_settings(
                risk="high" if action in _DANGEROUS_ACTIONS else "low",
                approval_required=action in _DANGEROUS_ACTIONS,
                result="EXECUTING")
+
+    if action in {"task_manager", "open_settings", "windows_update"}:
+        try:
+            ACTION_MAP[action]()
+            if _OS == "Windows":
+                return {
+                    "task_manager": "VERIFIED: Task Manager process is running; window visibility was not checked.",
+                    "open_settings": "VERIFIED: Windows Settings process is running; visible page was not checked.",
+                    "windows_update": "VERIFIED: Windows Settings process is running; the Windows Update page was requested but not visually checked.",
+                }[action]
+            return f"Done: {action}."
+        except Exception as e:
+            print(f"[Settings] Action failed ({action}): {e}")
+            return f"Action failed ({action}): {e}"
 
     if not _PYAUTOGUI:
         return "pyautogui is not installed. Run: pip install pyautogui"
