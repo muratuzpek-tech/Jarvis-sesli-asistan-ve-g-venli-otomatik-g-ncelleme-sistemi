@@ -25,7 +25,7 @@ from PyQt6.QtCore import (
     QThread, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QBrush, QColor, QDragEnterEvent, QDropEvent, QFont, QKeySequence, QLinearGradient, QPainter, QPen, QPixmap,
+    QBrush, QColor, QDragEnterEvent, QDropEvent, QFont, QFontMetrics, QKeySequence, QLinearGradient, QPainter, QPen, QPixmap,
     QShortcut,
 )
 from PyQt6.QtWidgets import (
@@ -1559,6 +1559,9 @@ class SystemNetworkWidget(QWidget):
         "core": C.PRI, "memory": C.ACC2, "actions": C.ACC,
         "brain": C.MUTED_C, "support": "#ffb44a",
     }
+    BRAIN_AGENT_NODE_IDS = frozenset(
+        {"planner", "research", "coder", "security", "brain_memory", "executor", "auditor"}
+    )
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1598,6 +1601,19 @@ class SystemNetworkWidget(QWidget):
                 self.node_selected.emit(node_id)
                 self.update()
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        node_id = self._node_at(event.position())
+        if node_id in self.BRAIN_AGENT_NODE_IDS:
+            label = next((node[4] for node in self.NODES if node[0] == node_id), node_id)
+            state, detail = self.status_for_node(node_id)
+            task = detail if state in {"running", "error"} and detail else self.task_label_for_node(node_id)
+            self.setToolTip(
+                f"{label}\nDurum: {self.STATUS_LABELS.get(state, 'Veri yok')}\nGerçek görev: {task}"
+            )
+        else:
+            self.setToolTip("")
+        super().mouseMoveEvent(event)
 
     def update_runtime_status(self, component: str, status: str, detail: str = ""):
         component = str(component)
@@ -1715,6 +1731,20 @@ class SystemNetworkWidget(QWidget):
         label = self.STATUS_LABELS.get(state, "Veri yok")
         return f"{label} · {detail}" if detail else label
 
+    def task_label_for_node(self, node_id: str) -> str:
+        if node_id not in self.BRAIN_AGENT_NODE_IDS:
+            return ""
+        state, detail = self.status_for_node(node_id)
+        if state == "running":
+            return detail or "Görev metni yok"
+        if state == "idle":
+            return "Boşta"
+        if state == "stale":
+            return "Heartbeat eski"
+        if state in {"error", "failed"}:
+            return "Hata"
+        return "Görev verisi yok"
+
     def _status_color(self, node_id: str) -> QColor:
         state, _ = self.status_for_node(node_id)
         colors = {
@@ -1787,10 +1817,22 @@ class SystemNetworkWidget(QWidget):
                 painter.setPen(QColor(C.TEXT_DIM))
                 painter.setFont(QFont("Segoe UI", 9))
                 painter.drawText(QRectF(x - 48, y + 9, 96, 17), Qt.AlignmentFlag.AlignCenter, "main.py")
-            elif node_id in {"planner", "research", "coder", "security", "brain_memory", "executor", "auditor"}:
+            elif node_id in self.BRAIN_AGENT_NODE_IDS:
                 painter.setPen(QColor(C.TEXT))
                 painter.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
                 painter.drawText(QRectF(x - 52, y + radius + 3, 104, 17), Qt.AlignmentFlag.AlignCenter, label)
+                task_font = QFont("Segoe UI", 8)
+                painter.setFont(task_font)
+                state, _ = self.status_for_node(node_id)
+                painter.setPen(QColor(C.PRI if state == "running" else C.TEXT_DIM))
+                task_label = QFontMetrics(task_font).elidedText(
+                    self.task_label_for_node(node_id), Qt.TextElideMode.ElideRight, 116
+                )
+                painter.drawText(
+                    QRectF(x - 58, y + radius + 19, 116, 14),
+                    Qt.AlignmentFlag.AlignCenter,
+                    task_label,
+                )
             else:
                 painter.setPen(QColor(C.TEXT))
                 painter.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))

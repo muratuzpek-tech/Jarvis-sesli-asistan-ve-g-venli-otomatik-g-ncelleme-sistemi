@@ -1108,15 +1108,17 @@ def _report_brain_health(ui, snapshot: dict) -> None:
         state = str(heartbeat.get("status", "unknown")).lower()
         if state not in {"idle", "running", "error"}:
             state = "unknown"
-        seconds = max(0, int(float(heartbeat.get("seconds_in_state", 0))))
         if state == "error":
-            detail = f"Son Ã§aÄŸrÄ±da hata Â· {seconds} sn"
+            detail = str(heartbeat.get("last_error") or "Son çağrı başarısız")
+            last_task = str(heartbeat.get("last_task") or "").strip()
+            if last_task:
+                detail = f"Hata · {last_task} · {detail}"
         elif state == "running":
-            detail = f"Ä°ÅŸ yÃ¼rÃ¼tÃ¼yor Â· {seconds} sn"
+            detail = str(heartbeat.get("current_task") or "").strip() or "Görev metni yok"
         elif state == "idle":
-            detail = f"HazÄ±r, boÅŸta Â· {seconds} sn"
+            detail = "Boşta"
         else:
-            detail = "Durum henÃ¼z gÃ¶zlenmedi"
+            detail = "Durum henüz gözlenmedi"
         _report_network_status(ui, component, state, detail)
 
 
