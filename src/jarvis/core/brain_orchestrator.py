@@ -399,6 +399,36 @@ class BrainOrchestrator:
 
     # ── Dışarıya açık, HIZLI fonksiyonlar (Jarvis'in canlı oturumunu bloklamaz) ──
 
+    def get_team_health_snapshot(self) -> dict:
+        """UI izleme katmanı için yapılandırılmış sağlık durumu döndürür."""
+        brains = (
+            self.planner,
+            self.research,
+            self.coder,
+            self.security,
+            self.memory,
+            self.executor,
+            self.auditor,
+        )
+        agents = []
+
+        for brain in brains:
+            heartbeat = brain.heartbeat()
+            agents.append(
+                {
+                    "name": heartbeat.get("name", ""),
+                    "status": heartbeat.get("status", "unknown"),
+                    "seconds_in_state": heartbeat.get("seconds_in_state", 0),
+                    "last_error": heartbeat.get("last_error"),
+                }
+            )
+
+        return {
+            "worker_running": bool(self._loop_started),
+            "interval_seconds": DEFAULT_INTERVAL_S,
+            "agents": agents,
+        }
+
     def start_goal(self, goal: str) -> str:
         goal = (goal or "").strip()
         if not goal:
