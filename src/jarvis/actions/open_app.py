@@ -2,11 +2,13 @@ import time
 import subprocess
 import platform
 import shutil
+import re
 
 try:
-    import psutil  # noqa: F401  (yalnizca varlik kontrolu)
+    import psutil
     _PSUTIL = True
 except ImportError:
+    psutil = None
     _PSUTIL = False
 
 _SYSTEM = platform.system()
@@ -77,6 +79,42 @@ def _normalize(raw: str) -> str:
 
     return raw  
 
+_WINDOWS_PROCESS_ALIASES = {
+    "wt": {"wt.exe", "windowsterminal.exe"},
+    "ms-settings:": {"systemsettings.exe"},
+    "taskmgr": {"taskmgr.exe"},
+}
+
+
+def _windows_process_running(app_name: str) -> bool:
+    if not _PSUTIL or psutil is None:
+        return False
+    basename = re.split(r"[\\/]", app_name)[-1].casefold()
+    candidates = _WINDOWS_PROCESS_ALIASES.get(basename, {basename})
+    candidates = {name.casefold().removesuffix(".exe") for name in candidates}
+    try:
+        for process in psutil.process_iter(["name"]):
+            try:
+                process_name = str(process.info.get("name") or "").casefold().removesuffix(".exe")
+                if process_name in candidates:
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+    except Exception:
+        return False
+    return False
+
+
+def _wait_for_windows_process(app_name: str, timeout: float = 8.0) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if _windows_process_running(app_name):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
 def _launch_windows(app_name: str) -> bool:
     # Never pass model/user input through a command shell.  In particular,
     # names containing &, |, ; or redirection syntax must remain one argv item.
@@ -88,8 +126,7 @@ def _launch_windows(app_name: str) -> bool:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            time.sleep(1.5)
-            return True
+            return _wait_for_windows_process(app_name)
         except Exception as e:
             print(f"[open_app] subprocess failed: {e}")
 
@@ -100,8 +137,7 @@ def _launch_windows(app_name: str) -> bool:
             if os_startfile is None:
                 return False
             os_startfile(app_name)
-            time.sleep(1.0)
-            return True
+            return _wait_for_windows_process(app_name)
         except Exception:
             pass
 
@@ -113,8 +149,7 @@ def _launch_windows(app_name: str) -> bool:
         pyautogui.write(app_name, interval=0.05)
         time.sleep(0.9)
         pyautogui.press("enter")
-        time.sleep(2.5)
-        return True
+        return _wait_for_windows_process(app_name)
     except Exception as e:
         print(f"[open_app] Start Menu search failed: {e}")
 
@@ -249,9 +284,13 @@ def open_app(
 
     try:
         if launcher(normalized):
+            if _SYSTEM == "Windows":
+                return f"Launched {app_name}; Windows process is running. Window focus was not verified."
             return f"Opened {app_name}."
         if normalized.lower() != app_name.lower():
             if launcher(app_name):
+                if _SYSTEM == "Windows":
+                    return f"Launched {app_name}; Windows process is running. Window focus was not verified."
                 return f"Opened {app_name}."
         return (
             f"Could not confirm that {app_name} launched. "

@@ -60,7 +60,9 @@ _WIN_HIDE: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform
 _ALLOWED_COMMANDS: dict[str, list[str]] = {
     "process_list": [
         "powershell", "-NoProfile", "-NonInteractive", "-Command",
-        "Get-Process | Select-Object Name,Id,CPU,WorkingSet | ConvertTo-Json",
+        "Get-Process | Sort-Object -Property WorkingSet -Descending | "
+        "Select-Object -First 15 Name,Id,@{Name='MemoryMB';Expression={[math]::Round($_.WorkingSet / 1MB, 1)}},CPU "
+        "| ConvertTo-Json",
     ],
     "service_list": [
         "powershell", "-NoProfile", "-NonInteractive", "-Command",

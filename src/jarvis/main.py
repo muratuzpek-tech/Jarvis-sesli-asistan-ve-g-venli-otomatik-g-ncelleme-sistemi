@@ -420,7 +420,9 @@ TOOL_DECLARATIONS = [
         "description": (
             "Returns real-time system metrics: CPU usage, RAM, GPU load, CPU temperature, "
             "uptime, and process count. Use when the user asks about computer performance, "
-            "temperature, memory, or resource usage."
+            "temperature, total memory, or resource usage. If the user asks which apps/processes "
+            "are using the most RAM, use the deterministic process_list system-read route; "
+            "this tool reports aggregate metrics, not per-process memory."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -535,8 +537,11 @@ TOOL_DECLARATIONS = [
         "description": (
             "Controls the computer: volume, brightness, window management, keyboard shortcuts, "
             "typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, "
-            "scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. "
-            "Use for ANY single computer control command."
+            "scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page, "
+            "Task Manager, Windows Settings, and opening the Windows Update page. "
+            "Use for ANY single computer control command. The Windows Update action only opens "
+            "Settings; it does not install updates. Never claim success when the result says failed. "
+            "When the result says only that a process is running, do not claim that the window is visible."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -550,6 +555,7 @@ TOOL_DECLARATIONS = [
                     "zoom_out | zoom_reset | find_on_page | scroll_up | scroll_down | scroll_top | "
                     "scroll_bottom | page_up | page_down | copy | paste | cut | undo | redo | "
                     "select_all | save | enter | escape | screenshot | lock_screen | open_settings | "
+                    "windows_update (open Settings > Windows Update; does not install) | "
                     "file_explorer | open_run | dark_mode | toggle_wifi | restart | shutdown | "
                     "type_text (use with value=text) | press_key (use with value=key name) | "
                     "reload_n (use with value=integer). For volume, ALWAYS use volume_set with an "
@@ -3075,4 +3081,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
