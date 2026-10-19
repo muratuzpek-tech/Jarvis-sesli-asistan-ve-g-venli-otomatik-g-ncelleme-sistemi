@@ -47,6 +47,7 @@ from jarvis.actions.screen_processor import _capture_camera, _capture_screen
 from jarvis.actions.youtube_video import youtube_video
 from jarvis.actions.desktop import desktop_control
 from jarvis.actions.browser_control import browser_control
+from jarvis.actions.download_tool import download_file
 from jarvis.actions.file_controller import file_controller
 from jarvis.actions.code_helper import code_helper
 from jarvis.actions.dev_agent import dev_agent, note_user_turn
@@ -561,6 +562,27 @@ TOOL_DECLARATIONS = [
             },
             "required": []
         }
+    },
+    {
+        "name": "download_file",
+        "description": (
+            "Downloads a file from a user-provided HTTPS URL into a safe user folder. "
+            "The first call only previews the exact URL, target and overwrite policy and asks for "
+            "explicit approval; only a later call with the same parameters and confirm_code starts "
+            "the download. It streams and verifies the file, never follows redirects, and never "
+            "executes downloaded files."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "url": {"type": "STRING", "description": "HTTPS download URL"},
+                "path": {"type": "STRING", "description": "Safe target folder: downloads, desktop, documents, or an existing user folder"},
+                "filename": {"type": "STRING", "description": "Optional single filename; otherwise derived from URL"},
+                "overwrite": {"type": "BOOLEAN", "description": "Whether an existing file may be replaced; default false"},
+                "confirm_code": {"type": "STRING", "description": "Only from a prior preview after explicit user approval"},
+            },
+            "required": ["url", "path"],
+        },
     },
     {
         "name": "browser_control",
@@ -1827,6 +1849,12 @@ class JarvisLive:
                 if str(args.get("action", "")).lower() == "get_text" and r:
                     self.ui.show_content("JARVIS â€” PAGE TEXT", r)
 
+            elif name == "download_file":
+                r = await loop.run_in_executor(None, lambda: download_file(parameters=args, player=self.ui))
+                result = r or "İndirme sonucu boş döndü."
+                if r:
+                    self.ui.show_content("DOSYA İNDİRME", r)
+
             elif name == "powershell_control":
                 heard = self._heard_now.strip() or self._heard_prev.strip()
                 if not explicitly_requested(heard):
@@ -3075,4 +3103,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
