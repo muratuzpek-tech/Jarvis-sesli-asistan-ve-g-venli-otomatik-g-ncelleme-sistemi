@@ -77,6 +77,7 @@ from jarvis.actions.discovered_jc import run as discovered_jc_run
 from jarvis.actions.intent_router import match_system_read, match_file_analysis, match_file_modification
 from jarvis.core.secure_config import api_keys_path
 from jarvis.paths import asset
+from jarvis.core.update_manager import start_background_update_check
 
 
 # --- GitHub-uzerinden-kendini-gelistir icin DETERMINISTIK kisa devre ------
@@ -1107,15 +1108,17 @@ def _report_brain_health(ui, snapshot: dict) -> None:
         state = str(heartbeat.get("status", "unknown")).lower()
         if state not in {"idle", "running", "error"}:
             state = "unknown"
-        seconds = max(0, int(float(heartbeat.get("seconds_in_state", 0))))
         if state == "error":
-            detail = f"Son Ã§aÄŸrÄ±da hata Â· {seconds} sn"
+            detail = str(heartbeat.get("last_error") or "Son çağrı başarısız")
+            last_task = str(heartbeat.get("last_task") or "").strip()
+            if last_task:
+                detail = f"Hata · {last_task} · {detail}"
         elif state == "running":
-            detail = f"Ä°ÅŸ yÃ¼rÃ¼tÃ¼yor Â· {seconds} sn"
+            detail = str(heartbeat.get("current_task") or "").strip() or "Görev metni yok"
         elif state == "idle":
-            detail = f"HazÄ±r, boÅŸta Â· {seconds} sn"
+            detail = "Boşta"
         else:
-            detail = "Durum henÃ¼z gÃ¶zlenmedi"
+            detail = "Durum henüz gözlenmedi"
         _report_network_status(ui, component, state, detail)
 
 
@@ -3061,6 +3064,7 @@ def main():
     # ile kullanÄ±cÄ± kendi gÃ¶rselini verebiliyor.
     face = os.environ.get("JARVIS_FACE", "").strip() or str(asset("jarvis_icon.png"))
     ui = JarvisUI(face)
+    start_background_update_check(ui.write_log, ui.request_update_approval)
 
     def runner():
         ui.wait_for_api_key()
@@ -3075,4 +3079,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -383,6 +383,8 @@ class BaseBrain(ABC):
     def __init__(self) -> None:
         self.status = "idle"          # idle | running | error
         self.last_error: str | None = None
+        self.current_task = ""
+        self.last_task = ""
         self._breaker = CircuitBreaker(
             name=f"gemini-brain-{self.NAME}", failure_threshold=3, cooldown_seconds=45.0,
         )
@@ -398,14 +400,32 @@ class BaseBrain(ABC):
         self.status = status
         self._state_changed_at = time.monotonic()
 
+    @staticmethod
+    def _describe_assigned_task(message: dict) -> str:
+        """Build a short label only from the task message actually received."""
+        task = " ".join(str(message.get("task", "") or "").split())
+        payload = message.get("payload")
+        if isinstance(payload, dict):
+            for key in ("goal", "query", "target", "step_description", "description"):
+                context = payload.get(key)
+                if not isinstance(context, str):
+                    continue
+                context = " ".join(context.split())
+                if context and context.casefold() not in task.casefold():
+                    task = f"{task} — {context}" if task else context
+                    break
+        return task[:240]
+
     def heartbeat(self) -> dict:
         """Bu beynin dışarıdan sorulabilecek 'nabzı': şu an ne durumda ve bu
-        durumda ne kadar süredir. core/brain_orchestrator.get_team_health()
-        bunu her beyin için toplayıp tek bir sağlık raporu üretir."""
+        durumda ne kadar süredir. BrainOrchestrator.get_team_health_snapshot()
+        bu veriyi tüm beyinler için yapılandırılmış biçimde toplar."""
         return {
             "name": self.NAME,
             "status": self.status,
             "seconds_in_state": round(time.monotonic() - self._state_changed_at, 1),
+            "current_task": self.current_task if self.status == "running" else "",
+            "last_task": self.last_task,
             "last_error": self.last_error,
         }
 
@@ -513,14 +533,19 @@ class BaseBrain(ABC):
         hatası, beklenmeyen exception) burada yakalanır ve yapılandırılmış
         bir 'failed' sonucuna çevrilir - hiçbir zaman Jarvis'in tamamına
         sızmaz (20. HATA YÖNETİMİ maddesi)."""
+        self.current_task = self._describe_assigned_task(message)
         self._set_status("running")
         self.log(f"Görev alındı: {message.get('task', '')!r} (from={message.get('from')})")
         try:
             result = self.handle(message)
+            self.last_task = self.current_task
+            self.current_task = ""
             self._set_status("idle")
             self.last_error = None
             return result
         except BrainError as e:
+            self.last_task = self.current_task
+            self.current_task = ""
             self._set_status("error")
             self.last_error = str(e)
             self.log(str(e), level="error")
@@ -530,6 +555,8 @@ class BaseBrain(ABC):
                 "status": "failed", "result": {"error": str(e)},
             }
         except Exception as e:  # beklenmeyen HER şey - beyni asla disariya cokertme
+            self.last_task = self.current_task
+            self.current_task = ""
             self._set_status("error")
             self.last_error = str(e)
             self.log(f"Beklenmeyen hata: {e}", level="error")

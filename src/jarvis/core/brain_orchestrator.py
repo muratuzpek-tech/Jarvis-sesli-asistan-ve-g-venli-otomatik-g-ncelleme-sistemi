@@ -177,6 +177,8 @@ class BrainOrchestrator:
         self._file_locks_guard = threading.Lock()
         self._loop_lock = threading.Lock()
         self._loop_started = False
+        self._worker_thread: threading.Thread | None = None
+        self._worker_interval_seconds = DEFAULT_INTERVAL_S
 
         # "7. User response guarantee": brain_team_tool() bir 'player'
         # (canli oturumun UI/log baglantisi) ile cagrildiginda burada
@@ -396,6 +398,17 @@ class BrainOrchestrator:
                 + (f" — son hata: {hb['last_error']}" if hb["last_error"] else "")
             )
         return "AI Beyin Takımı sağlık durumu:\n" + "\n".join(lines)
+
+    def get_team_health_snapshot(self) -> dict:
+        """Return structured live worker and per-agent heartbeat data for the UI."""
+        brains = (self.planner, self.research, self.coder, self.security,
+                  self.memory, self.executor, self.auditor)
+        worker = getattr(self, "_worker_thread", None)
+        return {
+            "worker_running": bool(worker and worker.is_alive()),
+            "interval_seconds": float(getattr(self, "_worker_interval_seconds", DEFAULT_INTERVAL_S)),
+            "agents": [brain.heartbeat() for brain in brains],
+        }
 
     # ── Dışarıya açık, HIZLI fonksiyonlar (Jarvis'in canlı oturumunu bloklamaz) ──
 
@@ -1633,9 +1646,15 @@ class BrainOrchestrator:
         with self._loop_lock:
             if self._loop_started:
                 return
+            self._worker_interval_seconds = float(interval_seconds)
+            self._worker_thread = threading.Thread(
+                target=self._worker_loop,
+                args=(interval_seconds,),
+                daemon=True,
+                name="BrainOrchestrator",
+            )
             self._loop_started = True
-            threading.Thread(target=self._worker_loop, args=(interval_seconds,),
-                              daemon=True, name="BrainOrchestrator").start()
+            self._worker_thread.start()
 
 
 # --- Tek-surec kilidi (kullanici onayli, 2026-09-16, "brain_tasks.json ---
