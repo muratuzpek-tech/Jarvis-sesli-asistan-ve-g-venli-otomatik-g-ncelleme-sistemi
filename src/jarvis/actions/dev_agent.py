@@ -863,13 +863,24 @@ def _recipes_for_fix(description: str, language: str) -> str:
 
 
 def _python_quality_issues(file_codes: dict[str, str]) -> dict[str, list[dict]]:
-    """Modelden bagimsiz kalite bulgulari; hata olursa build'i asla engellemez."""
+    """Modelden bağımsız kalite bulguları; analizör hatasında fail-closed çalışır."""
     try:
         from jarvis.actions.devkit.python_quality import analyze_sources
         return analyze_sources(file_codes)
     except Exception as e:  # noqa: BLE001
         print(f"[DevAgent] ⚠️ Kalite kapısı çalıştırılamadı: {e}")
-        return {}
+        return {
+            "__quality_gate__": [{
+                "code": "QUALITY-GATE-UNAVAILABLE",
+                "message": (
+                    "Python kalite analizörü çalıştırılamadı; güvenli varsayılan olarak "
+                    "proje başarılı kabul edilmeyecek. Analizör hatasını düzeltip kalite "
+                    "kapısını yeniden çalıştır."
+                ),
+                "line": 0,
+                "col": 0,
+            }],
+        }
 
 
 def _devkit_generate(prompt: str) -> str:
@@ -1787,9 +1798,13 @@ Code for {file_path}:"""
                     code = retry_code
                     print(f"[DevAgent] ✅ Düzeltme başarılı: {file_path}")
                 except SyntaxError as second_err:
-                    print(f"[DevAgent] ❌ İkinci denemede de sözdizimi hatası var "
-                          f"({file_path}, satır {second_err.lineno}): {second_err.msg}. "
-                          f"Yine de yazılıyor, sonraki adımda (_fix_files) düzeltilmeye çalışılacak.")
+                    # İkinci deneme de bozuksa HİÇBİR koşulda diske yazma.
+                    # Aksi hâlde aşağıdaki write_text() hatalı kaynak kodu
+                    # kaydeder ve proje yarım/bozuk hâlde çalıştırılır.
+                    raise SyntaxError(
+                        f"{file_path} için ikinci üretim denemesi de geçersiz: "
+                        f"satır {second_err.lineno}: {second_err.msg}"
+                    ) from second_err
 
         full_path = _safe_project_path(project_dir, file_path)
         if full_path is None:
@@ -3981,6 +3996,7 @@ def _build_project(
     sorted_files = sorted(files, key=_dep_sort_key)
 
     file_codes: dict[str, str] = {}
+    write_failures: list[str] = []
 
     for file_info in sorted_files:
         file_path = file_info.get("path", "")
@@ -4011,7 +4027,19 @@ def _build_project(
                     log(f"Rate limit retry failed for {file_path}, skipping.")
             except Exception as e:
                 log(f"Failed to write {file_path}: {e}")
+                if isinstance(e, SyntaxError):
+                    write_failures.append(f"{file_path}: {e}")
                 break
+
+    if write_failures:
+        msg = (
+            "I could not create a valid project because generated source code "
+            "still contains syntax errors. No invalid source file was accepted: "
+            + " | ".join(write_failures)
+        )
+        if speak:
+            speak(msg)
+        return msg
 
     if not file_codes:
         msg = "I could not write any project files, sir."
