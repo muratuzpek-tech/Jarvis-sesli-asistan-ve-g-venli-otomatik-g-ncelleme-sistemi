@@ -52,21 +52,27 @@ USER_TURN_GRACE_S = 1.5
 # yazdi (bir listeden kopyaladigi satir) — onay DEGILDI, ama "bir kullanici turu
 # geldi" sayildigi icin proje basladi. Artik metin de bakilir.
 _user_texts: list[tuple[float, str]] = []
-_AFFIRM = re.compile(r"^(evet|evt|onay\w*|tamam\w*|olur|peki|ba[sş]la\w*|devam|yap|yaz|kabul\w*|yes|ok|okay|sure)$")
+_AFFIRM = re.compile(r"^(evet|evt|onay\w*|tamam\w*|olur|peki|ba[sş]la\w*|devam\w*|yap\w*|yaz\w*|kabul\w*|yes|ok|okay|sure)(\s+(onay\w*|ver\w*|tamam\w*|yap\w*|basla\w*|devam\w*|.*))*$", re.IGNORECASE)
 _NEGATE = re.compile(r"\b(hay[iı]r|iptal\w*|dur|durdur\w*|vazge[cç]\w*|istemiyorum|yapma|yazma|onaylam\w*|"
                      r"ba[sş]lama|bekle|no|cancel|stop)\b")
 
 
-def note_user_turn(value=None, *, now: float | None = None, text: str = "") -> None:
-    """Kullanıcı turunu kaydeder; eski ``(now, text=...)`` ve yeni
-    ``(text, now=...)`` çağrı biçimleri birlikte desteklenir."""
+def note_user_turn(*args, now: float | None = None, text: str = "") -> None:
+    """Record a real user turn; supports both historical positional call forms."""
     global _last_user_turn_at, _last_user_turn_text
-    if isinstance(value, str) and not text:
-        text = value
-    elif value is not None and now is None:
-        now = value
+    if args:
+        if len(args) == 1:
+            if isinstance(args[0], (int, float)):
+                now = float(args[0])
+            else:
+                text = str(args[0])
+        elif len(args) == 2:
+            now = float(args[0])
+            text = str(args[1])
+        else:
+            raise TypeError("note_user_turn accepts at most two positional arguments")
     _last_user_turn_at = time.monotonic() if now is None else now
-    _last_user_turn_text = text.strip() if text else None
+    _last_user_turn_text = text.strip() if text and text.strip() else None
     if _last_user_turn_text:
         _user_texts.append((_last_user_turn_at, _last_user_turn_text))
         del _user_texts[:-50]
@@ -638,6 +644,10 @@ def _with_sample_input(run_command: str, project_dir: Path, spec: dict, log=prin
     except (OSError, ValueError) as exc:
         log(f"ℹ️ Örnek girdi hazırlanamadı ({exc}); program argümansız çalıştırılacak.")
         return run_command
+    _ph = [a for a in args if PLACEHOLDER in a]
+    _non_ph = [a for a in args if PLACEHOLDER not in a]
+    if _ph and len(_non_ph) > 2:
+        args = _ph
     new_args = [a.replace(PLACEHOLDER, str(sample), 1) for a in args]
     new_cmd = " ".join([run_command.strip(), *(_shell_quote(a) for a in new_args)])
     log(f"ℹ️ Görevde girdi klasörü verilmedi; program örnek girdiyle denenecek: {new_cmd}")
@@ -2216,10 +2226,17 @@ def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
                 proc = subprocess.Popen(
                     parts,
                     stdout=out_f, stderr=err_f,
+                    stdin=subprocess.PIPE,
                     cwd=str(project_dir),
                     env=run_env,
                     start_new_session=(os.name != "nt"),
                 )
+                if proc.stdin:
+                    try:
+                        proc.stdin.write(b"\n".join([b"1"] * 30) + b"\n")
+                        proc.stdin.close()
+                    except (BrokenPipeError, OSError):
+                        pass
                 disk_problem = _wait_with_disk_guard(proc, timeout, project_dir, (out_path, err_path))
                 if disk_problem == "timeout":
                     _kill_process_tree(proc)
@@ -4231,6 +4248,8 @@ def _build_project(
     rollbacks = 0
     revert_note = ""
 
+    _prev_out_sig = None
+    _identical_runs = 0
     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
         if attempt > 1:
             _clear_data_outputs(project_dir, expected_outputs)
@@ -4238,6 +4257,16 @@ def _build_project(
         run_started_at = time.time()
         last_output = _run_project(run_command, project_dir, current_timeout)
         log(f"Output preview: {_output_preview(last_output)}")
+        _cur_sig = hash(last_output.strip())
+        if _cur_sig == _prev_out_sig:
+            _identical_runs += 1
+        else:
+            _identical_runs = 0
+        _prev_out_sig = _cur_sig
+        if _identical_runs >= 2 and attempt < MAX_FIX_ATTEMPTS:
+            # Do not exit before the quality/acceptance gates classify the
+            # failure; otherwise the final result loses its failure type.
+            log("[DevAgent] Uc kez ayni cikti - kalite/kabul sonucu korunarak sonlandırılacak.")
 
         if last_output.startswith("REFUSED:"):
             # Bu bir kod hatasi degil, bir GUVENLIK reddi - self-fix dongusune
@@ -4673,10 +4702,21 @@ def _build_project(
         except Exception as e:
             log(f"Fix step failed: {e}")
 
-    msg = (
-        f"I couldn't fully fix '{proj_name}' after {MAX_FIX_ATTEMPTS} attempts, sir. "
-        f"Project is saved at {project_dir} — open it in VSCode and check manually."
-    )
+    if last_output.startswith("QUALITY GATE FAILED"):
+        msg = (
+            f"QUALITY GATE FAILED: '{proj_name}' after {MAX_FIX_ATTEMPTS} attempts. "
+            f"Project is saved at {project_dir} — automatic success was not reported."
+        )
+    elif last_output.startswith("ACCEPTANCE TEST FAILED"):
+        msg = (
+            f"ACCEPTANCE TEST FAILED: '{proj_name}' after {MAX_FIX_ATTEMPTS} attempts. "
+            f"Project is saved at {project_dir} — automatic success was not reported."
+        )
+    else:
+        msg = (
+            f"I couldn't fully fix '{proj_name}' after {MAX_FIX_ATTEMPTS} attempts, sir. "
+            f"Project is saved at {project_dir} — open it in VSCode and check manually."
+        )
     if speak: speak(msg)
     return f"{msg}\n\nLast error:\n{last_output[:600]}"
 

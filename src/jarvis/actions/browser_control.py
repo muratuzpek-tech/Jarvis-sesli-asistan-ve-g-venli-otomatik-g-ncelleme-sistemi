@@ -4,12 +4,12 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import os
+import re
 import platform
 import shutil
 import subprocess
 import threading
 from pathlib import Path
-import re
 
 from playwright.async_api import (
     async_playwright,
