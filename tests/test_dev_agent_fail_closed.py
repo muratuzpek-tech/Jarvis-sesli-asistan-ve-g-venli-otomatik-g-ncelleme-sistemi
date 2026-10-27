@@ -1,8 +1,6 @@
 """Dev Agent syntax ve kalite kapısı fail-closed regresyon testleri."""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import pytest
 
