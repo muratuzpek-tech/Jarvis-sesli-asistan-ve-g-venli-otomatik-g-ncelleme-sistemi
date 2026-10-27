@@ -1,0 +1,49 @@
+name: Repo Doctor — Türkçe Denetim Raporu
+
+on:
+  push:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-doctor-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Repo Doctor denetimi
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Depoyu al
+        uses: actions/checkout@v4
+
+      - name: Python 3.12 kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Proje ve geliştirme bağımlılıklarını yükle
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Türkçe denetim raporunu oluştur
+        run: |
+          python scripts/repo_doctor.py . --output .audit/report.md
+
+      - name: Denetim raporunu sakla
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-doctor-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .audit/report.md
+          if-no-files-found: warn
+          retention-days: 14
